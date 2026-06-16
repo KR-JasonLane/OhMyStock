@@ -2,6 +2,9 @@
 
 Guidance for Claude (and any AI/human contributor) working in this repository.
 
+> **▶ Resuming work?** Read **`docs/STATUS.md`** first — it is the live resume point
+> (current position in the workflow + next action + decision log).
+
 ## 1. What this project is
 
 **OhMyStock** is an automated **Korean stock** trading system. It collects market
