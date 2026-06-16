@@ -1,87 +1,80 @@
-# STATUS — Resume Point
+# STATUS — 재개 지점 (Resume Point)
 
-> **This is the single source of truth for "where are we and what's next".**
-> Read this first when resuming in a new session. Keep it updated at the end of
-> every work session (it is the handoff document).
+> **이 문서는 "지금 어디까지 했고, 다음에 뭘 해야 하는가"의 단일 출처입니다.**
+> 새 세션에서 재개할 때 이 문서를 가장 먼저 읽으세요. 매 작업 세션이 끝날 때마다
+> 이 문서를 갱신합니다(핸드오프 문서).
 
-- **Last updated:** 2026-06-16
-- **Project:** OhMyStock — automated Korean stock trading system
-
----
-
-## ▶ Resume here (next action)
-
-**Brainstorming for Phase 0 is complete. The design spec is written and committed,
-and is currently AWAITING USER REVIEW.**
-
-- If the user has approved the spec → invoke the **`writing-plans`** skill to produce
-  the Phase 0 implementation plan in `docs/plans/`.
-- If the user wants spec changes → edit
-  `docs/specs/2026-06-16-phase0-walking-skeleton-design.md`, re-run the spec
-  self-review, then re-ask for approval.
-
-To resume in a new session, tell Claude:
-> "Read docs/STATUS.md and continue from the resume point."
+- **최종 수정:** 2026-06-16
+- **프로젝트:** OhMyStock — 한국 주식 자동매매 시스템
 
 ---
 
-## Where we are in the workflow
+## ▶ 여기서 재개 (다음 액션)
+
+**Phase 0 브레인스토밍 완료. 설계 spec 작성·커밋됨, 현재 사용자 검토 대기 중.**
+
+- 사용자가 spec을 승인하면 → **`writing-plans`** 스킬을 실행해 `docs/plans/`에 Phase 0
+  구현 계획서를 작성한다.
+- 사용자가 수정을 원하면 → `docs/specs/2026-06-16-phase0-walking-skeleton-design.md`를
+  수정하고, spec 셀프리뷰를 다시 돌린 뒤 재승인을 요청한다.
+
+새 세션에서 재개하려면 Claude에게 이렇게 말하세요:
+> "`docs/STATUS.md` 읽고 재개 지점부터 계속해."
+
+---
+
+## 워크플로 진행 상황
 
 ```
-[x] Brainstorming: asset class, brokerage, architecture, DB, container boundary
-[x] Phase 0 design spec written + committed (awaiting user review)
-[ ] writing-plans: Phase 0 implementation plan        <-- NEXT
-[ ] Implement Phase 0 (walking skeleton)
-[ ] Phase 0 retrospective
-[ ] Phase 1: Kiwoom broker adapter (mock)
-... Phases 2-8 (see CLAUDE.md roadmap)
+[x] 브레인스토밍: 자산군, 브로커, 아키텍처, DB, 컨테이너 경계
+[x] Phase 0 설계 spec 작성 + 커밋 (사용자 검토 대기)
+[ ] writing-plans: Phase 0 구현 계획서          <-- 다음
+[ ] Phase 0 구현 (워킹 스켈레톤)
+[ ] Phase 0 회고록
+[ ] Phase 1: 키움 브로커 어댑터 (모의투자)
+... Phase 2~8 (CLAUDE.md 로드맵 참고)
 ```
 
-## Decision log (what was decided and why)
+## 결정 로그 (무엇을, 왜 정했나)
 
-| # | Decision | Why | Recorded in |
+| # | 결정 | 이유 | 기록 위치 |
 |---|---|---|---|
-| 1 | **Korean stocks**, not crypto | Upbit is a crypto exchange and cannot trade stocks (fact-check) | CLAUDE.md §1 |
-| 2 | Brokerage = **Kiwoom REST API** (new) | Cross-platform REST; legacy OpenAPI+ is Windows-only OCX, incompatible with Electron | CLAUDE.md §5 |
-| 3 | Architecture **A**: containerized FastAPI backend + host-native Electron UI | Single-language AI/quant/telegram stack; engine survives UI being closed | CLAUDE.md §3 |
-| 4 | Container boundary: backend + DB in docker-compose; **Electron on host** | Electron is a desktop GUI; not viable in a container (esp. Windows) | CLAUDE.md §3 |
-| 5 | Database = **PostgreSQL** (plain) | Concurrent multi-service access; TimescaleDB can be added later | CLAUDE.md §3 |
-| 6 | **Mock-first** (`mockapi.kiwoom.com`) | Safety: never build/test auto-trading against real money first | CLAUDE.md §4 |
-| 7 | First sub-project = **Phase 0 walking skeleton** | De-risk architecture end-to-end before feature work | docs/specs/2026-06-16-phase0-walking-skeleton-design.md |
+| 1 | **한국 주식** (암호화폐 아님) | Upbit은 암호화폐 거래소라 주식 매매 불가 (팩트체크) | CLAUDE.md §1 |
+| 2 | 브로커 = **키움 REST API** (신) | 크로스플랫폼 REST. 구 OpenAPI+는 Windows 전용 OCX라 Electron과 비호환 | CLAUDE.md §5 |
+| 3 | 아키텍처 **A**: 컨테이너 FastAPI 백엔드 + 호스트 네이티브 Electron UI | AI/퀀트/텔레그램 단일 언어 통합. 엔진이 UI 종료와 무관하게 생존 | CLAUDE.md §3 |
+| 4 | 컨테이너 경계: 백엔드+DB는 docker-compose, **Electron은 호스트** | Electron은 데스크톱 GUI라 컨테이너 부적합(특히 Windows) | CLAUDE.md §3 |
+| 5 | DB = **PostgreSQL** (순수) | 멀티서비스 동시 접근. TimescaleDB는 추후 추가 가능 | CLAUDE.md §3 |
+| 6 | **모의투자 우선** (`mockapi.kiwoom.com`) | 안전: 자동매매를 실전 자금으로 먼저 만들지 않는다 | CLAUDE.md §4 |
+| 7 | 첫 서브프로젝트 = **Phase 0 워킹 스켈레톤** | 기능 구현 전에 아키텍처를 end-to-end로 검증 | docs/specs/2026-06-16-phase0-walking-skeleton-design.md |
+| 8 | 문서는 **한국어**로 작성 (CLAUDE.md만 영어) | 사용자 지시. CLAUDE.md는 규칙 6에 따라 영어 유지 | CLAUDE.md §2-1 |
 
-## Verified facts that constrain later design (re-verify before relying)
+## 후속 설계를 제약하는 검증된 팩트 (사용 전 재확인)
 
-- Kiwoom REST has **no native TP/SL/Stop** → must be implemented **client-side**
-  (Phase 5).
-- Rate limit **~1 req/s per TR** (not global) → all-symbol candle collection is an
-  **overnight batch** (Phase 2).
-- Auth token expires → reissue logic needed (Phase 1).
-- Full details + sources in `CLAUDE.md` §5.
+- 키움 REST에는 **네이티브 TP/SL/Stop이 없음** → **클라이언트측 구현** 필수 (Phase 5).
+- 레이트리밋 **TR당 ~1 req/s** (전역 아님) → 전종목 봉 수집은 **야간 배치** (Phase 2).
+- 인증 토큰 만료 → 재발급 로직 필요 (Phase 1).
+- 상세·출처는 `CLAUDE.md` §5 참고.
 
-## Open prerequisites (user action, needed for Phase 1 — not Phase 0)
+## 미해결 선행조건 (사용자 작업, Phase 1에 필요 — Phase 0엔 불필요)
 
-- Register at `openapi.kiwoom.com`, obtain **app key / secret**, apply for **mock
-  trading**.
+- `openapi.kiwoom.com` 가입, **app key / secret** 발급, **모의투자** 신청.
 
-## Document index
+## 문서 인덱스
 
-| Path | Purpose |
+| 경로 | 용도 |
 |---|---|
-| `CLAUDE.md` | Rules, architecture, verified API facts, roadmap (auto-loaded each session) |
-| `docs/STATUS.md` | This file — resume point + decision log |
-| `docs/specs/2026-06-16-phase0-walking-skeleton-design.md` | Phase 0 design spec |
-| `docs/architecture/system-overview.md` | Master blueprint (created during Phase 0 impl — not yet present) |
-| `docs/plans/` | Implementation plans (Phase 0 plan = next deliverable) |
-| `docs/retrospectives/` | Per-task retrospectives (rule 4) |
+| `CLAUDE.md` | 규칙·아키텍처·검증된 API 팩트·로드맵 (매 세션 자동 로드, 영어) |
+| `docs/STATUS.md` | 이 문서 — 재개 지점 + 결정 로그 |
+| `docs/specs/2026-06-16-phase0-walking-skeleton-design.md` | Phase 0 설계 spec |
+| `docs/architecture/system-overview.md` | 마스터 청사진 (Phase 0 구현 시 생성 — 아직 없음) |
+| `docs/plans/` | 구현 계획서 (Phase 0 계획서 = 다음 산출물) |
+| `docs/retrospectives/` | 작업별 회고록 (규칙 4) |
 
-## How session continuity works here
+## 세션 연속성 작동 방식
 
-1. **CLAUDE.md** is auto-loaded by Claude Code in every new session and points to
-   this file.
-2. **This file (`docs/STATUS.md`)** is the human/AI-readable resume point — always
-   updated last before ending a session.
-3. Everything is committed to **git**, so the state survives across sessions and
-   machines.
-4. (Optional, complementary) `claude --resume` / `claude --continue` can reopen the
-   actual prior conversation, but the docs above are the durable, version-controlled
-   source of truth.
+1. **CLAUDE.md**는 새 세션에서 Claude Code가 자동 로드하며 이 문서를 가리킨다.
+2. **이 문서(`docs/STATUS.md`)**가 사람/AI가 읽는 재개 지점이며, 세션 종료 전 항상
+   마지막으로 갱신한다.
+3. 모든 것이 **git**에 커밋되어 세션·기기 간에 상태가 보존된다.
+4. (보조) `claude --resume` / `claude --continue`로 이전 대화 자체를 다시 열 수 있으나,
+   위 문서들이 버전관리되는 견고한 단일 출처다.

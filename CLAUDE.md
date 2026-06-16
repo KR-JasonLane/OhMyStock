@@ -24,7 +24,8 @@ updated whenever the user introduces a new rule or changes direction.
 1. **Document-driven & versioned.** Every unit of work is grounded in a document. If
    a suitable folder does not exist, create it and keep the document under version
    control. Plans go in `docs/plans/`, design specs in `docs/specs/`, the master
-   architecture in `docs/architecture/`.
+   architecture in `docs/architecture/`. **All documents are written in Korean**,
+   except this `CLAUDE.md`, which stays in English (rule 6).
 2. **Readable, maintainable code.** No "make-it-work-for-now" code (e.g. deep `if`
    nesting). Always design for maintenance and extension — favor clear abstractions,
    well-bounded modules, and explicit interfaces (see Architecture).
