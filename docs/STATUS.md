@@ -4,19 +4,18 @@
 > 새 세션에서 재개할 때 이 문서를 가장 먼저 읽으세요. 매 작업 세션이 끝날 때마다
 > 이 문서를 갱신합니다(핸드오프 문서).
 
-- **최종 수정:** 2026-06-16
+- **최종 수정:** 2026-07-14
 - **프로젝트:** OhMyStock — 한국 주식 자동매매 시스템
 
 ---
 
 ## ▶ 여기서 재개 (다음 액션)
 
-**Phase 0 브레인스토밍 완료. 설계 spec 작성·커밋됨, 현재 사용자 검토 대기 중.**
+**Phase 0 spec 승인됨(2026-07-14). 구현 계획서 작성·커밋 완료. 다음은 계획서 실행.**
 
-- 사용자가 spec을 승인하면 → **`writing-plans`** 스킬을 실행해 `docs/plans/`에 Phase 0
-  구현 계획서를 작성한다.
-- 사용자가 수정을 원하면 → `docs/specs/2026-06-16-phase0-walking-skeleton-design.md`를
-  수정하고, spec 셀프리뷰를 다시 돌린 뒤 재승인을 요청한다.
+- 계획서: `docs/plans/2026-07-14-phase0-walking-skeleton-plan.md` (Task 1~10, TDD)
+- 실행 방식(서브에이전트 vs 인라인)은 사용자 선택 대기 중. 선택되면
+  **`subagent-driven-development`** 또는 **`executing-plans`** 스킬로 태스크 단위 실행.
 
 새 세션에서 재개하려면 Claude에게 이렇게 말하세요:
 > "`docs/STATUS.md` 읽고 재개 지점부터 계속해."
@@ -27,9 +26,9 @@
 
 ```
 [x] 브레인스토밍: 자산군, 브로커, 아키텍처, DB, 컨테이너 경계
-[x] Phase 0 설계 spec 작성 + 커밋 (사용자 검토 대기)
-[ ] writing-plans: Phase 0 구현 계획서          <-- 다음
-[ ] Phase 0 구현 (워킹 스켈레톤)
+[x] Phase 0 설계 spec 작성 + 커밋 + 사용자 승인 (2026-07-14)
+[x] writing-plans: Phase 0 구현 계획서 (docs/plans/2026-07-14-phase0-walking-skeleton-plan.md)
+[ ] Phase 0 구현 (워킹 스켈레톤)                <-- 다음
 [ ] Phase 0 회고록
 [ ] Phase 1: 키움 브로커 어댑터 (모의투자)
 ... Phase 2~8 (CLAUDE.md 로드맵 참고)
@@ -67,7 +66,7 @@
 | `docs/STATUS.md` | 이 문서 — 재개 지점 + 결정 로그 |
 | `docs/specs/2026-06-16-phase0-walking-skeleton-design.md` | Phase 0 설계 spec |
 | `docs/architecture/system-overview.md` | 마스터 청사진 (Phase 0 구현 시 생성 — 아직 없음) |
-| `docs/plans/` | 구현 계획서 (Phase 0 계획서 = 다음 산출물) |
+| `docs/plans/2026-07-14-phase0-walking-skeleton-plan.md` | Phase 0 구현 계획서 (Task 1~10) |
 | `docs/retrospectives/` | 작업별 회고록 (규칙 4) |
 
 ## 세션 연속성 작동 방식
