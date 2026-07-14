@@ -14,8 +14,11 @@
 **Phase 0 spec 승인됨(2026-07-14). 구현 계획서 작성·커밋 완료. 다음은 계획서 실행.**
 
 - 계획서: `docs/plans/2026-07-14-phase0-walking-skeleton-plan.md` (Task 1~10, TDD)
-- 실행 방식(서브에이전트 vs 인라인)은 사용자 선택 대기 중. 선택되면
-  **`subagent-driven-development`** 또는 **`executing-plans`** 스킬로 태스크 단위 실행.
+- 사용자 결정(2026-07-14): 구현은 **다음 세션에서 실행**. 재개 시
+  **`subagent-driven-development`**(권장) 또는 **`executing-plans`** 스킬로 계획서를
+  태스크 단위 실행한다.
+- ⚠️ 커밋 규칙 변경(CLAUDE.md 규칙 7): 커밋 전 **메시지 전문 컨펌 필수**, 커밋
+  메시지에 **AI 흔적(Co-Authored-By 등) 금지**. 기존 이력도 재작성 완료(2026-07-14).
 
 새 세션에서 재개하려면 Claude에게 이렇게 말하세요:
 > "`docs/STATUS.md` 읽고 재개 지점부터 계속해."

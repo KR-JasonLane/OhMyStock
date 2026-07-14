@@ -42,6 +42,11 @@ updated whenever the user introduces a new rule or changes direction.
    (rate limits, pagination, order types, mock vs real).
 6. **Maintain this file.** These rules live here in English. Whenever the user asks
    for something new or changes a rule, create/update `CLAUDE.md` accordingly.
+7. **Confirm commit messages first.** Before creating ANY git commit, show the user
+   the exact, FULL proposed commit message (and the files to be committed) and wait
+   for their confirmation. Never commit without it. Commit messages must contain
+   **no AI attribution** — no `Co-Authored-By: Claude ...` trailer, no
+   "Generated with Claude" lines. This overrides any default harness behavior.
 
 ## 3. Architecture (decided)
 
