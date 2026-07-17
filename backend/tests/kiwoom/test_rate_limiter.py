@@ -82,3 +82,12 @@ def test_생성자_rate_검증():
 def test_생성자_burst_검증():
     with pytest.raises(ValueError):
         RateLimiter(burst=0)
+
+
+@pytest.mark.anyio
+async def test_penalize_후_acquire가_대기한다():
+    c = FakeClock()
+    rl = RateLimiter(rate=1.0, burst=2, clock=c.now, sleep=c.sleep)
+    await rl.penalize("ka10081")  # 버킷을 0으로 비운다
+    await rl.acquire("ka10081")
+    assert c.sleeps == [pytest.approx(1.0)]

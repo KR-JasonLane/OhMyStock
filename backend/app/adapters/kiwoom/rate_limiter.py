@@ -44,3 +44,8 @@ class RateLimiter:
                     return
                 wait = (1.0 - bucket.tokens) / self._rate
             await self._sleep(wait)  # 락 밖 대기 — 다른 TR을 막지 않는다
+
+    async def penalize(self, tr_id: str) -> None:
+        """서버 429 수신 시 로컬 버킷을 비워 즉시 재돌진을 막는다."""
+        async with self._lock:
+            self._buckets[tr_id] = _Bucket(0.0, self._clock())
