@@ -11,12 +11,13 @@
 
 ## ▶ 여기서 재개 (다음 액션)
 
-**Phase 1 브레인스토밍 완료, spec 작성·커밋됨 — 사용자 spec 검토 대기.**
+**Phase 1 spec 승인 + 구현 계획서 작성 완료 — 계획서 실행(Task 1~9) 단계.**
 
 - Phase 1 spec: `docs/specs/2026-07-17-phase1-kiwoom-broker-adapter-design.md`
   (범위: 인증+시세/캔들+계좌 조회. 주문·실시간 WS는 Phase 5로.)
-- 사용자가 spec 승인하면 → `writing-plans`로 구현 계획서 작성 → 태스크별 구현 +
-  **4-에이전트 리뷰 패널**(규칙 8, `.claude/agents/`) 검증.
+- Phase 1 계획서: `docs/plans/2026-07-17-phase1-kiwoom-broker-adapter-plan.md`
+  (Task 1~9, TDD + 라이브 스모크 + 태스크별 **4-에이전트 리뷰 패널** 규칙 8).
+- 키움 공식 문서 확인: 필요 시 브라우저를 띄우면 사용자가 로그인해 주기로 함.
 - 키움 준비 완료: REST app key/secret 발급 + 모의투자 신청 완료 (사용자 확인,
   2026-07-17). 구현 시작 시 사용자가 `.env`에 실키 입력 필요.
 
