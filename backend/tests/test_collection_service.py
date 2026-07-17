@@ -119,12 +119,73 @@ async def test_정상_수집은_전_단계를_완료한다():
 @pytest.mark.anyio
 async def test_재실행은_이미_최신인_종목을_건너뛴다():
     broker, store = FakeBroker(), MemoryStore()
-    svc = CollectionService(broker, store, markets=("kospi",))
+    reference = date(2026, 7, 16)  # FakeBroker가 반환하는 봉 일자와 동일 — 결정론적 기준
+    svc = CollectionService(broker, store, markets=("kospi",),
+                            reference_provider=lambda: reference)
     await svc.run()
     first_calls = len(broker.candle_calls)
     await svc.run()
-    # 두 번째 run: 기준일 확보 전 첫 종목 1건만 재조회, 나머지는 스킵
-    assert len(broker.candle_calls) <= first_calls + 1
+    # 두 번째 run: 전 종목의 최신 봉 일자가 기준일과 같거나 늦으므로 전부 스킵된다.
+    assert len(broker.candle_calls) == first_calls
+
+
+@pytest.mark.anyio
+async def test_첫_종목이_낡은_봉만_반환해도_기준일이_오염되지_않는다():
+    """A1 회귀 테스트. 과거 구현은 '이번 런 첫 성공 종목의 최신 봉 일자'를
+    스킵 기준(reference_date)으로 삼았다 — 그 종목이 장기 거래정지라 낡은
+    봉만 돌려주면 기준일 자체가 낡아져, 실제로는 갱신이 필요한 다른 종목까지
+    "이미 최신"으로 오판해 영구 스킵되는 결함이 있었다. 지금은 달력 기준
+    (reference_provider)을 쓰므로 첫 종목의 응답 내용과 무관하다."""
+    class StaleFirstBroker(FakeBroker):
+        async def get_daily_candles(self, symbol, count):
+            self.candle_calls.append(symbol)
+            if symbol == "000660":  # list_symbols 정렬상 첫 종목 — 거래정지 모사
+                return [Candle(symbol=symbol, date=date(2026, 6, 17), open=1,
+                               high=2, low=1, close=2, volume=10)]
+            return [Candle(symbol=symbol, date=date(2026, 7, 16), open=1,
+                           high=2, low=1, close=2, volume=10)]
+
+    broker = StaleFirstBroker(symbols=("005930", "000660"))
+    store = MemoryStore()
+    store.instruments["005930"] = Instrument(symbol="005930", name="삼성전자",
+                                             market="kospi", instrument_type="보통주")
+    store.instruments["000660"] = Instrument(symbol="000660", name="SK하이닉스",
+                                             market="kospi", instrument_type="보통주")
+    # 005930은 이틀 전 봉까지만 저장돼 있어 기준일(오늘)보다 낡다 — 재수집 대상.
+    store.candles["005930"] = [Candle(symbol="005930", date=date(2026, 7, 15),
+                                      open=1, high=2, low=1, close=2, volume=10)]
+
+    svc = CollectionService(broker, store, markets=("kospi",),
+                            reference_provider=lambda: date(2026, 7, 17))
+    await svc.run()
+
+    # 첫 종목(000660)이 30일 낡은 봉만 반환했어도 005930은 스킵되지 않고
+    # 실제로 재조회됐다 — 옛 구현이라면 000660의 낡은 응답이 기준일을
+    # 오염시켜 005930이 "이미 최신"으로 오판돼 스킵됐을 것이다.
+    assert "005930" in broker.candle_calls
+
+
+@pytest.mark.anyio
+async def test_공휴일_시나리오에서는_전_종목이_재수집된다():
+    """reference_provider(달력 기준 근사)가 공휴일 등으로 실제 최신 거래일보다
+    늦은 날짜를 반환해도, 전 종목의 저장된 최신 봉이 그 기준보다 낡으면
+    스킵 없이 전부 재수집된다 — 결함이 아니라 멱등이라 안전(A1 문서화 그대로)."""
+    broker, store = FakeBroker(), MemoryStore()
+    store.instruments["005930"] = Instrument(symbol="005930", name="삼성전자",
+                                             market="kospi", instrument_type="보통주")
+    store.instruments["000660"] = Instrument(symbol="000660", name="SK하이닉스",
+                                             market="kospi", instrument_type="보통주")
+    day_before_yesterday = date(2026, 7, 15)
+    yesterday = date(2026, 7, 16)
+    for symbol in ("005930", "000660"):
+        store.candles[symbol] = [Candle(symbol=symbol, date=day_before_yesterday,
+                                        open=1, high=2, low=1, close=2, volume=10)]
+
+    svc = CollectionService(broker, store, markets=("kospi",),
+                            reference_provider=lambda: yesterday)
+    await svc.run()
+
+    assert set(broker.candle_calls) == {"005930", "000660"}  # 스킵 0건
 
 
 @pytest.mark.anyio

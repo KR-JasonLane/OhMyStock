@@ -4,9 +4,11 @@ Store 호출은 동기이므로 asyncio.to_thread로 이벤트 루프를 막지 
 import asyncio
 import logging
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date
 
+from app.core.market_calendar import previous_weekday
 from app.domain.broker import BrokerPort
 from app.domain.errors import AuthError, BrokerError, RateLimitError
 
@@ -61,8 +63,19 @@ class CollectionService:
     def __init__(self, broker: BrokerPort, store,
                  markets: tuple[str, ...] = ("kospi", "kosdaq", "etf"),
                  candle_count: int = 600,
-                 max_consecutive_failures: int = 20) -> None:
+                 max_consecutive_failures: int = 20,
+                 reference_provider: Callable[[], date] | None = None) -> None:
         """markets: 수집 대상 시장 목록.
+
+        reference_provider: candles 단계에서 스킵 판단에 쓸 기준일을 반환하는
+        콜러블 (기본 `previous_weekday` — 휴장일 캘린더 없는 근사, 공휴일에는
+        늦은 날짜를 반환할 수 있어 스킵이 풀리고 재수집되지만 멱등이라 안전).
+        런 시작 시 1회만 호출해 고정한다. 과거에는 "이번 런에서 처음 성공한
+        종목의 최신 봉 일자"를 러닝 앵커로 삼았는데, 그 첫 종목이 장기
+        거래정지 등으로 낡은 봉만 반환하면 기준일 자체가 낡은 채 고정되어
+        이후 전 종목이 영구 스킵되는 결함이 있었다 — 달력 기준은 특정 종목의
+        조회 결과와 무관하므로 이 결함이 없다. 테스트에서는 결정론적 고정
+        날짜를 주입한다.
 
         계약: 상장폐지 반영(`store.deactivate_missing`)은 `markets`가 전체 시장
         집합(`{"kospi", "kosdaq", "etf"}`)과 정확히 일치하고, 모든 시장에서 1건
@@ -75,6 +88,7 @@ class CollectionService:
         self._markets = markets
         self._candle_count = candle_count
         self._max_consec = max_consecutive_failures
+        self._reference_provider = reference_provider or previous_weekday
         self._running = False
         self._progress: CollectionProgress | None = None
         self._warning: str | None = None
@@ -117,9 +131,10 @@ class CollectionService:
         """전체 수집 파이프라인을 실행한다 (instruments → sectors → candles).
 
         정규장(09:00-15:30 KST) 종료 후 실행해야 한다 — 장중 실행 시 미확정
-        당일 봉이 저장되고, latest_candle_date 기반 스킵 로직이 이 미확정 봉을
-        "이미 최신"으로 오판해 고착시킬 수 있다. 실행 시각 강제는 이 서비스의
-        책임이 아니라 Phase 6 스케줄러가 진다 (거래일 캘린더가 필요하기 때문).
+        당일 봉이 저장되고, `latest_candle_dates` 기반 달력 스킵 로직이 이
+        미확정 봉을 "이미 최신"으로 오판해 고착시킬 수 있다. 실행 시각 강제는
+        이 서비스의 책임이 아니라 Phase 6 스케줄러가 진다 (거래일 캘린더가
+        필요하기 때문).
         """
         run_id = await asyncio.to_thread(self._store.create_run)
         succeeded = failed = total = 0
@@ -164,15 +179,11 @@ class CollectionService:
             symbols = await asyncio.to_thread(self._store.list_symbols)
             total = len(symbols)
             latest_dates = await asyncio.to_thread(self._store.latest_candle_dates)
-            reference_date: date | None = None
+            reference = self._reference_provider()
             consecutive = 0
             for i, symbol in enumerate(symbols, start=1):
                 latest = latest_dates.get(symbol)
-                # reference_date가 아직 없다면(런 시작 직후) 스킵하지 않고 실제
-                # 조회한다 — 이번 런에서 최소 1건은 조회해야 reference_date가
-                # 확정되어 이후 종목들의 스킵 판단 기준이 생긴다.
-                if (reference_date is not None and latest is not None
-                        and latest >= reference_date):
+                if latest is not None and latest >= reference:
                     succeeded += 1
                 else:
                     try:
@@ -192,8 +203,6 @@ class CollectionService:
                         consecutive = 0
                         if candles:
                             await asyncio.to_thread(self._store.upsert_candles, candles)
-                            if reference_date is None:
-                                reference_date = max(c.date for c in candles)
                         succeeded += 1
                 self._set(run_id, "running", "candles", i, total, failed)
 

@@ -85,12 +85,14 @@ class CollectionStore:
             _upsert(session, CandleRow, rows, ["symbol", "date"])
 
     def latest_candle_date(self, symbol: str) -> date | None:
-        """종목의 최신 봉 일자. 수집 서비스의 '이번 런 스킵' 판단 전용.
+        """종목의 최신 봉 일자. 단건 조회 — 벌크 경로는 `latest_candle_dates` 참고.
 
-        불변식: 수집은 항상 고정 윈도우(600봉) 전체를 재수집해 upsert한다 —
-        이 값을 '이후만 증분 수집'하는 커서로 오용하면, 예외 없이 부분 반환된
-        런의 중간 구멍이 영구화된다 (자가치유 특성 상실). 증분 수집으로 바꾸려면
-        갭 탐지부터 추가할 것.
+        불변식: 수집은 항상 고정 윈도우(600봉) 전체를 재수집해 upsert하고,
+        스킵 여부는 이 날짜를 달력 기준일(`market_calendar.previous_weekday`,
+        `CollectionService.reference_provider`)과 비교해서만 판단한다 — 이
+        값 자체를 '이후만 증분 수집'하는 커서로 오용하면, 예외 없이 부분
+        반환된 런의 중간 구멍이 영구화된다 (자가치유 특성 상실). 증분 수집으로
+        바꾸려면 갭 탐지부터 추가할 것.
         """
         with self._sessions() as session:
             return session.scalar(select(func.max(CandleRow.date))
@@ -100,7 +102,9 @@ class CollectionStore:
         """전 종목 최신 봉 일자 일괄 조회 — 단일 GROUP BY 쿼리.
 
         수집 서비스가 종목마다 latest_candle_date를 왕복 호출(N+1)하지 않도록
-        런 시작 시 1회 호출해 dict로 조회하는 용도.
+        candles 단계 시작 시 1회 호출해 dict로 조회하고, 러닝 중 1회 고정한
+        달력 기준일과 종목별로 비교해 스킵을 판단하는 용도 (`CollectionService`
+        참고). 위 `latest_candle_date`와 동일한 불변식 — 증분 커서로 쓰지 말 것.
         """
         with self._sessions() as session:
             rows = session.execute(
