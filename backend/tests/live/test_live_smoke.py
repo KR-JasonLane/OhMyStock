@@ -19,7 +19,7 @@ import pytest
 from app.adapters.kiwoom.auth import KST, TokenManager
 from app.adapters.kiwoom.broker import KiwoomBroker
 from app.adapters.kiwoom.client import KiwoomHttpClient
-from app.adapters.kiwoom.errors import RateLimitError
+from app.domain.errors import RateLimitError
 from app.core.config import Settings
 
 pytestmark = pytest.mark.live
@@ -39,11 +39,6 @@ async def _retry_on_token_rate_limit(fn: Callable[[], Awaitable[T]]) -> T:
                 raise
             await asyncio.sleep(delay)
     raise AssertionError("unreachable")
-
-
-@pytest.fixture
-def anyio_backend():
-    return "asyncio"
 
 
 @pytest.fixture

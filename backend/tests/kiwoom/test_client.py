@@ -3,7 +3,7 @@ import pytest
 import respx
 
 from app.adapters.kiwoom.client import KiwoomHttpClient
-from app.adapters.kiwoom.errors import ApiError, AuthError, BrokerError, RateLimitError
+from app.domain.errors import ApiError, AuthError, BrokerError, RateLimitError
 from app.core.config import Settings
 
 BASE = "https://mockapi.kiwoom.com"

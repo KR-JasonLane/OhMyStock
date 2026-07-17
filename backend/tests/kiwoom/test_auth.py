@@ -5,7 +5,7 @@ import pytest
 import respx
 
 from app.adapters.kiwoom.auth import KST, TokenManager
-from app.adapters.kiwoom.errors import AuthError, RateLimitError
+from app.domain.errors import AuthError, RateLimitError
 
 BASE = "https://mockapi.kiwoom.com"
 
@@ -90,7 +90,11 @@ async def test_네트워크_오류시_AuthError():
 async def test_429는_RateLimitError():
     now = datetime(2026, 7, 17, 9, 0, 0, tzinfo=KST)
     respx.post(f"{BASE}/oauth2/token").respond(status_code=429)
-    tm, http = _manager(now)
+
+    async def noop(_: float) -> None: ...
+
+    http = httpx.AsyncClient(base_url=BASE)
+    tm = TokenManager(http, app_key="AK", secret_key="SK", now=lambda: now, sleep=noop)
     with pytest.raises(RateLimitError):
         await tm.get_token()
     await http.aclose()
@@ -136,4 +140,58 @@ async def test_revoke는_서버에_폐기를_요청하고_캐시를_비운다():
     assert revoke_route.call_count == 1
     await tm.get_token()                 # 캐시가 비워졌으므로 재발급
     assert token_route.call_count == 2
+    await http.aclose()
+
+
+@pytest.mark.anyio
+@respx.mock
+async def test_expires_dt가_비정상이면_AuthError():
+    now = datetime(2026, 7, 17, 9, 0, 0, tzinfo=KST)
+    respx.post(f"{BASE}/oauth2/token").respond(
+        json={"token": "TOK", "token_type": "bearer", "expires_dt": "not-a-date",
+              "return_code": 0, "return_msg": "ok"})
+    tm, http = _manager(now)
+    with pytest.raises(AuthError):
+        await tm.get_token()
+    await http.aclose()
+
+
+@pytest.mark.anyio
+@respx.mock
+async def test_토큰발급_429는_백오프_재시도_후_성공한다():
+    now = datetime(2026, 7, 17, 9, 0, 0, tzinfo=KST)
+    route = respx.post(f"{BASE}/oauth2/token")
+    route.side_effect = [
+        httpx.Response(429),
+        httpx.Response(200, json=_token_response("TOK1", "20260717235959")),
+    ]
+    sleeps: list[float] = []
+
+    async def record_sleep(s: float) -> None:
+        sleeps.append(s)
+
+    http = httpx.AsyncClient(base_url=BASE)
+    tm = TokenManager(http, app_key="AK", secret_key="SK", now=lambda: now,
+                      sleep=record_sleep)
+    assert await tm.get_token() == "TOK1"
+    assert sleeps == [1.0]
+    await http.aclose()
+
+
+@pytest.mark.anyio
+@respx.mock
+async def test_토큰발급_429가_반복되면_RateLimitError():
+    now = datetime(2026, 7, 17, 9, 0, 0, tzinfo=KST)
+    respx.post(f"{BASE}/oauth2/token").respond(429)
+    sleeps: list[float] = []
+
+    async def record_sleep(s: float) -> None:
+        sleeps.append(s)
+
+    http = httpx.AsyncClient(base_url=BASE)
+    tm = TokenManager(http, app_key="AK", secret_key="SK", now=lambda: now,
+                      sleep=record_sleep)
+    with pytest.raises(RateLimitError):
+        await tm.get_token()
+    assert sleeps == [1.0, 2.0, 4.0]
     await http.aclose()

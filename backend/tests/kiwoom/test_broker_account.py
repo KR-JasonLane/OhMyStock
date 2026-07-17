@@ -3,7 +3,7 @@ import respx
 
 from app.adapters.kiwoom.broker import KiwoomBroker
 from app.adapters.kiwoom.client import KiwoomHttpClient
-from app.adapters.kiwoom.errors import BrokerError
+from app.domain.errors import BrokerError
 from app.core.config import Settings
 
 BASE = "https://mockapi.kiwoom.com"

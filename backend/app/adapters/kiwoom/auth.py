@@ -2,18 +2,20 @@
 
 import asyncio
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import httpx
 
-from app.adapters.kiwoom.errors import AuthError, RateLimitError
+from app.adapters.kiwoom.rate_limiter import RateLimiter
+from app.domain.errors import AuthError, RateLimitError
 
 logger = logging.getLogger(__name__)
 
 KST = ZoneInfo("Asia/Seoul")
 _EXPIRES_FMT = "%Y%m%d%H%M%S"  # 키움 expires_dt: 절대 만료시각(KST)
+BACKOFF_SECONDS = (1.0, 2.0, 4.0)  # 429 재시도 간격 (지수) — client.py와 공유하는 단일 출처
 
 
 class TokenManager:
@@ -24,12 +26,16 @@ class TokenManager:
         secret_key: str,
         margin_seconds: int = 60,
         now: Callable[[], datetime] | None = None,
+        sleep: Callable[[float], Awaitable[None]] | None = None,
+        limiter: RateLimiter | None = None,
     ) -> None:
         self._http = http
         self._app_key = app_key
         self._secret_key = secret_key
         self._margin = timedelta(seconds=margin_seconds)
         self._now = now or (lambda: datetime.now(KST))
+        self._sleep = sleep or asyncio.sleep
+        self._limiter = limiter
         self._token: str | None = None
         self._expires_at: datetime | None = None
         self._lock = asyncio.Lock()
@@ -73,32 +79,44 @@ class TokenManager:
         return self._expires_at is None or self._now() >= self._expires_at - self._margin
 
     async def _issue(self) -> None:
-        try:
-            resp = await self._http.post(
-                "/oauth2/token",
-                json={"grant_type": "client_credentials",
-                      "appkey": self._app_key, "secretkey": self._secret_key},
-            )
-        except httpx.HTTPError as exc:
-            raise AuthError(f"token issue failed: network {type(exc).__name__}") from exc
-
-        if resp.status_code == 429:
-            raise RateLimitError("token issue rate limited")
-
+        if self._limiter is not None:
+            await self._limiter.acquire("oauth2/token")
+        backoff_idx = 0
+        while True:
+            try:
+                resp = await self._http.post(
+                    "/oauth2/token",
+                    json={"grant_type": "client_credentials",
+                          "appkey": self._app_key, "secretkey": self._secret_key},
+                )
+            except httpx.HTTPError as exc:
+                raise AuthError(
+                    f"token issue failed: network {type(exc).__name__}") from exc
+            if resp.status_code == 429:
+                if backoff_idx >= len(BACKOFF_SECONDS):
+                    raise RateLimitError("token issue rate limited")
+                wait = BACKOFF_SECONDS[backoff_idx]
+                backoff_idx += 1
+                logger.warning("kiwoom 429 on token issue — backoff %.1fs", wait)
+                await self._sleep(wait)
+                continue
+            break
         try:
             data = resp.json()
-        except ValueError:
+        except ValueError as exc:
             raise AuthError(
-                f"token issue failed: non-json response http={resp.status_code}"
-            ) from None
-
+                f"token issue failed: non-json response http={resp.status_code}") from exc
         if resp.status_code != 200 or data.get("return_code") != 0 or not data.get("token"):
-            # 시크릿/토큰은 메시지에 넣지 않는다
             raise AuthError(
                 f"token issue failed: http={resp.status_code} "
                 f"code={data.get('return_code')} msg={data.get('return_msg')}"
             )
+        try:
+            expires_at = datetime.strptime(
+                data["expires_dt"], _EXPIRES_FMT).replace(tzinfo=KST)
+        except (KeyError, ValueError) as exc:
+            raise AuthError(
+                f"token issue failed: bad expires_dt ({type(exc).__name__})") from exc
         self._token = data["token"]
-        self._expires_at = datetime.strptime(
-            data["expires_dt"], _EXPIRES_FMT).replace(tzinfo=KST)
+        self._expires_at = expires_at
         logger.info("kiwoom token issued, expires_at=%s", self._expires_at.isoformat())

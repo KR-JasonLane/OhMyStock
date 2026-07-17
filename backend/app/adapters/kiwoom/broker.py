@@ -8,8 +8,8 @@ from decimal import Decimal
 
 from app.adapters.kiwoom.auth import KST
 from app.adapters.kiwoom.client import KiwoomHttpClient
-from app.adapters.kiwoom.errors import BrokerError
 from app.domain.broker import Balance, Candle, Deposit, Position, Quote
+from app.domain.errors import BrokerError
 
 
 def _to_int(s: str | None) -> int:

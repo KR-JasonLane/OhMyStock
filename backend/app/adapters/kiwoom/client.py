@@ -8,16 +8,15 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 
 import httpx
 
-from app.adapters.kiwoom.auth import TokenManager
-from app.adapters.kiwoom.errors import ApiError, AuthError, BrokerError, RateLimitError
+from app.adapters.kiwoom.auth import BACKOFF_SECONDS, TokenManager
 from app.adapters.kiwoom.rate_limiter import RateLimiter
 from app.core.config import Settings
+from app.domain.errors import ApiError, AuthError, BrokerError, RateLimitError
 
 logger = logging.getLogger(__name__)
 
 MOCK_BASE = "https://mockapi.kiwoom.com"
 REAL_BASE = "https://api.kiwoom.com"
-_BACKOFF_SECONDS = (1.0, 2.0, 4.0)  # 429 재시도 간격 (지수)
 
 
 class KiwoomHttpClient:
@@ -34,12 +33,13 @@ class KiwoomHttpClient:
         self._owns_http = http is None
         self._owns_tokens = token_manager is None
         self._http = http or httpx.AsyncClient(base_url=base, timeout=10.0)
+        self._limiter = limiter or RateLimiter()
         self._tokens = token_manager or TokenManager(
             self._http,
             settings.kiwoom_app_key.get_secret_value(),
             settings.kiwoom_secret_key.get_secret_value(),
+            limiter=self._limiter,
         )
-        self._limiter = limiter or RateLimiter()
         self._sleep = sleep or asyncio.sleep
 
     async def call(
@@ -73,9 +73,9 @@ class KiwoomHttpClient:
                 continue
             if resp.status_code == 429:
                 await self._limiter.penalize(api_id)  # 서버 backpressure를 로컬 버킷에 반영
-                if backoff_idx >= len(_BACKOFF_SECONDS):
+                if backoff_idx >= len(BACKOFF_SECONDS):
                     raise RateLimitError(f"rate limit exhausted [{api_id}]")
-                wait = _BACKOFF_SECONDS[backoff_idx]
+                wait = BACKOFF_SECONDS[backoff_idx]
                 backoff_idx += 1
                 logger.warning("kiwoom 429 on %s — backoff %.1fs", api_id, wait)
                 await self._sleep(wait)
@@ -109,7 +109,9 @@ class KiwoomHttpClient:
         logger.warning("kiwoom paging stopped at max_pages=%d [%s]", max_pages, api_id)
 
     async def aclose(self) -> None:
-        if self._owns_tokens:
-            await self._tokens.revoke()
-        if self._owns_http:
-            await self._http.aclose()
+        try:
+            if self._owns_tokens:
+                await self._tokens.revoke()
+        finally:
+            if self._owns_http:
+                await self._http.aclose()
