@@ -149,6 +149,43 @@ async def test_401이_재발급_후에도_반복되면_AuthError():
 
 @pytest.mark.anyio
 @respx.mock
+async def test_8005_무효토큰이면_재발급_후_재시도한다():
+    """실측(2026-07-17): 키움은 무효 토큰을 401이 아니라 200 + return_msg의
+    [8005:Token이 유효하지 않습니다]로 알린다 — 401 경로가 아니라 8005 경로가
+    재발급을 트리거해야 한다."""
+    token_route = respx.post(f"{BASE}/oauth2/token").respond(json=TOKEN_JSON)
+    respx.post(f"{BASE}/oauth2/revoke").respond(json={"return_code": 0})
+    tr = respx.post(f"{BASE}/api/dostk/stkinfo")
+    tr.side_effect = [
+        httpx.Response(200, json={
+            "return_code": 3,
+            "return_msg": "인증에 실패했습니다[8005:Token이 유효하지 않습니다]"}),
+        httpx.Response(200, json={"return_code": 0, "stk_nm": "삼성전자"},
+                       headers={"cont-yn": "N", "next-key": ""}),
+    ]
+    c = _client()
+    data, _, _ = await c.call("stkinfo", "ka10001", {"stk_cd": "005930"})
+    assert data["stk_nm"] == "삼성전자"
+    assert token_route.call_count == 2  # 최초 발급 + 재발급
+    await c.aclose()
+
+
+@pytest.mark.anyio
+@respx.mock
+async def test_8005가_반복되면_ApiError():
+    _mock_auth()
+    respx.post(f"{BASE}/api/dostk/stkinfo").respond(
+        json={"return_code": 3,
+              "return_msg": "인증에 실패했습니다[8005:Token이 유효하지 않습니다]"})
+    c = _client()
+    with pytest.raises(ApiError) as ei:
+        await c.call("stkinfo", "ka10001", {"stk_cd": "005930"})
+    assert ei.value.return_code == 3 and ei.value.api_id == "ka10001"
+    await c.aclose()
+
+
+@pytest.mark.anyio
+@respx.mock
 async def test_200_비JSON_응답이면_BrokerError():
     _mock_auth()
     respx.post(f"{BASE}/api/dostk/stkinfo").respond(

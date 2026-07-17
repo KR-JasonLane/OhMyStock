@@ -90,8 +90,16 @@ class KiwoomHttpClient:
                 raise BrokerError(f"kiwoom unexpected response shape [{api_id}]")
             code = data.get("return_code")
             if resp.status_code != 200 or (code is not None and code != 0):
+                msg = str(data.get("return_msg"))
+                if not reissued and "8005" in msg:
+                    # 실측(2026-07-17): 키움은 무효 토큰을 HTTP 401이 아니라
+                    # 200 + return_msg의 [8005]로 알린다 — 재발급 후 1회 재시도
+                    logger.info("kiwoom token invalid (8005) on %s — reissuing", api_id)
+                    self._tokens.invalidate()
+                    reissued = True
+                    continue
                 raise ApiError(code if code is not None else resp.status_code,
-                               str(data.get("return_msg")), api_id)
+                               msg, api_id)
             return (data,
                     resp.headers.get("cont-yn", "N"),
                     resp.headers.get("next-key", ""))
