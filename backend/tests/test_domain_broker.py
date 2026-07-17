@@ -29,3 +29,12 @@ def test_BrokerPort는_런타임_프로토콜이다():
 
     assert isinstance(Fake(), BrokerPort)
     assert not isinstance(object(), BrokerPort)
+
+
+def test_비정상_캔들은_생성시_ValueError():
+    """Candle creation with invalid OHLC raises ValueError."""
+    import pytest
+    # high < close (invalid)
+    with pytest.raises(ValueError, match="invalid candle"):
+        Candle(symbol="005930", date=date(2026, 7, 16),
+               open=70000, high=70100, low=69900, close=70500, volume=1000)

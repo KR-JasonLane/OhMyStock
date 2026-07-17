@@ -7,6 +7,21 @@ from typing import Protocol, runtime_checkable
 
 
 @dataclass(frozen=True)
+class Instrument:
+    symbol: str
+    name: str
+    market: str           # "kospi" | "kosdaq" | "etf"
+    instrument_type: str  # 브로커가 주는 구분값 원문
+
+
+@dataclass(frozen=True)
+class Sector:
+    code: str
+    market: str
+    name: str
+
+
+@dataclass(frozen=True)
 class Quote:
     symbol: str
     name: str
@@ -24,6 +39,12 @@ class Candle:
     low: int
     close: int
     volume: int
+
+    def __post_init__(self) -> None:
+        if not (self.open > 0 and self.high > 0 and self.low > 0 and self.close > 0
+                and self.high >= max(self.open, self.close)
+                and self.low <= min(self.open, self.close)):
+            raise ValueError(f"invalid candle {self.symbol} {self.date}")
 
 
 @dataclass(frozen=True)
