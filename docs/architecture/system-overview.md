@@ -1,8 +1,7 @@
 # 마스터 아키텍처 청사진 — OhMyStock
 
 - **작성일:** 2026-07-15
-- **상태:** Phase 0 구현 중 반영본 (백엔드 Task 1~5, 프론트엔드 Task 7~8 완료 /
-  docker-compose·E2E는 Task 6·10 잔여)
+- **상태:** Phase 0 완료 (2026-07-17)
 - **역할:** 이 문서는 이후 모든 Phase(1~8)의 spec이 참조하는 **마스터 청사진**이다.
   개별 Phase spec은 이 문서의 관련 절을 인용하고, 그 Phase에 국한된 세부 설계만
   추가한다.
@@ -17,11 +16,10 @@
 **OhMyStock**은 한국 **주식**을 대상으로 하는 자동매매 시스템이다. 시장 데이터를
 수집하고, 섹터·전략별로 종목을 스코어링하며, 멀티 AI 에이전트 분석을 거쳐 매매를
 자동 실행하고, 체결가를 감시해 클라이언트측에서 TP(익절)/SL(손절)/Stop을 관리한다.
-모니터링·제어를 위한 데스크톱 대시보드와 텔레그램 봇을 함께 제공한다. 원래
-아이디어였던 "Upbit"은 암호화폐 거래소라 주식을 매매할 수 없어 기각되었고, 브로커는
-**키움증권 REST API**(신규 REST/WebSocket 제품)로 확정되었다. 구 키움 OpenAPI+
-(OCX/COM)는 Windows 전용이라 크로스플랫폼 Electron UI와 호환되지 않기 때문이다.
-(출처: CLAUDE.md §1)
+모니터링·제어를 위한 데스크톱 대시보드와 텔레그램 봇을 함께 제공한다. 브로커는
+**키움증권 REST API**(신규 REST/WebSocket 제품)다. 구 키움 OpenAPI+(OCX/COM)는
+Windows 전용이라 크로스플랫폼 Electron UI와 호환되지 않기 때문이다.
+(출처: docs/specs/2026-06-16-phase0-walking-skeleton-design.md §1)
 
 ## 2. 컨테이너 토폴로지
 
@@ -69,9 +67,9 @@ Phase 0 계획서(Task 6)에 정의된 실제 compose 토폴로지는 다음과 
   패스스루 제약을 피하기 위해 `host.docker.internal`을 통해 호스트 네이티브 Ollama를
   사용하는 대안이 검토 중이다(spec §9 미해결 항목).
 
-> ⚠️ **검증 상태:** 위 compose 구성은 계획서(Task 6)에 설계되어 있으나, 이 문서 작성
-> 시점 기준 이 개발 머신에 Docker Desktop이 설치되지 않아 실제 `docker compose up`
-> 기동 및 E2E 검증(Task 6·10)은 아직 수행되지 않았다.
+> ✅ **검증 상태:** 위 compose 구성은 2026-07-17 실제 `docker compose up` 기동과
+> E2E DoD 검증을 마쳤다. 상세 내용은
+> `docs/retrospectives/2026-07-17-phase0-walking-skeleton.md` 참고.
 
 ## 3. 백엔드 계층 구조
 
@@ -88,16 +86,16 @@ Phase 0 계획서(Task 6)에 정의된 실제 compose 토폴로지는 다음과 
 
 **확장 원칙:** 브로커는 `adapters/`의 `BrokerPort` 인터페이스 뒤에 숨긴다. 도메인
 로직(스코어링·전략·매매 규칙)은 어떤 브로커를 쓰는지 알지 못하며, 오직 `BrokerPort`가
-정의한 계약(주문, 시세 조회, 잔고 등)에만 의존한다. 따라서 키움을 다른 브로커(KIS,
-Upbit 등)로 교체하더라도 `domain/`은 수정할 필요가 없다. 이는 "make-it-work-for-now"
+정의한 계약(주문, 시세 조회, 잔고 등)에만 의존한다. 따라서 키움을 다른 브로커(KIS
+등)로 교체하더라도 `domain/`은 수정할 필요가 없다. 이는 "make-it-work-for-now"
 식의 깊은 `if` 분기를 금지하고 명확한 인터페이스로 설계하라는 프로젝트 규칙(CLAUDE.md
 §2 규칙 2)을 아키텍처 수준에서 구현한 것이다.
 
 앱 진입점은 `app/main.py`의 `create_app(settings: Settings | None = None) -> FastAPI`
 앱 팩토리다. 모듈 임포트만으로 환경변수를 요구하지 않도록 팩토리 함수로 분리했으며,
-컨테이너에서는 `uvicorn app.main:create_app --factory`로 기동한다. `lifespan`에서
-DB 엔진을 생성해 `app.state.engine`에 보관하고, `app.state.settings`에 `Settings`를
-보관해 라우터들이 공유한다.
+컨테이너에서는 `uvicorn app.main:create_app --factory`로 기동한다. settings는
+`create_app()` 생성 시점에 `app.state.settings`로 설정되고, DB 엔진만 `lifespan`에서
+생성/해제된다(`app.state.engine`).
 
 ## 4. 8개 서브시스템 (로드맵 Phase 1~8)
 
@@ -218,7 +216,7 @@ https://github.com/younghwan91/kiwoom-rest-api
 
 | Phase | 이름 | 의존 | 상태 |
 |---|---|---|---|
-| 0 | 워킹 스켈레톤 & 기반 | — | **구현 중** (Task 6 컨테이너 검증 + E2E 잔여) |
+| 0 | 워킹 스켈레톤 & 기반 | — | **완료** |
 | 1 | 키움 브로커 어댑터(모의투자), `BrokerPort` 뒤에 구현 | 0 | 착수 전 |
 | 2 | 데이터 수집 파이프라인 (장 마감 후, 6개월 일봉, 섹터 맵) | 1 | 착수 전 |
 | 3 | 스코어링 엔진 (섹터별·전략별 수익률, 자정) | 2 | 착수 전 |
@@ -230,7 +228,7 @@ https://github.com/younghwan91/kiwoom-rest-api
 
 Phase 0 내부적으로는 백엔드 Task 1~5(패키지 뼈대, 설정 로더, DB 연결, Alembic
 마이그레이션, `/health`, `/ws`)와 프론트엔드 Task 7~8(electron-vite 스캐폴드,
-`StatusPanel`, `useBackendStatus`)이 완료되었고, Task 6(Dockerfile + compose
-기동 검증)과 Task 10(E2E 검증 + 회고록)이 남아 있다. Phase 1은 Phase 0 완료(Task
-6·10 포함) 후 착수하며, 키움 `openapi.kiwoom.com` 가입과 app key/secret 발급, 모의
-투자 신청이 선행 조건이다(출처: `docs/STATUS.md`).
+`StatusPanel`, `useBackendStatus`)에 이어 Task 6(Dockerfile + compose 기동 검증)과
+Task 10(E2E 검증 + 회고록)까지 모두 완료되었다. 다음 단계는 Phase 1 spec
+브레인스토밍이며, 키움 `openapi.kiwoom.com` 가입과 app key/secret 발급, 모의투자
+신청이 선행 조건으로 블로킹되어 있다(출처: `docs/STATUS.md`).

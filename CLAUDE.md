@@ -12,9 +12,8 @@ data, scores symbols by sector/strategy, runs a multi-agent AI analysis, and
 executes trades automatically with client-side TP/SL/Stop management. It exposes a
 desktop dashboard and a Telegram bot for monitoring and control.
 
-> NOTE: The original idea named "Upbit", but Upbit is a **cryptocurrency** exchange
-> and cannot trade stocks. The brokerage was therefore changed to the **Kiwoom REST
-> API** (Korean stocks). See "Verified brokerage facts" below.
+> NOTE: The brokerage is the **Kiwoom REST API** (Korean stocks). See "Verified
+> brokerage facts" below.
 
 ## 2. Working rules (MUST follow)
 
@@ -73,7 +72,7 @@ keeps the trading engine alive independent of the UI window.
 - `store/` — persistence (SQLAlchemy models, migrations)
 
 The brokerage is hidden behind a `BrokerPort` interface so a different broker
-(KIS, Upbit, etc.) could be swapped without touching domain logic.
+(e.g. KIS) could be swapped without touching domain logic.
 
 ## 4. Tooling defaults
 - Backend: Python 3.12, `uv`, FastAPI + uvicorn, `pytest`, Alembic migrations.
