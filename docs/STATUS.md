@@ -11,15 +11,30 @@
 
 ## ▶ 여기서 재개 (다음 액션)
 
-**Phase 1 spec 승인 + 구현 계획서 작성 완료 — 계획서 실행(Task 1~9) 단계.**
+**Phase 1(키움 브로커 어댑터, 모의투자) 완료 — 다음은 Phase 2(데이터 수집
+파이프라인) spec 브레인스토밍부터 시작.**
 
+- ⚠️ **PRE-GATE — Phase 2 spec/구현 착수 전 반드시 먼저 확인:** 일봉 조회
+  (`ka10081`)의 `base_dt`가 **비영업일(주말/공휴일)**에 어떻게 동작하는지 모의서버
+  실측 또는 공식 문서로 확인해야 한다. 야간 배치(Phase 2 핵심 설계)가 이 동작에
+  직접 의존한다. 근거: `docs/retrospectives/2026-07-17-phase1-kiwoom-broker-adapter.md`
+  §8, 결정 로그 #14.
+- ⚠️ **PRE-GATE — Phase 5(TP/SL 로직 배포) 착수 전 반드시 먼저 확인(hard gate):**
+  모의 계좌에 실제 포지션을 만든 뒤 `kt00018` 행 단위 필드(`stk_cd`/`pur_pric`/
+  `cur_prc` 등)와 `avg_price` 원 단위 반올림 가정을 실측 검증해야 한다. 검증용
+  라이브 테스트(`test_live_잔고_원본응답_avg_price_실측`)는 이미 존재 — 포지션만
+  생기면 즉시 재실행 가능.
+- Phase 1 산출물: `backend/app/domain/broker.py`(`BrokerPort` + 도메인 모델),
+  `backend/app/adapters/kiwoom/`(`errors.py`/`auth.py`/`rate_limiter.py`/
+  `client.py`/`broker.py`) — `app.state.broker`로 FastAPI lifespan에 통합됨.
+  단위 50 passed / 라이브 6 passed(모의서버 실호출), CLAUDE.md §5에 실측 팩트 반영
+  완료.
+- Phase 1 회고록: `docs/retrospectives/2026-07-17-phase1-kiwoom-broker-adapter.md`
+  (Task 1~9 각 목적·파일·커밋 SHA, **패널 리뷰 결과와 수정 내역**, 설계/패턴,
+  겪은 문제(키 유출 사고·SecretStr 전환·모의 키 발급 이슈), 라이브 실측 결과,
+  Phase 5 이관 결정, 남은 항목 전부 기록됨).
 - Phase 1 spec: `docs/specs/2026-07-17-phase1-kiwoom-broker-adapter-design.md`
-  (범위: 인증+시세/캔들+계좌 조회. 주문·실시간 WS는 Phase 5로.)
-- Phase 1 계획서: `docs/plans/2026-07-17-phase1-kiwoom-broker-adapter-plan.md`
-  (Task 1~9, TDD + 라이브 스모크 + 태스크별 **4-에이전트 리뷰 패널** 규칙 8).
-- 키움 공식 문서 확인: 필요 시 브라우저를 띄우면 사용자가 로그인해 주기로 함.
-- 키움 준비 완료: REST app key/secret 발급 + 모의투자 신청 완료 (사용자 확인,
-  2026-07-17). 구현 시작 시 사용자가 `.env`에 실키 입력 필요.
+  (§5 표는 2026-07-17 실측 결과로 갱신됨 — 검증됨/실측 정정/보류로 분류).
 
 (직전 마일스톤: **Phase 0 워킹 스켈레톤 완료, 2026-07-17**)
 
@@ -28,17 +43,7 @@
   Minor 항목 전부 기록됨).
 - 진행 원장: `.superpowers/sdd/progress.md` (태스크별 커밋 SHA + 리뷰 결과 + 보류
   Minor 목록).
-- E2E DoD 7개 항목 전부 통과(2026-07-17, 코디네이터 검증 + 사용자 육안 확인):
-  clean `docker compose up` → `db` healthy/`backend` up, `/health` →
-  `{"status":"ok","db":"ok","mode":"mock"}`, 백엔드 `uv run pytest` 9 passed,
-  프론트 `pnpm test` 3 passed, Electron 창 상태 표시 확인, 백엔드 단절/복구 시
-  자동 재연결 확인. 증거: `.superpowers/sdd/task-10-e2e-evidence.md`.
-- 커밋 10개 메시지는 사용자가 사전 일괄 승인함(계획서의 메시지 그대로).
-- ⚠️ **블로커 (Phase 1 착수 전 사용자 작업 필수):** `openapi.kiwoom.com` 가입 +
-  **app key/secret 발급** + **모의투자 신청**. Phase 0에서는 "미해결 선행조건"
-  (환경변수 존재만 검증, 실제 호출 없음)이었지만, Phase 1은 실제 키움 REST API를
-  호출하므로 이제 **실제 블로커**다. 이 세 가지가 끝나기 전에는 Phase 1 브로커
-  어댑터 구현에 착수할 수 없다(spec/plan 작성까지는 가능).
+- 커밋 메시지는 사용자가 사전 일괄 승인함(계획서의 메시지 그대로).
 - ⚠️ 커밋 규칙(CLAUDE.md 규칙 7): 커밋 전 **메시지 전문 컨펌 필수**, 커밋 메시지에
   **AI 흔적(Co-Authored-By 등) 금지**. 기존 이력도 재작성 완료(2026-07-14).
 
@@ -55,9 +60,12 @@
 [x] writing-plans: Phase 0 구현 계획서 (docs/plans/2026-07-14-phase0-walking-skeleton-plan.md)
 [x] Phase 0 구현 (워킹 스켈레톤) — Task 1~10 완료, E2E DoD 7개 항목 전부 통과 (2026-07-17)
 [x] Phase 0 회고록 (docs/retrospectives/2026-07-17-phase0-walking-skeleton.md)
-[ ] Phase 1: 키움 브로커 어댑터 (모의투자)                <-- 다음 (사용자의 키움 가입/키
-    발급/모의투자 신청 완료 후 spec 브레인스토밍부터)
-... Phase 2~8 (CLAUDE.md 로드맵 참고)
+[x] Phase 1: 키움 브로커 어댑터 (모의투자) — Task 1~9 완료, 단위 50 passed +
+    라이브 6 passed, 실측 팩트 CLAUDE.md §5 반영 (2026-07-17)
+[x] Phase 1 회고록 (docs/retrospectives/2026-07-17-phase1-kiwoom-broker-adapter.md)
+[ ] Phase 2: 데이터 수집 파이프라인                        <-- 다음 (PRE-GATE:
+    base_dt 비영업일 동작 실측 먼저 — 위 재개 지점 참고)
+... Phase 3~8 (CLAUDE.md 로드맵 참고)
 ```
 
 ## 결정 로그 (무엇을, 왜 정했나)
@@ -76,23 +84,21 @@
 | 10 | P1 범위 = 인증+시세/캔들+계좌 ("필요한 것만 먼저") | 주문·실시간은 소비자(트레이딩 엔진)와 함께 Phase 5에서 | P1 spec §1 |
 | 11 | 키움 통신 코드 **직접 구현** (비공식 래퍼 미사용) | 개인 유지보수 의존 리스크 회피, 자체 레이트리밋·포트 설계 정합 (규칙 2) | P1 spec §1 |
 | 12 | 태스크마다 **4-에이전트 리뷰 패널** 전원 통과 후 진행 | 사용자 지시 — 개발자/트레이더/아키텍트/보안 관점 상시 검증 | CLAUDE.md 규칙 8, `.claude/agents/` |
+| 13 | 4-에이전트 패널이 **8개 코드 태스크 중 7개**에서 Critical/Important 결함을 잡아 수정시킴(1개만 1차 전원승인) — 패널 프로세스(결정 #12)의 유효성이 실측으로 입증됨 | 락-sleep 전역 직렬화, 401/429 재시도 예산 혼합, silent-0 금액 필드 등 실제 결함을 코드 작성 직후 잡아냄 | `docs/retrospectives/2026-07-17-phase1-kiwoom-broker-adapter.md` §3 총괄 |
+| 14 | 트레이딩 엔진 관련 정책(긴급 TR 우선순위·타임아웃)은 **Phase 1에서 설계하지 않고 Phase 5로 이관** | Phase 1은 주문을 다루지 않아 "긴급"을 정의할 도메인 지식(소비자)이 없음 — 조기 설계는 추측 기반이 됨(YAGNI). 인프라(레이트리미터 락-바깥 sleep)는 이미 이를 지원하도록 준비됨 | `docs/retrospectives/2026-07-17-phase1-kiwoom-broker-adapter.md` §6 |
 
 ## 후속 설계를 제약하는 검증된 팩트 (사용 전 재확인)
 
 - 키움 REST에는 **네이티브 TP/SL/Stop이 없음** → **클라이언트측 구현** 필수 (Phase 5).
-- 레이트리밋 **TR당 ~1 req/s** (전역 아님) → 전종목 봉 수집은 **야간 배치** (Phase 2).
-- 인증 토큰 만료 → 재발급 로직 필요 (Phase 1).
-- 상세·출처는 `CLAUDE.md` §5 참고.
-
-## 미해결 선행조건 → 이제 실제 블로커 (사용자 작업, Phase 1 착수 전 필수)
-
-Phase 0에서는 환경변수 존재 여부만 검증하고 실제 키움 API를 호출하지 않았기 때문에
-"미해결 선행조건"으로만 기록해 두었다. Phase 1(브로커 어댑터)은 실제로 키움 REST
-API를 호출하므로, 아래 세 가지가 없으면 **구현을 시작할 수 없다**.
-
-- [ ] `openapi.kiwoom.com` 가입
-- [ ] **app key / secret** 발급
-- [ ] **모의투자** 신청
+- 레이트리밋 **TR당 ~1 req/s** (전역 아님, 공식 수치는 여전히 미확인 — 설정값으로
+  구현됨) → 전종목 봉 수집은 **야간 배치** (Phase 2).
+- 인증 토큰 만료 → 재발급 로직 구현 완료 (Phase 1, `expires_dt` 절대 KST 시각
+  기반 — 실측 완료).
+- **⚠️ `ka10081`(일봉) 조회는 `base_dt`(당일 YYYYMMDD)가 필수 — 빈 값 거부됨을
+  실측 확인.** 비영업일 동작은 미실측 → **Phase 2 PRE-GATE** (위 재개 지점 참고).
+- **⚠️ `kt00018`(잔고) 행 단위 필드와 `avg_price` 반올림은 미실측(모의 계좌 포지션
+  0개)** → **Phase 5 PRE-GATE(hard gate)**, 검증용 라이브 테스트는 이미 존재.
+- 상세·출처는 `CLAUDE.md` §5, `docs/retrospectives/2026-07-17-phase1-kiwoom-broker-adapter.md` 참고.
 
 ## 문서 인덱스
 
@@ -101,9 +107,12 @@ API를 호출하므로, 아래 세 가지가 없으면 **구현을 시작할 수
 | `CLAUDE.md` | 규칙·아키텍처·검증된 API 팩트·로드맵 (매 세션 자동 로드, 영어) |
 | `docs/STATUS.md` | 이 문서 — 재개 지점 + 결정 로그 |
 | `docs/specs/2026-06-16-phase0-walking-skeleton-design.md` | Phase 0 설계 spec |
+| `docs/specs/2026-07-17-phase1-kiwoom-broker-adapter-design.md` | Phase 1 설계 spec (§5 실측 결과로 갱신됨) |
 | `docs/architecture/system-overview.md` | 마스터 청사진 (Task 9, Phase 0 구현 중 작성) |
 | `docs/plans/2026-07-14-phase0-walking-skeleton-plan.md` | Phase 0 구현 계획서 (Task 1~10) |
+| `docs/plans/2026-07-17-phase1-kiwoom-broker-adapter-plan.md` | Phase 1 구현 계획서 (Task 1~9) |
 | `docs/retrospectives/2026-07-17-phase0-walking-skeleton.md` | Phase 0 회고록 (Task 1~10 상세, E2E 결과) |
+| `docs/retrospectives/2026-07-17-phase1-kiwoom-broker-adapter.md` | Phase 1 회고록 (Task 1~9 상세, 패널 리뷰·라이브 실측 결과) |
 | `docs/retrospectives/` | 작업별 회고록 (규칙 4) |
 
 ## 세션 연속성 작동 방식

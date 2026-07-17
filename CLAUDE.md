@@ -97,28 +97,75 @@ The brokerage is hidden behind a `BrokerPort` interface so a different broker
 
 ## 5. Verified brokerage facts (Kiwoom REST API)
 
-Confirmed from the official portal and reference wrappers (re-verify before relying):
+Confirmed from the official portal and reference wrappers (re-verify before relying).
+Items tagged **"verified live against mock server (2026-07-17)"** were additionally
+confirmed by real HTTP calls to `mockapi.kiwoom.com` during Phase 1 (broker adapter)
+implementation — see `docs/retrospectives/2026-07-17-phase1-kiwoom-broker-adapter.md`
+for the full evidence trail.
 
 - **Auth:** `POST https://api.kiwoom.com/oauth2/token` with
-  `grant_type=client_credentials`, `appkey`, `secretkey`. Tokens expire — implement
-  reissue logic.
+  `grant_type=client_credentials`, `appkey`, `secretkey`. **Verified live against mock
+  server (2026-07-17):** the response contains `token`, `return_code`, and
+  `expires_dt` — an **absolute KST timestamp** in `YYYYMMDDHHMMSS` format (not a
+  relative TTL in seconds). Reissue logic parses `expires_dt` and reissues with a
+  configurable safety margin (default 60s) before it lapses. Token revocation —
+  **verified live:** `POST /oauth2/revoke` accepts `{appkey, secretkey, token}` and
+  returns `return_code` (0 = success).
 - **Mock vs real:** mock `https://mockapi.kiwoom.com` (WS `wss://mockapi.kiwoom.com:10000`),
   real `https://api.kiwoom.com` (WS `wss://api.kiwoom.com:10000`). Toggle via a mock
-  flag. Mock is KRX-only.
+  flag. Mock is KRX-only. **⚠️ Verified live: mock app key/secret are issued
+  SEPARATELY from real-trading key pairs.** Calling the mock endpoint with a
+  real-env key pair does not 401 — it returns HTTP 200 with `return_code=2` and
+  `return_msg` containing `[8030:투자구분(실전/모의)이 달라서 Appkey를 사용할수가
+  없습니다]` ("appkey unusable because real/mock designation differs"). This is a
+  credential-provisioning issue, not a client bug — a mock-specific key pair must be
+  issued from the Kiwoom developer portal separately from the real-trading pair.
+- **TR call pattern — verified live:** every TR call is
+  `POST https://{base}/api/dostk/{category}` (categories observed: `stkinfo`
+  current-price, `chart` candles, `acnt` account) with headers
+  `authorization: Bearer <token>` and `api-id: <TR id>`. Pagination is via response
+  headers `cont-yn`/`next-key`, echoed into the next request's `cont-yn`/`next-key`
+  headers to continue.
 - **Candles:** daily `ka10081`, minute `ka10080`, weekly `ka10082`, monthly `ka10083`,
   tick `ka10079`. Pagination via `cont_yn` + `next_key` (loop for 6 months of history).
+  **Verified live: field names match research exactly** — daily-candle rows
+  (`stk_dt_pole_chart_qry` array) use `dt`/`open_pric`/`high_pric`/`low_pric`/
+  `cur_prc`/`trde_qty`; current-price (`ka10001`) uses `stk_nm`/`cur_prc`/`flu_rt`/
+  `trde_qty`. **⚠️ `ka10081` requires `base_dt` = today's date (`YYYYMMDD`, KST) in
+  the request body — an empty string is rejected** with
+  `[1511:필수 입력 값이 존재하지 않습니다. 필수입력파라미터=base_dt]`. **The raw daily
+  candle response is descending (newest → oldest)** — callers/adapters must re-sort
+  to ascending (oldest → newest) if that ordering is required.
 - **Orders:** buy `kt10000`, sell `kt10001`, modify `kt10002`, cancel `kt10003`.
   Order types (호가구분): `00` limit, `03` market, `05` conditional-limit, plus
-  IOC/FOK and after-hours variants.
+  IOC/FOK and after-hours variants. Not exercised in Phase 1 (deferred to Phase 5).
 - **⚠️ No native TP/SL/Stop or conditional auto-orders via REST.** Stop-loss /
   take-profit must be implemented **client-side**: monitor the execution price
   (WebSocket `0B`) and send a market/limit order when a threshold is hit.
 - **⚠️ Rate limit:** ~1 req/s per TR (API ID), burst ~2, **per-TR not global**;
   HTTP 429 on excess. Use a token-bucket limiter + 429 retry. Collecting all ~2,800
-  symbols' candles is an overnight batch, not a real-time operation.
-- **Real-time WebSocket:** `0B` execution, `0D` order book, `04` balance, etc.
+  symbols' candles is an overnight batch, not a real-time operation. **Still not
+  independently confirmed from an official source** — the Phase 1 rate limiter
+  implements these as *configurable defaults* (not hardcoded), so official numbers
+  can be applied later without a code change.
+- **Account queries — verified live:** `kt00001` (deposit, body `qry_tp=3`)
+  top-level fields `entr` (예수금/deposit) and `ord_alow_amt` (주문가능금액/order-
+  available amount); `kt00018` (balance, body `qry_tp=1, dmst_stex_tp=KRX`)
+  top-level fields `tot_evlt_amt` (총평가금액) and `tot_evlt_pl` (총평가손익). **All
+  four fields are present in the response even when the mock account holds zero
+  positions** (values are `0`, not absent/omitted) — safe to hard-index rather than
+  defensively `.get()`. **Still unverified (pending):** `kt00018`'s row-level fields
+  inside the `acnt_evlt_remn_indv_tot` array (`stk_cd`, `stk_nm`, `pur_pric`,
+  `cur_prc`, `evlt_amt`, etc.) and whether `avg_price`/`pur_pric` carries fractional
+  won — the mock account had zero positions throughout Phase 1, so these were never
+  actually returned by the server. **PRE-GATE before Phase 5:** verify against a
+  real mock-account position (live test already exists:
+  `test_live_잔고_원본응답_avg_price_실측`).
+- **Real-time WebSocket:** `0B` execution, `0D` order book, `04` balance, etc. Not
+  exercised in Phase 1 (deferred to Phase 5).
 
-Sources: https://openapi.kiwoom.com/guide/index , https://github.com/younghwan91/kiwoom-rest-api
+Sources: https://openapi.kiwoom.com/guide/index , https://github.com/younghwan91/kiwoom-rest-api,
+live verification against `mockapi.kiwoom.com` (2026-07-17, Phase 1 implementation).
 
 ## 6. Roadmap (each phase = its own spec → plan → build → retrospective)
 
