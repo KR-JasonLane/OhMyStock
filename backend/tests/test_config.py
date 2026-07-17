@@ -19,11 +19,18 @@ def _set_env(monkeypatch):
 def test_모든_환경변수를_로드한다(monkeypatch):
     _set_env(monkeypatch)
     s = Settings(_env_file=None)
-    assert s.kiwoom_app_key == "test-key"
-    assert s.kiwoom_secret_key == "test-secret"
+    assert s.kiwoom_app_key.get_secret_value() == "test-key"
+    assert s.kiwoom_secret_key.get_secret_value() == "test-secret"
     assert s.kiwoom_mock is True
-    assert s.database_url == ENV["DATABASE_URL"]
+    assert s.database_url.get_secret_value() == ENV["DATABASE_URL"]
     assert s.mode == "mock"
+
+
+def test_시크릿은_repr에_노출되지_않는다(monkeypatch):
+    _set_env(monkeypatch)
+    s = Settings(_env_file=None)
+    assert "test-key" not in repr(s)
+    assert "test-key" not in str(s)
 
 
 def test_필수_환경변수_누락시_즉시_실패한다(monkeypatch):

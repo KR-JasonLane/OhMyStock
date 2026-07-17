@@ -1,5 +1,6 @@
 from functools import lru_cache
 
+from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -8,10 +9,10 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
-    kiwoom_app_key: str
-    kiwoom_secret_key: str
+    kiwoom_app_key: SecretStr
+    kiwoom_secret_key: SecretStr
     kiwoom_mock: bool = True
-    database_url: str
+    database_url: SecretStr
 
     @property
     def mode(self) -> str:

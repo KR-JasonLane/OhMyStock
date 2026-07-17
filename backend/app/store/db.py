@@ -4,7 +4,7 @@ from app.core.config import Settings
 
 
 def create_db_engine(settings: Settings) -> Engine:
-    return create_engine(settings.database_url, pool_pre_ping=True)
+    return create_engine(settings.database_url.get_secret_value(), pool_pre_ping=True)
 
 
 def check_db(engine: Engine) -> bool:
