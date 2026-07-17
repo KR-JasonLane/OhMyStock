@@ -69,6 +69,23 @@ def test_set_sector_codes는_미존재_심볼을_건너뛴다(tmp_path):
     assert result == 1  # Only "005930" exists
 
 
+def test_latest_candle_dates는_전_종목_최신일자를_일괄_반환한다(tmp_path):
+    """latest_candle_dates: 종목별 반복 호출 없이 단일 쿼리로 최신일자 dict를 얻는다."""
+    s = _store(tmp_path)
+    s.upsert_candles([
+        Candle(symbol="005930", date=date(2026, 7, 15), open=1, high=2, low=1,
+               close=2, volume=1),
+        Candle(symbol="005930", date=date(2026, 7, 16), open=1, high=2, low=1,
+               close=2, volume=1),
+        Candle(symbol="000660", date=date(2026, 7, 14), open=1, high=2, low=1,
+               close=2, volume=1),
+    ])
+    assert s.latest_candle_dates() == {
+        "005930": date(2026, 7, 16),
+        "000660": date(2026, 7, 14),
+    }
+
+
 def test_deactivate_missing은_활성_종목을_비활성화한다(tmp_path):
     """deactivate_missing marks inactive instruments not in seen_symbols."""
     engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'test.db'}")

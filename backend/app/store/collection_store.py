@@ -96,6 +96,19 @@ class CollectionStore:
             return session.scalar(select(func.max(CandleRow.date))
                                   .where(CandleRow.symbol == symbol))
 
+    def latest_candle_dates(self) -> dict[str, date]:
+        """전 종목 최신 봉 일자 일괄 조회 — 단일 GROUP BY 쿼리.
+
+        수집 서비스가 종목마다 latest_candle_date를 왕복 호출(N+1)하지 않도록
+        런 시작 시 1회 호출해 dict로 조회하는 용도.
+        """
+        with self._sessions() as session:
+            rows = session.execute(
+                select(CandleRow.symbol, func.max(CandleRow.date))
+                .group_by(CandleRow.symbol)
+            ).all()
+            return {symbol: latest for symbol, latest in rows}
+
     def list_symbols(self) -> list[str]:
         with self._sessions() as session:
             return list(session.scalars(select(InstrumentRow.symbol)
