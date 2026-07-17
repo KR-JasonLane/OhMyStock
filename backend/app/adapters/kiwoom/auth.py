@@ -4,16 +4,15 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
 
 import httpx
 
 from app.adapters.kiwoom.rate_limiter import RateLimiter
+from app.core.market_calendar import KST
 from app.domain.errors import AuthError, RateLimitError
 
 logger = logging.getLogger(__name__)
 
-KST = ZoneInfo("Asia/Seoul")
 _EXPIRES_FMT = "%Y%m%d%H%M%S"  # 키움 expires_dt: 절대 만료시각(KST)
 BACKOFF_SECONDS = (1.0, 2.0, 4.0)  # 429 재시도 간격 (지수) — client.py와 공유하는 단일 출처
 

@@ -1,3 +1,5 @@
+import asyncio
+import contextlib
 import logging
 from contextlib import asynccontextmanager
 
@@ -6,9 +8,12 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.adapters.kiwoom.broker import KiwoomBroker
 from app.adapters.kiwoom.client import KiwoomHttpClient
+from app.api.collect import router as collect_router
 from app.api.health import router as health_router
 from app.api.ws import router as ws_router
 from app.core.config import Settings, get_settings
+from app.domain.collection import CollectionService
+from app.store.collection_store import CollectionStore
 from app.store.db import create_db_engine
 
 logging.basicConfig(
@@ -25,9 +30,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.engine = create_db_engine(settings)
         try:
             app.state.broker = KiwoomBroker(KiwoomHttpClient(settings))
+            app.state.collection = CollectionService(
+                app.state.broker, CollectionStore(app.state.engine))
             try:
                 yield
             finally:
+                task = app.state.collection.current_task()
+                if task is not None and not task.done():
+                    task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await task
                 await app.state.broker.aclose()
         finally:
             app.state.engine.dispose()
@@ -43,4 +55,5 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.include_router(health_router)
     app.include_router(ws_router)
+    app.include_router(collect_router)
     return app

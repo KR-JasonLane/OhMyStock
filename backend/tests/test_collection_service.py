@@ -1,3 +1,5 @@
+import asyncio
+import contextlib
 import logging
 from datetime import date
 
@@ -252,3 +254,50 @@ def test_MemoryStore_set_sector_codes는_미존재_심볼을_건너뛴다():
     result = store.set_sector_codes({"005930": "001", "999999": "001"})
     assert result == 1
     assert store.sector_codes == {"005930": "001"}
+
+
+@pytest.mark.anyio
+async def test_start는_연속_호출시_두번째를_거부한다():
+    """check(_running)~set(_running=True) 사이에 await가 없어 원자적이다 —
+    create_task는 스케줄만 할 뿐 즉시 실행하지 않으므로, 첫 start() 직후
+    (이벤트 루프에 양보하기 전) 두번째 start()를 호출해도 안전하게 None이
+    반환되어야 한다."""
+    broker, store = FakeBroker(), MemoryStore()
+    svc = CollectionService(broker, store, markets=("kospi",))
+    first = svc.start()
+    second = svc.start()
+    assert first is not None
+    assert second is None
+    assert svc.current_task() is first
+    await first
+    assert svc.is_running() is False
+
+
+@pytest.mark.anyio
+async def test_start는_완료_후_재시작을_허용한다():
+    broker, store = FakeBroker(), MemoryStore()
+    svc = CollectionService(broker, store, markets=("kospi",))
+    await svc.start()
+    assert svc.progress().status == "done"
+    second = svc.start()
+    assert second is not None
+    await second
+    assert svc.current_task() is second
+
+
+@pytest.mark.anyio
+async def test_start된_태스크의_미처리_예외는_done_callback이_로깅한다(caplog):
+    class ExplodingStore(MemoryStore):
+        def upsert_sectors(self, sectors):
+            raise RuntimeError("db exploded")
+
+    broker, store = FakeBroker(), ExplodingStore()
+    svc = CollectionService(broker, store, markets=("kospi",))
+    with caplog.at_level(logging.ERROR):
+        task = svc.start()
+        with contextlib.suppress(RuntimeError):
+            await task
+        # done 콜백은 task가 끝난 직후 이벤트 루프 콜백 큐에서 실행되므로
+        # 한 번 더 양보해 콜백이 실행될 기회를 준다.
+        await asyncio.sleep(0)
+    assert any("collection task failed" in r.message for r in caplog.records)

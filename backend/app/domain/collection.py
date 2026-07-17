@@ -12,6 +12,22 @@ from app.domain.errors import AuthError, BrokerError, RateLimitError
 
 logger = logging.getLogger(__name__)
 
+
+def _log_task_exception(task: asyncio.Task) -> None:
+    """collection_task의 done 콜백 — 취소가 아니면서 예외로 끝났다면 로깅한다.
+
+    fire-and-forget 태스크(asyncio.create_task)는 예외를 조회하지 않으면
+    조용히 삼켜지고 "Task exception was never retrieved" 경고만 남는다.
+    run()/_run() 내부에서 이미 실패 상태를 store에 기록하지만, 이 콜백은
+    태스크 자체의 예외를 놓치지 않기 위한 마지막 안전망이다.
+    """
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.error("collection task failed: %s", exc)
+
+
 # 집계성 업종명 마커 — 실측 근거: 종합(001)이 시장 전체 2,477종목을 포함해 개별
 # 업종과 성격이 다름 (docs/STATUS.md Phase 3 PRE-GATE 참고). 이름 문자열 매칭은
 # 휴리스틱이며 코드값 기반 확정은 Phase 3 PRE-GATE에서 다룬다.
@@ -38,6 +54,7 @@ class CollectionProgress:
     done: int
     total: int
     failed: int
+    warning: str | None = None
 
 
 class CollectionService:
@@ -60,6 +77,8 @@ class CollectionService:
         self._max_consec = max_consecutive_failures
         self._running = False
         self._progress: CollectionProgress | None = None
+        self._warning: str | None = None
+        self._task: asyncio.Task | None = None
 
     def is_running(self) -> bool:
         return self._running
@@ -67,7 +86,34 @@ class CollectionService:
     def progress(self) -> CollectionProgress | None:
         return self._progress
 
+    def current_task(self) -> asyncio.Task | None:
+        return self._task
+
+    def start(self, warning: str | None = None) -> asyncio.Task | None:
+        """원자적 시작: 이미 실행 중이면 None. 태스크 강참조는 서비스가 보유한다.
+
+        check(self._running)와 set(self._running = True) 사이에 await가 없어
+        원자적이다 — API 레이어의 별도 락 없이도 동시 POST 요청 중 하나만
+        시작을 얻는다(TOCTOU 없음). 태스크 자체를 여기서 보유하므로 호출자가
+        GC로 태스크를 잃어버릴 걱정도 없다.
+        """
+        if self._running:
+            return None
+        self._running = True
+        self._warning = warning
+        self._task = asyncio.create_task(self._run())
+        self._task.add_done_callback(_log_task_exception)
+        return self._task
+
     async def run(self) -> None:
+        """단독 호출용 진입점 (테스트/스크립트). API는 start()를 쓴다."""
+        if self._running:
+            raise RuntimeError("collection already running")
+        self._running = True
+        self._warning = None
+        await self._run()
+
+    async def _run(self) -> None:
         """전체 수집 파이프라인을 실행한다 (instruments → sectors → candles).
 
         정규장(09:00-15:30 KST) 종료 후 실행해야 한다 — 장중 실행 시 미확정
@@ -75,9 +121,6 @@ class CollectionService:
         "이미 최신"으로 오판해 고착시킬 수 있다. 실행 시각 강제는 이 서비스의
         책임이 아니라 Phase 6 스케줄러가 진다 (거래일 캘린더가 필요하기 때문).
         """
-        if self._running:
-            raise RuntimeError("collection already running")
-        self._running = True
         run_id = await asyncio.to_thread(self._store.create_run)
         succeeded = failed = total = 0
         try:
@@ -193,4 +236,5 @@ class CollectionService:
 
     def _set(self, run_id: int, status: str, stage: str,
              done: int, total: int, failed: int) -> None:
-        self._progress = CollectionProgress(run_id, status, stage, done, total, failed)
+        self._progress = CollectionProgress(
+            run_id, status, stage, done, total, failed, self._warning)
