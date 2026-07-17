@@ -18,6 +18,8 @@
    `instruments`에 **종목 구분(instrument_type)과 시장 구분을 저장**해 이후
    Phase(스코어링·매매)에서 "보통주만" 같은 필터가 가능하게 한다. 약 4,000종목,
    TR당 ~1 req/s 기준 일봉 수집 약 60~70분(야간 배치 전제).
+   (실측: ETN 등 기타 marketCode는 필터로 제외 중 — Phase 3 PRE-GATE에서
+   재결정)
 2. **시동 = HTTP API** (사용자 결정): `POST /collect`(시작) + `GET /collect/status`
    (진행률). Phase 7 대시보드 버튼의 토대가 되고, Phase 6 스케줄러는 동일한 수집
    함수를 프로세스 내부에서 직접 호출한다.

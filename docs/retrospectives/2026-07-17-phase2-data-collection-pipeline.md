@@ -284,7 +284,8 @@ Task 3 재검토(2라운드) 과정에서, 코디네이터가 "`latest_candle_da
    fail-loud로 거부.
 6. **풀 수집(최초, `run_id=2`):** 22:18:27 ~ 23:25:15 KST, **약 67분**,
    3,887개 종목(3,886 성공/1 실패=012510), **캔들 2,120,535행**, 매핑된
-   섹터 65개(집계 업종 제외 후) / 2,719개 종목에 섹터코드 매핑.
+   섹터 65개(sectors 테이블 총 행수, 집계 업종 포함) / 2,719개 종목에
+   섹터코드 매핑.
 7. **재실행(스킵 동작, `run_id=4`):** 23:30:59 ~ 23:33:00 KST, **약 2분**,
    결과 동일(3,887/3,887, 실패 1, 캔들 행 수 불변) — 멱등성 실증.
 8. **DBeaver용 DB 포트 노출:** `127.0.0.1:15432:5432`(사용자 요청, 커밋
@@ -332,6 +333,36 @@ Task 3 재검토(2라운드) 과정에서, 코디네이터가 "`latest_candle_da
 - **장 마감 직후 당일봉 확정 시각 미실측:** PRE-GATE 실측상 `base_dt`
   자동 보정이 있어 야간(19시 이후) 실행을 권장하나, 정확한 확정 시각은
   Phase 6 스케줄 설계 시 확인 필요.
+- **pg-verify 스크립트의 pytest `-m postgres` 승격(명시적 재이연):**
+  계획서 원장의 조건은 "Phase 2 close 전"이었으나, 지금 다시 이연한다 —
+  사유는 pg 경로가 in-container 검증(`p2-task-3-pg-verify.txt`)과 §6의 풀
+  수집 완주로 이미 실증되어 위험이 낮다고 판단했기 때문. Phase 3 개막 정리
+  작업으로 이월.
+- **invalid-candle 테스트 2케이스 복원(parametrize):** `test_domain_broker.py`의
+  `test_비정상_캔들은_생성시_ValueError`가 현재 high<close 1케이스만 검증한다 —
+  나머지 무효 OHLC 조합(예: low>close, high<open/low>open 등) 2케이스를
+  `@pytest.mark.parametrize`로 복원해야 한다.
+- **`CollectionService._run()` 분해 + `_fail_run` 헬퍼 추출:** `_run()`의
+  `except BrokerError`/`except asyncio.CancelledError`/`except Exception` 세
+  분기가 `finish_run`+`_set` 호출 패턴을 그대로 반복한다 — 공통 실패-마감
+  로직을 헬퍼로 추출해 중복을 줄일 것.
+- **백오프에 jitter 추가(멀티프로세스 시):** `client.py`의 `BACKOFF_SECONDS`
+  고정 지수 백오프는 단일 프로세스 기준이라, 여러 수집 프로세스가 동시에
+  429를 맞으면 백오프가 동기화돼(thundering herd) 재충돌할 수 있다 —
+  멀티프로세스 운영을 도입할 때 jitter 추가를 검토할 것.
+- **client 연결 오류(연결 재설정 등) 짧은 재시도 검토(Phase 6):** 현재
+  재시도 대상은 401/429/8005뿐이고 TCP 연결 오류 등은 즉시 예외로
+  전파된다 — 67분짜리 장시간 배치 중 일시적 연결 단절 내성을 Phase 6
+  스케줄러 설계 시 재검토할 것.
+- **`sectors` PK 전역 유일 가정 주석/복합 PK 검토(Phase 3, 이번 최종
+  리뷰 신규):** `SectorRow.code`가 단일 컬럼 PK(`models.py`)라 시장 간
+  코드 충돌 불가를 암묵 가정한다 — 가정을 코드 옆에 명시하거나
+  `(code, market)` 복합 PK로 전환할지 Phase 3에서 검토할 것.
+- **기동 시 고아(orphan) run reconcile(Phase 6, 이번 최종 리뷰 신규):**
+  백엔드가 수집 도중 비정상 종료되면 `collection_runs`에 상태
+  `"running"`인 행이 영구히 남는다 — 앱 기동 시 오래된 running 행을
+  `failed`로 정리하는 reconcile 로직을 Phase 6 스케줄러/앱 라이프사이클에
+  추가할 것.
 
 ## 8. 다음 단계
 

@@ -152,8 +152,9 @@ evidence trail.
   take-profit must be implemented **client-side**: monitor the execution price
   (WebSocket `0B`) and send a market/limit order when a threshold is hit.
 - **⚠️ Rate limit:** ~1 req/s per TR (API ID), burst ~2, **per-TR not global**;
-  HTTP 429 on excess. Use a token-bucket limiter + 429 retry. Collecting all ~2,800
-  symbols' candles is an overnight batch, not a real-time operation. **Still not
+  HTTP 429 on excess. Use a token-bucket limiter + 429 retry. Collecting all
+  ~3,900 symbols (measured 3,887 active) candles is an overnight batch, not a
+  real-time operation. **Still not
   independently confirmed from an official source** — the Phase 1 rate limiter
   implements these as *configurable defaults* (not hardcoded), so official numbers
   can be applied later without a code change.
@@ -216,9 +217,11 @@ evidence trail.
   instruments (post `marketCode`-filter, deduplicated across kospi/kosdaq/etf);
   full daily-candle collection took **~67 minutes** at the ~1 req/s per-TR rate
   limit (22:18–23:25 KST); **2,120,535 candle rows** written; 3,886 succeeded / 1
-  failed (`012510` above). Idempotent rerun (resume-skip via
-  `CollectionStore.latest_candle_date`) completed in **~2 minutes** with an
-  unchanged candle count and the same single failure.
+  failed (`012510` above). Idempotent rerun (resume-skip via a single bulk
+  `CollectionStore.latest_candle_dates` query, compared per symbol against a
+  calendar-derived reference date — `market_calendar.previous_weekday`, not a
+  running cursor anchored on the first symbol's response) completed in
+  **~2 minutes** with an unchanged candle count and the same single failure.
 
 Sources: https://openapi.kiwoom.com/guide/index , https://github.com/younghwan91/kiwoom-rest-api,
 live verification against `mockapi.kiwoom.com` (2026-07-17, Phase 1 implementation;
