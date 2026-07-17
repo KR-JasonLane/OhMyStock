@@ -9,7 +9,7 @@ from decimal import Decimal
 from app.adapters.kiwoom.auth import KST
 from app.adapters.kiwoom.client import KiwoomHttpClient
 from app.adapters.kiwoom.errors import BrokerError
-from app.domain.broker import Candle, Quote
+from app.domain.broker import Balance, Candle, Deposit, Position, Quote
 
 
 def _to_int(s: str | None) -> int:
@@ -32,6 +32,23 @@ def _to_decimal(s: str | None) -> Decimal:
     return Decimal(s)
 
 
+def _parse_position(row: dict) -> Position:
+    """잔고 응답의 개별 종목 행 → Position. stk_cd 정규화는 fail-loud —
+    'A' 접두 제거 후 6자리 숫자가 아니면(무음 실패 대신) ValueError로 표면화한다."""
+    raw_code = row["stk_cd"]
+    code = raw_code.removeprefix("A")
+    if not (len(code) == 6 and code.isdigit()):
+        raise ValueError(f"unexpected stk_cd format: {raw_code!r}")
+    return Position(
+        symbol=code,
+        name=row["stk_nm"],
+        quantity=_to_int(row.get("rmnd_qty")),
+        avg_price=_to_price(row.get("pur_pric")),
+        current_price=_to_price(row.get("cur_prc")),
+        eval_amount=_to_int(row.get("evlt_amt")),
+    )
+
+
 class KiwoomBroker:
     def __init__(
         self,
@@ -51,7 +68,7 @@ class KiwoomBroker:
                 change_rate=_to_decimal(data.get("flu_rt")),
                 volume=_to_int(data.get("trde_qty")),
             )
-        except (KeyError, ValueError, ArithmeticError) as exc:
+        except (KeyError, ValueError, ArithmeticError, TypeError, AttributeError) as exc:
             raise BrokerError(
                 f"unexpected response schema [ka10001]: {type(exc).__name__}") from exc
 
@@ -82,11 +99,44 @@ class KiwoomBroker:
                 )
                 for r in rows
             ]
-        except (KeyError, ValueError, ArithmeticError) as exc:
+        except (KeyError, ValueError, ArithmeticError, TypeError, AttributeError) as exc:
             raise BrokerError(
                 f"unexpected response schema [ka10081]: {type(exc).__name__}") from exc
         candles.sort(key=lambda c: c.date)  # 과거→최신
         return candles
+
+    async def get_deposit(self) -> Deposit:
+        data, _, _ = await self._client.call("acnt", "kt00001", {"qry_tp": "3"})
+        try:
+            # entr/ord_alow_amt는 핵심 금액 필드 — 누락 시 .get()의 silent-0 대신
+            # 대괄호 인덱싱으로 fail-loud한다 (KeyError → BrokerError).
+            return Deposit(
+                total=_to_int(data["entr"]),
+                available=_to_int(data["ord_alow_amt"]),
+            )
+        except (KeyError, ValueError, ArithmeticError, TypeError, AttributeError) as exc:
+            raise BrokerError(
+                f"unexpected response schema [kt00001]: {type(exc).__name__}") from exc
+
+    async def get_balance(self) -> Balance:
+        data, _, _ = await self._client.call(
+            "acnt", "kt00018", {"qry_tp": "1", "dmst_stex_tp": "KRX"})
+        try:
+            # tot_evlt_amt/tot_evlt_pl은 핵심 금액 필드 — 누락 시 fail-loud (위와 동일
+            # 이유). acnt_evlt_remn_indv_tot는 포지션이 없는 계좌에서 정당하게 부재할
+            # 수 있으므로 .get(...) or [] 유지.
+            positions = tuple(
+                _parse_position(row)
+                for row in data.get("acnt_evlt_remn_indv_tot") or []
+            )
+            return Balance(
+                positions=positions,
+                total_eval=_to_int(data["tot_evlt_amt"]),
+                total_profit=_to_int(data["tot_evlt_pl"]),
+            )
+        except (KeyError, ValueError, ArithmeticError, TypeError, AttributeError) as exc:
+            raise BrokerError(
+                f"unexpected response schema [kt00018]: {type(exc).__name__}") from exc
 
     async def aclose(self) -> None:
         await self._client.aclose()

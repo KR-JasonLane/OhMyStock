@@ -105,4 +105,4 @@ async def test_get_daily_candles는_주입된_today를_base_dt로_사용한다()
 def test_KiwoomBroker는_BrokerPort_계약을_만족한다():
     # __new__로 생성해 리소스(httpx client) 없이 클래스 구조만 검사한다
     instance = KiwoomBroker.__new__(KiwoomBroker)
-    assert isinstance(instance, BrokerPort) is False  # Task 7 완료 전 — 계좌 메서드 미구현
+    assert isinstance(instance, BrokerPort) is True  # Task 7에서 계약 완성

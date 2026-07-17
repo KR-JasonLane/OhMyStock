@@ -89,6 +89,47 @@ async def test_live_삼성전자_일봉_5개(settings):
 
 
 @pytest.mark.anyio
+async def test_live_예수금과_잔고(settings):
+    b = KiwoomBroker(KiwoomHttpClient(settings))
+    try:
+        d = await _retry_on_token_rate_limit(lambda: b.get_deposit())
+        assert d.total >= 0 and d.available >= 0
+        bal = await _retry_on_token_rate_limit(lambda: b.get_balance())
+        assert bal.total_eval >= 0
+        print(f"[live] deposit={d.total} positions={len(bal.positions)}")
+        if bal.positions:
+            for p in bal.positions:
+                print(f"[live] position symbol={p.symbol} avg_price(parsed)={p.avg_price}")
+        else:
+            print("[live] no positions in mock account - avg_price 정수원단위 "
+                  "실측은 보류 (포지션 보유 시 재검증 필요)")
+    finally:
+        await b.aclose()
+
+
+@pytest.mark.anyio
+async def test_live_잔고_원본응답_avg_price_실측(settings):
+    """broker.py의 파싱을 우회해 kt00018 원본 pur_pric 문자열을 실측하고,
+    Position.avg_price의 파싱 결과와 나란히 출력한다 (원 단위 정수 여부 검증)."""
+    client = KiwoomHttpClient(settings)
+    try:
+        data, _, _ = await _retry_on_token_rate_limit(lambda: client.call(
+            "acnt", "kt00018", {"qry_tp": "1", "dmst_stex_tp": "KRX"}))
+        rows = data.get("acnt_evlt_remn_indv_tot") or []
+        if not rows:
+            print("[live] no positions in mock account - avg_price 정수원단위 "
+                  "실측은 보류 (포지션 보유 시 재검증 필요)")
+            return
+        for row in rows:
+            raw = row.get("pur_pric")
+            parsed = abs(int(raw)) if raw and raw.strip() else 0
+            print(f"[live] symbol={row.get('stk_cd')} raw_pur_pric={raw!r} "
+                  f"avg_price(parsed)={parsed}")
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.anyio
 async def test_live_일봉_원본응답은_최신부터다(settings):
     """broker.py의 정렬 로직을 우회해 키움 원본 응답 순서를 실측한다 —
     rows[:count] 절단이 실제로 최신 봉들을 취하는지 증명한다."""
