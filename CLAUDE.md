@@ -46,6 +46,19 @@ updated whenever the user introduces a new rule or changes direction.
    for their confirmation. Never commit without it. Commit messages must contain
    **no AI attribution** — no `Co-Authored-By: Claude ...` trailer, no
    "Generated with Claude" lines. This overrides any default harness behavior.
+8. **Four-agent review panel per task.** After coding each implementation task,
+   dispatch four review agents on the task's diff, and move to the next task only
+   when ALL four have verified it (Critical/Important findings must be fixed and
+   re-reviewed):
+   1. **Senior Developer** — readability, boilerplate, patchwork `if` nesting,
+      code reuse; flags violations of SOLID and DRY.
+   2. **Senior Stock Trader** — trading-strategy expert; flags flow/algorithm
+      problems that are disadvantageous or incorrect for actual trading.
+   3. **Architecture Expert** — infrastructure and overall architecture fit.
+   4. **Security Expert** — code security and communication security.
+   The four agents are defined as reusable subagents in `.claude/agents/`
+   (`senior-developer`, `senior-trader`, `architecture-expert`, `security-expert`) —
+   dispatch them by those names via the Agent tool.
 
 ## 3. Architecture (decided)
 
