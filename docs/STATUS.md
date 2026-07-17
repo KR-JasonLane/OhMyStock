@@ -11,8 +11,11 @@
 
 ## ▶ 여기서 재개 (다음 액션)
 
-**Phase 2(데이터 수집 파이프라인) 브레인스토밍 완료, spec 작성됨 — 사용자 spec
-검토 대기. 승인 시 `writing-plans`로 구현 계획서 작성.**
+**Phase 2 spec 승인 + 구현 계획서 작성 완료 — 계획서 실행(Task 1~7) 단계.**
+
+- Phase 2 계획서: `docs/plans/2026-07-17-phase2-data-collection-pipeline-plan.md`
+  (Task 1=TR 스파이크 → 2=하드닝 스위프(에러 계층 domain 이동 포함) → 3=스키마 →
+  4=포트/TR 매핑 → 5=CollectionService → 6=API → 7=풀 수집 실측+문서).
 
 - Phase 2 spec: `docs/specs/2026-07-17-phase2-data-collection-pipeline-design.md`
   (유니버스=전 종목, 시동=POST /collect, 섹터 매핑=키움 TR 우선+KRX 파일 대안 B,
