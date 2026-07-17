@@ -80,16 +80,17 @@ Phase 0 계획서(Task 6)에 정의된 실제 compose 토폴로지는 다음과 
 |---|---|---|
 | `api/` | FastAPI 라우트 / WebSocket 핸들러 — **전송(transport)만** 담당, 비즈니스 로직 없음 | `health.py`(`GET /health`), `ws.py`(`WS /ws`) |
 | `core/` | 설정, 로깅, 레이트리밋, 스케줄링 등 공통 기반 요소 | `config.py`(`Settings`, `get_settings`) |
-| `adapters/` | 외부 연동을 포트 인터페이스 뒤에 숨김 (예: `BrokerPort` → 키움 구현체) | 빈 스텁 (Phase 1에서 채움) |
-| `domain/` | 순수 비즈니스 로직 (전략, 스코어링, 매매 규칙) — 외부 I/O에 의존하지 않음 | 빈 스텁 (Phase 3·5에서 채움) |
+| `adapters/` | 외부 연동 구현체를 포트 인터페이스 뒤에 숨김 (예: 키움 REST 구현체) | 빈 스텁 (Phase 1에서 채움) |
+| `domain/` | 순수 비즈니스 로직 (포트 프로토콜, 전략, 스코어링, 매매 규칙) — 외부 I/O에 의존하지 않음 | `broker.py`(`BrokerPort` + Quote/Candle/Deposit/Position/Balance, Phase 1 Task 2) |
 | `store/` | 영속화 (SQLAlchemy 모델, 마이그레이션) | `db.py`(`create_db_engine`, `check_db`) + Alembic |
 
-**확장 원칙:** 브로커는 `adapters/`의 `BrokerPort` 인터페이스 뒤에 숨긴다. 도메인
-로직(스코어링·전략·매매 규칙)은 어떤 브로커를 쓰는지 알지 못하며, 오직 `BrokerPort`가
-정의한 계약(주문, 시세 조회, 잔고 등)에만 의존한다. 따라서 키움을 다른 브로커(KIS
-등)로 교체하더라도 `domain/`은 수정할 필요가 없다. 이는 "make-it-work-for-now"
-식의 깊은 `if` 분기를 금지하고 명확한 인터페이스로 설계하라는 프로젝트 규칙(CLAUDE.md
-§2 규칙 2)을 아키텍처 수준에서 구현한 것이다.
+**확장 원칙 (헥사고날 아키텍처):** 포트(인터페이스) `BrokerPort`는 `domain/broker.py`가
+소유하고, `adapters/`는 그 구현체(키움 등)를 제공한다. 이렇게 설계하면 `domain/`이 어댑터를
+임포트하지 않으므로, 도메인 로직(스코어링·전략·매매 규칙)은 어떤 브로커를 쓰는지 알지
+못하고 오직 `BrokerPort`가 정의한 계약(주문, 시세 조회, 잔고 등)에만 의존한다. 따라서
+키움을 다른 브로커(KIS 등)로 교체하더라도 `domain/`은 수정할 필요가 없다. 이는
+"make-it-work-for-now" 식의 깊은 `if` 분기를 금지하고 명확한 인터페이스로 설계하라는
+프로젝트 규칙(CLAUDE.md §2 규칙 2)을 아키텍처 수준에서 구현한 것이다.
 
 앱 진입점은 `app/main.py`의 `create_app(settings: Settings | None = None) -> FastAPI`
 앱 팩토리다. 모듈 임포트만으로 환경변수를 요구하지 않도록 팩토리 함수로 분리했으며,

@@ -1,0 +1,31 @@
+from datetime import date
+from decimal import Decimal
+
+from app.domain.broker import Balance, BrokerPort, Candle, Deposit, Position, Quote
+
+
+def test_모델은_불변이고_필드를_보존한다():
+    q = Quote(symbol="005930", name="삼성전자", price=71000, change_rate=Decimal("1.25"), volume=1000)
+    c = Candle(symbol="005930", date=date(2026, 7, 16), open=70500, high=71200,
+               low=70100, close=71000, volume=999)
+    d = Deposit(total=100_000, available=90_000)
+    p = Position(symbol="005930", name="삼성전자", quantity=10, avg_price=69000,
+                 current_price=71000, eval_amount=710_000)
+    b = Balance(positions=(p,), total_eval=710_000, total_profit=20_000)
+    assert q.price == 71000 and c.close == 71000 and d.available == 90_000
+    assert b.positions[0].quantity == 10
+    assert isinstance(b.positions, tuple)
+    import pytest
+    with pytest.raises(Exception):
+        q.price = 0  # frozen
+
+
+def test_BrokerPort는_런타임_프로토콜이다():
+    class Fake:
+        async def get_quote(self, symbol): ...
+        async def get_daily_candles(self, symbol, count): ...
+        async def get_deposit(self): ...
+        async def get_balance(self): ...
+
+    assert isinstance(Fake(), BrokerPort)
+    assert not isinstance(object(), BrokerPort)
