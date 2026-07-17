@@ -131,9 +131,11 @@ for the full evidence trail.
   **Verified live: field names match research exactly** — daily-candle rows
   (`stk_dt_pole_chart_qry` array) use `dt`/`open_pric`/`high_pric`/`low_pric`/
   `cur_prc`/`trde_qty`; current-price (`ka10001`) uses `stk_nm`/`cur_prc`/`flu_rt`/
-  `trde_qty`. **⚠️ `ka10081` requires `base_dt` = today's date (`YYYYMMDD`, KST) in
+  `trde_qty`. **⚠️ `ka10081` requires a non-empty `base_dt` (`YYYYMMDD`) in
   the request body — an empty string is rejected** with
-  `[1511:필수 입력 값이 존재하지 않습니다. 필수입력파라미터=base_dt]`. **The raw daily
+  `[1511:필수 입력 값이 존재하지 않습니다. 필수입력파라미터=base_dt]`. The adapter
+  sends today's date (KST); acceptance of other dates and non-business-day
+  semantics are unmeasured (Phase 2 PRE-GATE). **The raw daily
   candle response is descending (newest → oldest)** — callers/adapters must re-sort
   to ascending (oldest → newest) if that ordering is required.
 - **Orders:** buy `kt10000`, sell `kt10001`, modify `kt10002`, cancel `kt10003`.

@@ -17,8 +17,7 @@
 - ⚠️ **PRE-GATE — Phase 2 spec/구현 착수 전 반드시 먼저 확인:** 일봉 조회
   (`ka10081`)의 `base_dt`가 **비영업일(주말/공휴일)**에 어떻게 동작하는지 모의서버
   실측 또는 공식 문서로 확인해야 한다. 야간 배치(Phase 2 핵심 설계)가 이 동작에
-  직접 의존한다. 근거: `docs/retrospectives/2026-07-17-phase1-kiwoom-broker-adapter.md`
-  §8, 결정 로그 #14.
+  직접 의존한다. 근거: `docs/retrospectives/2026-07-17-phase1-kiwoom-broker-adapter.md` §8.
 - ⚠️ **PRE-GATE — Phase 5(TP/SL 로직 배포) 착수 전 반드시 먼저 확인(hard gate):**
   모의 계좌에 실제 포지션을 만든 뒤 `kt00018` 행 단위 필드(`stk_cd`/`pur_pric`/
   `cur_prc` 등)와 `avg_price` 원 단위 반올림 가정을 실측 검증해야 한다. 검증용
@@ -94,8 +93,9 @@
   구현됨) → 전종목 봉 수집은 **야간 배치** (Phase 2).
 - 인증 토큰 만료 → 재발급 로직 구현 완료 (Phase 1, `expires_dt` 절대 KST 시각
   기반 — 실측 완료).
-- **⚠️ `ka10081`(일봉) 조회는 `base_dt`(당일 YYYYMMDD)가 필수 — 빈 값 거부됨을
-  실측 확인.** 비영업일 동작은 미실측 → **Phase 2 PRE-GATE** (위 재개 지점 참고).
+- **⚠️ `ka10081`(일봉) 조회는 비어 있지 않은 `base_dt`(YYYYMMDD)가 필수 — 빈 값
+  거부는 실측 확인.** 어댑터는 당일(KST)을 전송 중이며, **타 날짜 허용 여부와
+  비영업일 동작은 미실측** → **Phase 2 PRE-GATE** (위 재개 지점 참고).
 - **⚠️ `kt00018`(잔고) 행 단위 필드와 `avg_price` 반올림은 미실측(모의 계좌 포지션
   0개)** → **Phase 5 PRE-GATE(hard gate)**, 검증용 라이브 테스트는 이미 존재.
 - 상세·출처는 `CLAUDE.md` §5, `docs/retrospectives/2026-07-17-phase1-kiwoom-broker-adapter.md` 참고.

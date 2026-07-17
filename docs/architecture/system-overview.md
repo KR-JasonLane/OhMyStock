@@ -80,7 +80,7 @@ Phase 0 계획서(Task 6)에 정의된 실제 compose 토폴로지는 다음과 
 |---|---|---|
 | `api/` | FastAPI 라우트 / WebSocket 핸들러 — **전송(transport)만** 담당, 비즈니스 로직 없음 | `health.py`(`GET /health`), `ws.py`(`WS /ws`) |
 | `core/` | 설정, 로깅, 레이트리밋, 스케줄링 등 공통 기반 요소 | `config.py`(`Settings`, `get_settings`) |
-| `adapters/` | 외부 연동 구현체를 포트 인터페이스 뒤에 숨김 (예: 키움 REST 구현체) | 빈 스텁 (Phase 1에서 채움) |
+| `adapters/` | 외부 연동 구현체를 포트 인터페이스 뒤에 숨김 (예: 키움 REST 구현체) | `kiwoom/` — `errors`·`auth`(TokenManager)·`rate_limiter`·`client`·`broker` (Phase 1 Task 3~7) |
 | `domain/` | 순수 비즈니스 로직 (포트 프로토콜, 전략, 스코어링, 매매 규칙) — 외부 I/O에 의존하지 않음 | `broker.py`(`BrokerPort` + Quote/Candle/Deposit/Position/Balance, Phase 1 Task 2) |
 | `store/` | 영속화 (SQLAlchemy 모델, 마이그레이션) | `db.py`(`create_db_engine`, `check_db`) + Alembic |
 
