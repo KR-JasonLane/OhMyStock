@@ -4,6 +4,8 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.adapters.kiwoom.broker import KiwoomBroker
+from app.adapters.kiwoom.client import KiwoomHttpClient
 from app.api.health import router as health_router
 from app.api.ws import router as ws_router
 from app.core.config import Settings, get_settings
@@ -21,8 +23,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         app.state.engine = create_db_engine(settings)
-        yield
-        app.state.engine.dispose()
+        try:
+            app.state.broker = KiwoomBroker(KiwoomHttpClient(settings))
+            try:
+                yield
+            finally:
+                await app.state.broker.aclose()
+        finally:
+            app.state.engine.dispose()
 
     app = FastAPI(title="OhMyStock Backend", lifespan=lifespan)
     app.state.settings = settings
