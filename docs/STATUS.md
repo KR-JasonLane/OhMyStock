@@ -4,21 +4,34 @@
 > 새 세션에서 재개할 때 이 문서를 가장 먼저 읽으세요. 매 작업 세션이 끝날 때마다
 > 이 문서를 갱신합니다(핸드오프 문서).
 
-- **최종 수정:** 2026-07-14
+- **최종 수정:** 2026-07-17
 - **프로젝트:** OhMyStock — 한국 주식 자동매매 시스템
 
 ---
 
 ## ▶ 여기서 재개 (다음 액션)
 
-**Phase 0 spec 승인됨(2026-07-14). 구현 계획서 작성·커밋 완료. 다음은 계획서 실행.**
+**Phase 0(워킹 스켈레톤) 완료 (2026-07-17). 다음은 Phase 1(키움 브로커 어댑터,
+모의투자) spec 브레인스토밍.**
 
-- 계획서: `docs/plans/2026-07-14-phase0-walking-skeleton-plan.md` (Task 1~10, TDD)
-- 사용자 결정(2026-07-14): 구현은 **다음 세션에서 실행**. 재개 시
-  **`subagent-driven-development`**(권장) 또는 **`executing-plans`** 스킬로 계획서를
-  태스크 단위 실행한다.
-- ⚠️ 커밋 규칙 변경(CLAUDE.md 규칙 7): 커밋 전 **메시지 전문 컨펌 필수**, 커밋
-  메시지에 **AI 흔적(Co-Authored-By 등) 금지**. 기존 이력도 재작성 완료(2026-07-14).
+- Phase 0 회고록: `docs/retrospectives/2026-07-17-phase0-walking-skeleton.md`
+  (Task 1~10 각 목적·파일·커밋 SHA, 설계/패턴, 겪은 문제, E2E 검증 결과, 남은
+  Minor 항목 전부 기록됨).
+- 진행 원장: `.superpowers/sdd/progress.md` (태스크별 커밋 SHA + 리뷰 결과 + 보류
+  Minor 목록).
+- E2E DoD 7개 항목 전부 통과(2026-07-17, 코디네이터 검증 + 사용자 육안 확인):
+  clean `docker compose up` → `db` healthy/`backend` up, `/health` →
+  `{"status":"ok","db":"ok","mode":"mock"}`, 백엔드 `uv run pytest` 9 passed,
+  프론트 `pnpm test` 3 passed, Electron 창 상태 표시 확인, 백엔드 단절/복구 시
+  자동 재연결 확인. 증거: `.superpowers/sdd/task-10-e2e-evidence.md`.
+- 커밋 10개 메시지는 사용자가 사전 일괄 승인함(계획서의 메시지 그대로).
+- ⚠️ **블로커 (Phase 1 착수 전 사용자 작업 필수):** `openapi.kiwoom.com` 가입 +
+  **app key/secret 발급** + **모의투자 신청**. Phase 0에서는 "미해결 선행조건"
+  (환경변수 존재만 검증, 실제 호출 없음)이었지만, Phase 1은 실제 키움 REST API를
+  호출하므로 이제 **실제 블로커**다. 이 세 가지가 끝나기 전에는 Phase 1 브로커
+  어댑터 구현에 착수할 수 없다(spec/plan 작성까지는 가능).
+- ⚠️ 커밋 규칙(CLAUDE.md 규칙 7): 커밋 전 **메시지 전문 컨펌 필수**, 커밋 메시지에
+  **AI 흔적(Co-Authored-By 등) 금지**. 기존 이력도 재작성 완료(2026-07-14).
 
 새 세션에서 재개하려면 Claude에게 이렇게 말하세요:
 > "`docs/STATUS.md` 읽고 재개 지점부터 계속해."
@@ -31,9 +44,10 @@
 [x] 브레인스토밍: 자산군, 브로커, 아키텍처, DB, 컨테이너 경계
 [x] Phase 0 설계 spec 작성 + 커밋 + 사용자 승인 (2026-07-14)
 [x] writing-plans: Phase 0 구현 계획서 (docs/plans/2026-07-14-phase0-walking-skeleton-plan.md)
-[ ] Phase 0 구현 (워킹 스켈레톤)                <-- 다음
-[ ] Phase 0 회고록
-[ ] Phase 1: 키움 브로커 어댑터 (모의투자)
+[x] Phase 0 구현 (워킹 스켈레톤) — Task 1~10 완료, E2E DoD 7개 항목 전부 통과 (2026-07-17)
+[x] Phase 0 회고록 (docs/retrospectives/2026-07-17-phase0-walking-skeleton.md)
+[ ] Phase 1: 키움 브로커 어댑터 (모의투자)                <-- 다음 (사용자의 키움 가입/키
+    발급/모의투자 신청 완료 후 spec 브레인스토밍부터)
 ... Phase 2~8 (CLAUDE.md 로드맵 참고)
 ```
 
@@ -57,9 +71,15 @@
 - 인증 토큰 만료 → 재발급 로직 필요 (Phase 1).
 - 상세·출처는 `CLAUDE.md` §5 참고.
 
-## 미해결 선행조건 (사용자 작업, Phase 1에 필요 — Phase 0엔 불필요)
+## 미해결 선행조건 → 이제 실제 블로커 (사용자 작업, Phase 1 착수 전 필수)
 
-- `openapi.kiwoom.com` 가입, **app key / secret** 발급, **모의투자** 신청.
+Phase 0에서는 환경변수 존재 여부만 검증하고 실제 키움 API를 호출하지 않았기 때문에
+"미해결 선행조건"으로만 기록해 두었다. Phase 1(브로커 어댑터)은 실제로 키움 REST
+API를 호출하므로, 아래 세 가지가 없으면 **구현을 시작할 수 없다**.
+
+- [ ] `openapi.kiwoom.com` 가입
+- [ ] **app key / secret** 발급
+- [ ] **모의투자** 신청
 
 ## 문서 인덱스
 
@@ -68,8 +88,9 @@
 | `CLAUDE.md` | 규칙·아키텍처·검증된 API 팩트·로드맵 (매 세션 자동 로드, 영어) |
 | `docs/STATUS.md` | 이 문서 — 재개 지점 + 결정 로그 |
 | `docs/specs/2026-06-16-phase0-walking-skeleton-design.md` | Phase 0 설계 spec |
-| `docs/architecture/system-overview.md` | 마스터 청사진 (Phase 0 구현 시 생성 — 아직 없음) |
+| `docs/architecture/system-overview.md` | 마스터 청사진 (Task 9, Phase 0 구현 중 작성) |
 | `docs/plans/2026-07-14-phase0-walking-skeleton-plan.md` | Phase 0 구현 계획서 (Task 1~10) |
+| `docs/retrospectives/2026-07-17-phase0-walking-skeleton.md` | Phase 0 회고록 (Task 1~10 상세, E2E 결과) |
 | `docs/retrospectives/` | 작업별 회고록 (규칙 4) |
 
 ## 세션 연속성 작동 방식
