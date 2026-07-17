@@ -28,6 +28,26 @@
   `cur_prc` 등)와 `avg_price` 원 단위 반올림 가정을 실측 검증해야 한다. 검증용
   라이브 테스트(`test_live_잔고_원본응답_avg_price_실측`)는 이미 존재 — 포지션만
   생기면 즉시 재실행 가능.
+- ⚠️ **PRE-GATE — Phase 3(스코어링) 착수 전 반드시 먼저 확정:** Phase 2 Task 4
+  (카탈로그 TR 매핑) 리뷰 패널에서 발견된 3건 — 근거:
+  `backend/app/adapters/kiwoom/broker.py`(`list_instruments`/`list_sectors`/
+  `list_sector_members`), `backend/app/domain/broker.py`(`Instrument`/`Sector`),
+  `.superpowers/sdd/p2-task-4-report.md` §4·§7.
+  1. **집계성 업종 제외 필터 확정** — 업종코드 "001"(종합(KOSPI))·"101"(종합
+     (KOSDAQ)) 등은 사실상 시장 전체(코스피 2477/2478종목)를 포함하는 합성
+     업종이라 개별 업종과 성격이 다르다. 섹터 로테이션/스코어링에 넣기 전
+     제외 여부·판별 규칙을 정해야 한다(수집 매핑 단계 필터는 Task 5에서
+     적용 예정).
+  2. **ETF/보통주 구분 소비 정책** — `kind` 필드는 실측상 보통주·ETF 모두
+     동일 값("A")으로 나와 판별 신호가 아니다. 실제 구분은 `marketCode`
+     기반이며(Task 4에서 `list_instruments`가 요청 시장코드와 다른
+     `marketCode` 행을 걸러내도록 수정함), 이 필터링을 넘어 Phase 3
+     소비자가 ETF를 스코어링 유니버스에 포함할지/제외할지는 아직 미결정.
+  3. **관리종목/거래정지 필드 미저장 재평가** — 원본 응답에 `state`
+     (예: "관리종목|보증금없음|신용가능")·`auditInfo` 필드가 존재하지만
+     `Instrument` 도메인 모델은 이를 저장하지 않기로 했다(Task 4 범위 밖
+     판단). 매매 후보 필터링에 필요해지면 Phase 3 스펙에서 도메인 모델
+     확장 여부를 재평가할 것.
 - Phase 1 산출물: `backend/app/domain/broker.py`(`BrokerPort` + 도메인 모델),
   `backend/app/adapters/kiwoom/`(`errors.py`/`auth.py`/`rate_limiter.py`/
   `client.py`/`broker.py`) — `app.state.broker`로 FastAPI lifespan에 통합됨.

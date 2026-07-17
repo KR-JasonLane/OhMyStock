@@ -90,3 +90,21 @@ class BrokerPort(Protocol):
     async def get_deposit(self) -> Deposit: ...
 
     async def get_balance(self) -> Balance: ...
+
+    async def list_instruments(self, market: str) -> list[Instrument]:
+        """시장별 상장 종목 목록. market: "kospi" | "kosdaq" | "etf"."""
+        ...
+
+    async def list_sectors(self) -> list[Sector]:
+        """업종 코드표 (전 시장)."""
+        ...
+
+    async def list_sector_members(self, sector_code: str, market: str) -> list[str]:
+        """해당 업종에 속한 종목코드 목록.
+
+        market이 필수인 이유: 업종 코드 체계는 시장(코스피/코스닥)마다 별도로
+        운영되므로, 업종코드만으로는 어느 시장의 업종인지 특정할 수 없다.
+        호출자는 list_sectors()가 반환한 Sector.market 값을 그대로 넘기면 된다.
+        브로커별 상세 근거는 각 어댑터 구현체의 주석을 참고할 것.
+        """
+        ...

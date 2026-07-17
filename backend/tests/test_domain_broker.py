@@ -1,7 +1,16 @@
 from datetime import date
 from decimal import Decimal
 
-from app.domain.broker import Balance, BrokerPort, Candle, Deposit, Position, Quote
+from app.domain.broker import (
+    Balance,
+    BrokerPort,
+    Candle,
+    Deposit,
+    Instrument,
+    Position,
+    Quote,
+    Sector,
+)
 
 
 def test_모델은_불변이고_필드를_보존한다():
@@ -26,9 +35,19 @@ def test_BrokerPort는_런타임_프로토콜이다():
         async def get_daily_candles(self, symbol, count): ...
         async def get_deposit(self): ...
         async def get_balance(self): ...
+        async def list_instruments(self, market): ...
+        async def list_sectors(self): ...
+        async def list_sector_members(self, sector_code, market): ...
 
     assert isinstance(Fake(), BrokerPort)
     assert not isinstance(object(), BrokerPort)
+
+
+def test_Instrument와_Sector는_불변이고_필드를_보존한다():
+    i = Instrument(symbol="005930", name="삼성전자", market="kospi", instrument_type="ST")
+    s = Sector(code="013", market="kospi", name="전기전자")
+    assert i.symbol == "005930" and i.market == "kospi"
+    assert s.code == "013" and s.name == "전기전자"
 
 
 def test_비정상_캔들은_생성시_ValueError():

@@ -103,6 +103,42 @@ async def test_live_예수금과_잔고(settings):
 
 
 @pytest.mark.anyio
+async def test_live_종목리스트_코스피(settings):
+    b = KiwoomBroker(KiwoomHttpClient(settings))
+    try:
+        items = await _retry_on_token_rate_limit(lambda: b.list_instruments("kospi"))
+        assert len(items) > 100
+        print(f"[live] kospi instruments={len(items)} sample={items[0].symbol} "
+              f"instrument_type={items[0].instrument_type!r}")
+    finally:
+        await b.aclose()
+
+
+@pytest.mark.anyio
+async def test_live_업종코드와_구성종목(settings):
+    # stex_tp="1"이 코스피뿐 아니라 코스닥 업종 조회에서도 유효한지 실측한다 —
+    # 코스피 업종만 검증하면 stex_tp가 시장별로 달라야 할 가능성을 놓친다.
+    b = KiwoomBroker(KiwoomHttpClient(settings))
+    try:
+        sectors = await _retry_on_token_rate_limit(lambda: b.list_sectors())
+        assert sectors
+        kospi_sector = next(s for s in sectors if s.market == "kospi")
+        kosdaq_sector = next(s for s in sectors if s.market == "kosdaq")
+
+        kospi_members = await _retry_on_token_rate_limit(
+            lambda: b.list_sector_members(kospi_sector.code, kospi_sector.market))
+        kosdaq_members = await _retry_on_token_rate_limit(
+            lambda: b.list_sector_members(kosdaq_sector.code, kosdaq_sector.market))
+
+        print(f"[live] sectors={len(sectors)} "
+              f"kospi={kospi_sector.code} members={len(kospi_members)} "
+              f"kosdaq={kosdaq_sector.code} members={len(kosdaq_members)}")
+        assert isinstance(kospi_members, list) and isinstance(kosdaq_members, list)
+    finally:
+        await b.aclose()
+
+
+@pytest.mark.anyio
 async def test_live_잔고_원본응답_avg_price_실측(settings):
     """broker.py의 파싱을 우회해 kt00018 원본 pur_pric 문자열을 실측하고,
     Position.avg_price의 파싱 결과와 나란히 출력한다 (원 단위 정수 여부 검증)."""

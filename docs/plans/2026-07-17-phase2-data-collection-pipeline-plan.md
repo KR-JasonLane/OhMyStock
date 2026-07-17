@@ -1117,7 +1117,7 @@ class CollectionService:
             await asyncio.to_thread(self._store.upsert_sectors, sectors)
             mapping: dict[str, str] = {}
             for sector in sectors:
-                for symbol in await self._broker.list_sector_members(sector.code):
+                for symbol in await self._broker.list_sector_members(sector.code, sector.market):
                     mapping[symbol] = sector.code
             await asyncio.to_thread(self._store.set_sector_codes, mapping)
 
