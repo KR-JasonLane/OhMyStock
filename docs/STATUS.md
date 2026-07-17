@@ -11,13 +11,15 @@
 
 ## ▶ 여기서 재개 (다음 액션)
 
-**Phase 1(키움 브로커 어댑터, 모의투자) 완료 — 다음은 Phase 2(데이터 수집
-파이프라인) spec 브레인스토밍부터 시작.**
+**Phase 2(데이터 수집 파이프라인) 브레인스토밍 완료, spec 작성됨 — 사용자 spec
+검토 대기. 승인 시 `writing-plans`로 구현 계획서 작성.**
 
-- ⚠️ **PRE-GATE — Phase 2 spec/구현 착수 전 반드시 먼저 확인:** 일봉 조회
-  (`ka10081`)의 `base_dt`가 **비영업일(주말/공휴일)**에 어떻게 동작하는지 모의서버
-  실측 또는 공식 문서로 확인해야 한다. 야간 배치(Phase 2 핵심 설계)가 이 동작에
-  직접 의존한다. 근거: `docs/retrospectives/2026-07-17-phase1-kiwoom-broker-adapter.md` §8.
+- Phase 2 spec: `docs/specs/2026-07-17-phase2-data-collection-pipeline-design.md`
+  (유니버스=전 종목, 시동=POST /collect, 섹터 매핑=키움 TR 우선+KRX 파일 대안 B,
+  구현 Task 1 = 신규 TR 3종 실측 스파이크).
+- ✅ **Phase 2 PRE-GATE 통과 (2026-07-17 실측):** `base_dt`는 조회 기준일 —
+  비영업일은 직전 영업일 자동 보정(에러 없음), 과거 백필 가능, 미래는 오늘 클램프.
+  일봉 1페이지=600봉. (`.superpowers/sdd/phase2-pregate-basedt.txt`)
 - ⚠️ **PRE-GATE — Phase 5(TP/SL 로직 배포) 착수 전 반드시 먼저 확인(hard gate):**
   모의 계좌에 실제 포지션을 만든 뒤 `kt00018` 행 단위 필드(`stk_cd`/`pur_pric`/
   `cur_prc` 등)와 `avg_price` 원 단위 반올림 가정을 실측 검증해야 한다. 검증용
@@ -85,6 +87,10 @@
 | 12 | 태스크마다 **4-에이전트 리뷰 패널** 전원 통과 후 진행 | 사용자 지시 — 개발자/트레이더/아키텍트/보안 관점 상시 검증 | CLAUDE.md 규칙 8, `.claude/agents/` |
 | 13 | 4-에이전트 패널이 **8개 코드 태스크 중 7개**에서 Critical/Important 결함을 잡아 수정시킴(1개만 1차 전원승인) — 패널 프로세스(결정 #12)의 유효성이 실측으로 입증됨 | 락-sleep 전역 직렬화, 401/429 재시도 예산 혼합, silent-0 금액 필드 등 실제 결함을 코드 작성 직후 잡아냄 | `docs/retrospectives/2026-07-17-phase1-kiwoom-broker-adapter.md` §3 총괄 |
 | 14 | 트레이딩 엔진 관련 정책(긴급 TR 우선순위·타임아웃)은 **Phase 1에서 설계하지 않고 Phase 5로 이관** | Phase 1은 주문을 다루지 않아 "긴급"을 정의할 도메인 지식(소비자)이 없음 — 조기 설계는 추측 기반이 됨(YAGNI). 인프라(레이트리미터 락-바깥 sleep)는 이미 이를 지원하도록 준비됨 | `docs/retrospectives/2026-07-17-phase1-kiwoom-broker-adapter.md` §6 |
+| 15 | P2 유니버스 = **전 종목** (ETF/ETN 포함, 구분 필드 저장) | 사용자 결정 — 유연성 우선, 필터는 소비 단계에서 | P2 spec §1 |
+| 16 | P2 수집 시동 = **HTTP API** (`POST /collect` + status) | 사용자 결정 — Phase 7 대시보드 버튼의 토대. localhost 바인딩 전제, 인증은 Phase 7 전 재평가 | P2 spec §1·§8 |
+| 17 | 일봉은 1페이지(600봉)를 **그대로 upsert** (6개월로 자르지 않음) | 추가 비용 없이 오는 데이터 — 소비자가 잘라 씀. 재실행 멱등 | P2 spec §1 |
+| 18 | 섹터 매핑 = 키움 TR(ka10101+ka20002) 우선, **실측 스파이크로 확정** — 불발 시 KRX 정보데이터시스템 파일 조인(대안 B) | ka20002의 "구성종목 반환"이 미검증 추정이라 코드 작성 전 실측이 최선 | P2 spec §1·§5 |
 
 ## 후속 설계를 제약하는 검증된 팩트 (사용 전 재확인)
 
