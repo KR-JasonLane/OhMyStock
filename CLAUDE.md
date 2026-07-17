@@ -101,7 +101,11 @@ Confirmed from the official portal and reference wrappers (re-verify before rely
 Items tagged **"verified live against mock server (2026-07-17)"** were additionally
 confirmed by real HTTP calls to `mockapi.kiwoom.com` during Phase 1 (broker adapter)
 implementation — see `docs/retrospectives/2026-07-17-phase1-kiwoom-broker-adapter.md`
-for the full evidence trail.
+for the full evidence trail. Items tagged **"verified live against mock server
+(2026-07-17, Phase 2)"** were additionally confirmed during Phase 2 (data collection
+pipeline) implementation, including a full-universe collection run — see
+`docs/retrospectives/2026-07-17-phase2-data-collection-pipeline.md` for the full
+evidence trail.
 
 - **Auth:** `POST https://api.kiwoom.com/oauth2/token` with
   `grant_type=client_credentials`, `appkey`, `secretkey`. **Verified live against mock
@@ -134,8 +138,11 @@ for the full evidence trail.
   `trde_qty`. **⚠️ `ka10081` requires a non-empty `base_dt` (`YYYYMMDD`) in
   the request body — an empty string is rejected** with
   `[1511:필수 입력 값이 존재하지 않습니다. 필수입력파라미터=base_dt]`. The adapter
-  sends today's date (KST); acceptance of other dates and non-business-day
-  semantics are unmeasured (Phase 2 PRE-GATE). **The raw daily
+  sends today's date (KST) by default. **Verified live against mock server
+  (2026-07-17, Phase 2 PRE-GATE, `.superpowers/sdd/phase2-pregate-basedt.txt`):**
+  `base_dt` is the as-of query date — non-business days auto-correct to the prior
+  business day (no error), past dates return history as of that date (backfill is
+  possible), and future dates clamp to today. **The raw daily
   candle response is descending (newest → oldest)** — callers/adapters must re-sort
   to ascending (oldest → newest) if that ordering is required.
 - **Orders:** buy `kt10000`, sell `kt10001`, modify `kt10002`, cancel `kt10003`.
@@ -165,9 +172,57 @@ for the full evidence trail.
   `test_live_잔고_원본응답_avg_price_실측`).
 - **Real-time WebSocket:** `0B` execution, `0D` order book, `04` balance, etc. Not
   exercised in Phase 1 (deferred to Phase 5).
+- **Catalog TRs — verified live against mock server (2026-07-17, Phase 2):**
+  - `ka10099` (`POST /api/dostk/stkinfo`, body `mrkt_tp`: `"0"`=kospi, `"10"`=kosdaq,
+    `"8"`=etf) lists instruments; list key `"list"`; row fields include `code`/
+    `name`/`marketCode`/`marketName`/`upName`/`upSizeName`/`state`/`auditInfo`/
+    `kind`/`listCount`/`regDay`/`lastPrice`/`companyClassName`/`orderWarning`/
+    `nxtEnable`. Single page per market (no continuation observed at these row
+    counts). **⚠️ The raw response mixes marketCodes regardless of the requested
+    market** — `mrkt_tp="0"` (kospi) returns 2,478 raw rows but only **919** have
+    `marketCode="0"` (pure kospi common stock); the remainder are ETFs
+    (`marketCode="8"`, 1,147 rows) plus 6 other marketCodes (412 rows combined).
+    Callers must filter rows by `marketCode`, not trust the request parameter alone
+    (measured kospi: 2,478 raw → 919 actual).
+  - `ka10101` (same endpoint, body `mrkt_tp`: `"0"`=kospi, `"1"`=kosdaq — **note:
+    the kosdaq value differs from ka10099's `"10"`**) lists sector codes; list key
+    `"list"`; row fields `marketCode`/`code`/`name`/`group`. Measured **31 kospi +
+    34 kosdaq** sectors.
+  - `ka20002` (`POST /api/dostk/sect`) lists sector members; **requires all three
+    body fields `mrkt_tp` + `inds_cd` + `stex_tp`** (`stex_tp` accepts `"1"` or
+    `"KRX"`) — omitting any one is rejected with `[1511:필수 입력 값이 존재하지
+    않습니다]`. List key `"inds_stkpc"`; row field `stk_cd`. **Aggregate sector
+    `001` (종합(KOSPI)) contains effectively the entire market (2,477 members) —
+    aggregate sector codes must be filtered out before using sector membership for
+    scoring/rotation** (same pattern expected for kosdaq's `101`).
+- **⚠️ Token semantics — verified live (Phase 2): an invalid/superseded token does
+  NOT return HTTP 401** — it returns **HTTP 200 with `return_code != 0` and
+  `return_msg` containing `[8005:...]`**. The client treats 8005 as an
+  invalidate-and-reissue-once trigger, identical in spirit to the 401 path
+  (`backend/app/adapters/kiwoom/client.py`, commit `50391ac`). **(Unconfirmed
+  inference from measurement, not from official docs): an appkey appears to have
+  only one valid token at a time** — issuing a new token from a second process
+  invalidated the backend's in-flight token during the Phase 2 full-collection run
+  (this is how the 8005 case was discovered). Operational rule: **never issue a
+  Kiwoom token from a host-side script/second process while the backend is running**
+  a live `TokenManager` against the same appkey.
+- **Degenerate candle responses exist:** symbol `012510` returned a single candle
+  row with all OHLCV fields as empty strings during the full-universe run.
+  Client-side OHLC validation (`Candle.__post_init__`, domain-level, fail-loud)
+  correctly rejects this construction; the adapter converts it to `BrokerError` and
+  `CollectionService` records it as a per-symbol failure rather than silently
+  persisting zero-valued data.
+- **Full-universe collection measured (Phase 2, mock server):** 3,887 active
+  instruments (post `marketCode`-filter, deduplicated across kospi/kosdaq/etf);
+  full daily-candle collection took **~67 minutes** at the ~1 req/s per-TR rate
+  limit (22:18–23:25 KST); **2,120,535 candle rows** written; 3,886 succeeded / 1
+  failed (`012510` above). Idempotent rerun (resume-skip via
+  `CollectionStore.latest_candle_date`) completed in **~2 minutes** with an
+  unchanged candle count and the same single failure.
 
 Sources: https://openapi.kiwoom.com/guide/index , https://github.com/younghwan91/kiwoom-rest-api,
-live verification against `mockapi.kiwoom.com` (2026-07-17, Phase 1 implementation).
+live verification against `mockapi.kiwoom.com` (2026-07-17, Phase 1 implementation;
+2026-07-17, Phase 2 implementation including full-universe collection).
 
 ## 6. Roadmap (each phase = its own spec → plan → build → retrospective)
 

@@ -1,10 +1,12 @@
 # 설계 Spec — Phase 2: 데이터 수집 파이프라인
 
 - **날짜:** 2026-07-17
-- **상태:** 초안 (사용자 검토 대기)
+- **상태:** 확정 — 구현 완료 (2026-07-17)
 - **선행:** Phase 1 키움 브로커 어댑터 완료 (2026-07-17,
   `docs/retrospectives/2026-07-17-phase1-kiwoom-broker-adapter.md`).
   **Phase 2 PRE-GATE 실측 완료** (§5 참고).
+- **완료 근거:** `docs/retrospectives/2026-07-17-phase2-data-collection-pipeline.md`
+  (Task 1~7 상세, 패널 리뷰 결과, 풀 수집 실측).
 - **범위:** 장 마감 후 전 종목 일봉 + 업종(섹터) 매핑을 수집해 PostgreSQL에 저장하는
   파이프라인. 시동은 HTTP API(수동), 자동 스케줄링은 Phase 6.
 
@@ -128,11 +130,20 @@ class CollectionService:
 - 일봉 1페이지 = **600봉** → 6개월 수집은 종목당 1호출.
 - 실행 중 429 발생 시 백오프+penalize가 실전 경로에서 정상 작동함을 관측.
 
-**스파이크(구현 Task 1)에서 실측할 것:**
-1. `ka10099` 응답 필드명(구분/관리종목/거래정지 필드 존재 여부), 페이지 크기
-2. `ka10101` 응답 포맷(JSON 구조 vs 레거시 문자열)
-3. **`ka20002`가 업종코드→구성종목 목록을 실제로 반환하는지** (아니면 대안 B로 전환)
-4. 세 TR의 모의서버 지원 여부
+**스파이크(Task 1, `.superpowers/sdd/phase2-spike-tr.txt`) 실측 결과 — 분기 A 채택
+(키움 TR 경로 확정, 대안 B 불필요):**
+
+| TR | 엔드포인트/바디 | 응답 구조 | 실측 수치 |
+|---|---|---|---|
+| `ka10099`(종목리스트) | `POST /api/dostk/stkinfo`, `mrkt_tp` 0=코스피/10=코스닥/8=ETF | list 키 `"list"`; 행에 `code`/`name`/`marketCode`/`marketName`/`upName`/`upSizeName`/`state`/`auditInfo`/`kind`/`listCount`/`regDay`/`lastPrice` 등 | 코스피 요청 2478행 원본(마켓코드 혼재) → `marketCode` 필터 후 919행 실제 코스피; 코스닥 1821행; ETF 1147행. 1페이지로 전량 수신(`cont=N`) |
+| `ka10101`(업종코드) | 동일 엔드포인트, `mrkt_tp` 0=코스피/**1**=코스닥(ka10099와 값이 다름) | list 키 `"list"`; 행에 `marketCode`/`code`/`name`/`group` | 코스피 31개, 코스닥 34개 업종 |
+| `ka20002`(업종별구성종목) | `POST /api/dostk/sect`, **`mrkt_tp`+`inds_cd`+`stex_tp`("1" 또는 "KRX") 3개 필수**(누락 시 `[1511]` 거부) | list 키 `"inds_stkpc"`; 행에 `stk_cd`(6자리) 등 | 업종 "001"(종합(KOSPI)) 구성종목 2477개 — 사실상 코스피 전체(집계 업종은 하류에서 필터 필요) |
+
+**판정:** ka20002가 구성종목을 정상 반환하므로 **분기 A(키움 TR 벌크 경로)를
+채택**했고, 대안 B(KRX 파일 조인)로 전환할 필요가 없었다. `instrument_type`은
+구분 전용 필드가 없어(`kind`는 보통주·ETF 모두 "A"로 동일) `marketCode` 기반
+필터로 정정, 관리종목/감리 정보는 `state`/`auditInfo`에 존재하나 도메인 모델은
+저장하지 않기로 결정(Phase 3 PRE-GATE로 이관, `docs/STATUS.md` 참고).
 
 ## 6. 테스트
 
@@ -158,15 +169,26 @@ class CollectionService:
 
 ## 8. 리스크 / 미해결 항목
 
-- **ka20002 가정 (핵심):** 구성종목 미반환 시 대안 B(KRX 파일) 전환 — 스파이크에서
-  즉시 판정, spec 수정 없이 계획서 분기로 처리.
+- **ka20002 가정 (핵심) — 해결됨:** 스파이크(Task 1)에서 구성종목을 정상 반환함을
+  확인, **분기 A 채택**(대안 B 불필요). §5 표 참고.
 - **모의서버 데이터 품질:** 모의서버의 종목 수/업종 데이터가 실전과 다를 수 있음 —
   실측 수치를 기록하고, 실전 전환 시 재검증 항목으로 남김.
 - **무인증 쓰기 경로(`POST /collect`):** localhost 한정이지만 인증 없음 — Phase 7
-  (UI)에서 인증/토큰 도입 여부 재평가. 보안 패널이 태스크마다 점검.
+  (UI)에서 인증/토큰 도입 여부 재평가. 보안 패널이 태스크마다 점검(sec 판정: 계획된
+  구현이라 이번 Phase는 acceptable, Phase 5 전 인증 도입 의무 재확인).
 - **수집 시간대:** 장 마감 직후는 당일 봉 확정 전일 수 있음 — PRE-GATE 실측상
   base_dt 자동 보정이 있으므로 야간(19시 이후) 실행 권장을 회고록에 기록. 정확한
   당일 봉 확정 시각은 미실측(Phase 6 스케줄 설계 시 확인).
-- **Phase 2 개막 정리(이월):** Phase 1 최종 리뷰가 넘긴 소소한 항목 — TokenManager
-  429 백오프, `client.aclose` try/finally, `expires_dt` 파싱 래핑, tests conftest
-  통합 — 을 이번 Phase 첫 정리 태스크에 포함한다.
+- **Phase 2 개막 정리(이월) — 완료:** Phase 1 최종 리뷰가 넘긴 소소한 항목 —
+  TokenManager 429 백오프, `client.aclose` try/finally, `expires_dt` 파싱 래핑,
+  tests conftest 통합 — 을 Task 2(하드닝 스위프)에서 전부 처리했다.
+- **⚠️ 신규(Task 7 실측): 무효 토큰 응답이 HTTP 401이 아니라 200+`[8005]`.**
+  클라이언트가 이를 놓치면 매 TR 호출이 조용히 실패한다 — 8005 전용 재발급
+  분기를 추가해 해결(commit `50391ac`). **(측정 정황상 추정, 미확정) 앱키당
+  활성 토큰이 1개뿐일 가능성** — 백엔드 가동 중 별도 프로세스에서 토큰을
+  재발급하면 기존 토큰이 무효화되는 것으로 관측됨. 운영 규칙: 백엔드 가동 중
+  호스트에서 별도로 토큰 발급 금지(CLAUDE.md §5에 반영).
+- **⚠️ 신규(Task 7 실측): 응답 필드가 전부 빈 문자열인 퇴화(degenerate) 캔들
+  응답 존재** — 종목 `012510`에서 관측. `Candle.__post_init__`의 OHLC 검증이
+  fail-loud로 거부해 실제로는 위험하지 않았으나, 유사 응답이 더 있을 수 있다는
+  전제로 상시 인지할 것.

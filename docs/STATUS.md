@@ -11,15 +11,29 @@
 
 ## ▶ 여기서 재개 (다음 액션)
 
-**Phase 2 spec 승인 + 구현 계획서 작성 완료 — 계획서 실행(Task 1~7) 단계.**
+**Phase 2(데이터 수집 파이프라인) 완료 — Phase 3(스코어링 엔진) spec
+브레인스토밍부터 재개.**
 
-- Phase 2 계획서: `docs/plans/2026-07-17-phase2-data-collection-pipeline-plan.md`
-  (Task 1=TR 스파이크 → 2=하드닝 스위프(에러 계층 domain 이동 포함) → 3=스키마 →
-  4=포트/TR 매핑 → 5=CollectionService → 6=API → 7=풀 수집 실측+문서).
-
-- Phase 2 spec: `docs/specs/2026-07-17-phase2-data-collection-pipeline-design.md`
-  (유니버스=전 종목, 시동=POST /collect, 섹터 매핑=키움 TR 우선+KRX 파일 대안 B,
-  구현 Task 1 = 신규 TR 3종 실측 스파이크).
+- Phase 2 산출물: `backend/app/domain/collection.py`(`CollectionService`),
+  `backend/app/store/{models.py,collection_store.py}`(4개 테이블 + upsert
+  리포지토리, Alembic `0002`), `backend/app/adapters/kiwoom/broker.py`
+  (`list_instruments`/`list_sectors`/`list_sector_members`),
+  `backend/app/api/collect.py`(`POST /collect` + `GET /collect/status`),
+  `backend/app/core/market_calendar.py`. 단위 98 passed(8 deselected 라이브),
+  풀 수집 실측 완주(아래).
+- **✅ 풀 수집 실측 완료 (2026-07-17, 모의서버):** 3,887개 종목(3,886 성공/1
+  실패), 약 67분, 캔들 2,120,535행. 재실행(스킵) 약 2분, 결과 동일 — 멱등성
+  확인. (`.superpowers/sdd/p2-task-7-collect-monitor.txt`,
+  `p2-task-7-db-verify.txt`, `p2-task-7-rerun2-monitor.txt`)
+- **⚠️ 수집 운영 노트(Phase 6 스케줄러 설계 시에도 유지):**
+  1. **수집은 19시(KST) 이후 실행 권장** — 장 마감 직후는 당일봉이 아직
+     확정 전일 수 있음(정확한 확정 시각은 미실측, PRE-GATE `base_dt` 자동
+     보정은 이미 실측 확인됨).
+  2. **백엔드 컨테이너 가동 중에는 호스트/별도 프로세스에서 키움 토큰을
+     발급하지 말 것** — 앱키당 활성 토큰이 1개뿐인 것으로 추정되며(미확정,
+     측정 정황 근거), 다른 프로세스의 토큰 발급이 백엔드의 진행 중인 토큰을
+     무효화해 `[8005]` 오류를 유발한 사고가 실제로 있었다(CLAUDE.md §5,
+     `docs/retrospectives/2026-07-17-phase2-data-collection-pipeline.md` §5).
 - ✅ **Phase 2 PRE-GATE 통과 (2026-07-17 실측):** `base_dt`는 조회 기준일 —
   비영업일은 직전 영업일 자동 보정(에러 없음), 과거 백필 가능, 미래는 오늘 클램프.
   일봉 1페이지=600봉. (`.superpowers/sdd/phase2-pregate-basedt.txt`)
@@ -36,8 +50,8 @@
   1. **집계성 업종 제외 필터 확정** — 업종코드 "001"(종합(KOSPI))·"101"(종합
      (KOSDAQ)) 등은 사실상 시장 전체(코스피 2477/2478종목)를 포함하는 합성
      업종이라 개별 업종과 성격이 다르다. 섹터 로테이션/스코어링에 넣기 전
-     제외 여부·판별 규칙을 정해야 한다(수집 매핑 단계 필터는 Task 5에서
-     적용 예정).
+     제외 여부·판별 규칙을 정해야 한다(수집 매핑 단계의 이름 기반 휴리스틱
+     필터는 Task 5가 이미 적용 — 코드값 기반으로 확정할지는 미결정).
   2. **ETF/보통주 구분 소비 정책** — `kind` 필드는 실측상 보통주·ETF 모두
      동일 값("A")으로 나와 판별 신호가 아니다. 실제 구분은 `marketCode`
      기반이며(Task 4에서 `list_instruments`가 요청 시장코드와 다른
@@ -48,6 +62,13 @@
      `Instrument` 도메인 모델은 이를 저장하지 않기로 했다(Task 4 범위 밖
      판단). 매매 후보 필터링에 필요해지면 Phase 3 스펙에서 도메인 모델
      확장 여부를 재평가할 것.
+- Phase 2 회고록: `docs/retrospectives/2026-07-17-phase2-data-collection-pipeline.md`
+  (Task 1~7 각 목적·파일·커밋 SHA, 패널 리뷰 결과와 수정 내역, 설계/패턴,
+  프로세스 사건 3건(증거 파일명 충돌·자체 패널 실행 금지·코디네이터 주장
+  정정) 정직 기록, 풀 수집 실측 결과, 남은 항목 전부 기록됨).
+- Phase 2 spec: `docs/specs/2026-07-17-phase2-data-collection-pipeline-design.md`
+  (§5 스파이크 대상 → 실측 결과 표로 갱신, §8 리스크에 8005/단일 토큰 항목
+  반영, 상태 "확정 — 구현 완료").
 - Phase 1 산출물: `backend/app/domain/broker.py`(`BrokerPort` + 도메인 모델),
   `backend/app/adapters/kiwoom/`(`errors.py`/`auth.py`/`rate_limiter.py`/
   `client.py`/`broker.py`) — `app.state.broker`로 FastAPI lifespan에 통합됨.
@@ -87,9 +108,13 @@
 [x] Phase 1: 키움 브로커 어댑터 (모의투자) — Task 1~9 완료, 단위 50 passed +
     라이브 6 passed, 실측 팩트 CLAUDE.md §5 반영 (2026-07-17)
 [x] Phase 1 회고록 (docs/retrospectives/2026-07-17-phase1-kiwoom-broker-adapter.md)
-[ ] Phase 2: 데이터 수집 파이프라인                        <-- 다음 (PRE-GATE:
-    base_dt 비영업일 동작 실측 먼저 — 위 재개 지점 참고)
-... Phase 3~8 (CLAUDE.md 로드맵 참고)
+[x] Phase 2: 데이터 수집 파이프라인 — Task 1~7 완료, 풀 수집 실측(3,887종목/
+    67분/캔들 212만행) + 재실행 멱등 확인, 실측 팩트 CLAUDE.md §5 반영
+    (2026-07-17)
+[x] Phase 2 회고록 (docs/retrospectives/2026-07-17-phase2-data-collection-pipeline.md)
+[ ] Phase 3: 스코어링 엔진                                  <-- 다음 (PRE-GATE:
+    집계 업종 필터/ETF 구분/관리종목 필드 3건 먼저 확정 — 위 재개 지점 참고)
+... Phase 4~8 (CLAUDE.md 로드맵 참고)
 ```
 
 ## 결정 로그 (무엇을, 왜 정했나)
@@ -114,20 +139,27 @@
 | 16 | P2 수집 시동 = **HTTP API** (`POST /collect` + status) | 사용자 결정 — Phase 7 대시보드 버튼의 토대. localhost 바인딩 전제, 인증은 Phase 7 전 재평가 | P2 spec §1·§8 |
 | 17 | 일봉은 1페이지(600봉)를 **그대로 upsert** (6개월로 자르지 않음) | 추가 비용 없이 오는 데이터 — 소비자가 잘라 씀. 재실행 멱등 | P2 spec §1 |
 | 18 | 섹터 매핑 = 키움 TR(ka10101+ka20002) 우선, **실측 스파이크로 확정** — 불발 시 KRX 정보데이터시스템 파일 조인(대안 B) | ka20002의 "구성종목 반환"이 미검증 추정이라 코드 작성 전 실측이 최선 | P2 spec §1·§5 |
+| 19 | 무효 토큰 응답(HTTP 200 + `[8005]`)은 기존 401 재발급 경로와 **동일한 1회성 invalidate-and-reissue 분기**로 처리(별도 정책 신설 안 함) | 401과 본질이 같은 "토큰이 더 이상 유효하지 않다"는 신호 — 별도 상태기계를 만들면 재시도 예산 이중관리 위험(Phase 1 Task 5의 401/429 혼합 버그와 동일 클래스) | CLAUDE.md §5, `backend/app/adapters/kiwoom/client.py`(commit `50391ac`) |
 
 ## 후속 설계를 제약하는 검증된 팩트 (사용 전 재확인)
 
 - 키움 REST에는 **네이티브 TP/SL/Stop이 없음** → **클라이언트측 구현** 필수 (Phase 5).
 - 레이트리밋 **TR당 ~1 req/s** (전역 아님, 공식 수치는 여전히 미확인 — 설정값으로
-  구현됨) → 전종목 봉 수집은 **야간 배치** (Phase 2).
+  구현됨) → 전종목 봉 수집은 **야간 배치**, Phase 2에서 **약 67분/3,887종목**으로
+  실측 확인.
 - 인증 토큰 만료 → 재발급 로직 구현 완료 (Phase 1, `expires_dt` 절대 KST 시각
-  기반 — 실측 완료).
-- **⚠️ `ka10081`(일봉) 조회는 비어 있지 않은 `base_dt`(YYYYMMDD)가 필수 — 빈 값
-  거부는 실측 확인.** 어댑터는 당일(KST)을 전송 중이며, **타 날짜 허용 여부와
-  비영업일 동작은 미실측** → **Phase 2 PRE-GATE** (위 재개 지점 참고).
+  기반 — 실측 완료). **Phase 2 실측 추가:** 무효 토큰은 HTTP 401이 아니라
+  **HTTP 200 + `[8005]`**로 응답 — 재발급 분기 추가로 대응(결정 #19). 앱키당
+  활성 토큰 1개로 추정(미확정) → 백엔드 가동 중 별도 프로세스 토큰 발급 금지.
+- **`ka10081`(일봉) 조회는 비어 있지 않은 `base_dt`(YYYYMMDD)가 필수** — 빈 값
+  거부는 실측 확인. **Phase 2 PRE-GATE로 추가 실측 완료:** 비영업일은 직전
+  영업일로 자동 보정(에러 없음), 과거 백필 가능, 미래는 오늘로 클램프.
 - **⚠️ `kt00018`(잔고) 행 단위 필드와 `avg_price` 반올림은 미실측(모의 계좌 포지션
   0개)** → **Phase 5 PRE-GATE(hard gate)**, 검증용 라이브 테스트는 이미 존재.
-- 상세·출처는 `CLAUDE.md` §5, `docs/retrospectives/2026-07-17-phase1-kiwoom-broker-adapter.md` 참고.
+- **⚠️ Phase 3 PRE-GATE 3건(집계 업종 필터/ETF 구분/관리종목 필드) 미결** — 위
+  재개 지점 참고, Phase 3 착수 전 반드시 확정.
+- 상세·출처는 `CLAUDE.md` §5, `docs/retrospectives/2026-07-17-phase1-kiwoom-broker-adapter.md`,
+  `docs/retrospectives/2026-07-17-phase2-data-collection-pipeline.md` 참고.
 
 ## 문서 인덱스
 
@@ -137,10 +169,13 @@
 | `docs/STATUS.md` | 이 문서 — 재개 지점 + 결정 로그 |
 | `docs/specs/2026-06-16-phase0-walking-skeleton-design.md` | Phase 0 설계 spec |
 | `docs/specs/2026-07-17-phase1-kiwoom-broker-adapter-design.md` | Phase 1 설계 spec (§5 실측 결과로 갱신됨) |
+| `docs/specs/2026-07-17-phase2-data-collection-pipeline-design.md` | Phase 2 설계 spec (§5·§8 실측 결과로 갱신됨) |
 | `docs/architecture/system-overview.md` | 마스터 청사진 (Task 9, Phase 0 구현 중 작성) |
 | `docs/plans/2026-07-14-phase0-walking-skeleton-plan.md` | Phase 0 구현 계획서 (Task 1~10) |
 | `docs/plans/2026-07-17-phase1-kiwoom-broker-adapter-plan.md` | Phase 1 구현 계획서 (Task 1~9) |
+| `docs/plans/2026-07-17-phase2-data-collection-pipeline-plan.md` | Phase 2 구현 계획서 (Task 1~7) |
 | `docs/retrospectives/2026-07-17-phase0-walking-skeleton.md` | Phase 0 회고록 (Task 1~10 상세, E2E 결과) |
+| `docs/retrospectives/2026-07-17-phase2-data-collection-pipeline.md` | Phase 2 회고록 (Task 1~7 상세, 패널 리뷰·풀 수집 실측 결과·프로세스 사건 3건) |
 | `docs/retrospectives/2026-07-17-phase1-kiwoom-broker-adapter.md` | Phase 1 회고록 (Task 1~9 상세, 패널 리뷰·라이브 실측 결과) |
 | `docs/retrospectives/` | 작업별 회고록 (규칙 4) |
 
