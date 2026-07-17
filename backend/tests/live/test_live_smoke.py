@@ -1,15 +1,44 @@
 """실제 키움 모의서버 스모크. 실행: uv run pytest -m live -v
-.env에 실제 발급 키 필요. KIWOOM_MOCK=true인 경우에만 실행된다."""
+.env에 실제 발급 키 필요. KIWOOM_MOCK=true인 경우에만 실행된다.
+
+각 테스트가 독립된 KiwoomHttpClient(→ 독립된 TokenManager)를 생성/폐기하다 보니,
+전체 스위트를 한 번에 실행하면 /oauth2/token 발급이 짧은 시간 안에 여러 번 몰려
+모의서버의 발급 레이트리밋(429)에 걸리는 경우가 실측으로 확인됐다 (TR 호출과 달리
+토큰 발급에는 재시도 백오프가 없다 — auth.py는 Task 3 소유라 이 스모크에서는 건드리지
+않고, 테스트 쪽에서 짧게 재시도한다). 운영 경로(Task 8)는 앱 생애주기 동안 클라이언트
+하나만 공유하므로 이 충돌이 발생하지 않는다 — 순수 테스트 구조 아티팩트."""
+
+import asyncio
+from collections.abc import Awaitable, Callable
+from datetime import datetime
+from typing import TypeVar
 
 import httpx
 import pytest
 
-from app.adapters.kiwoom.auth import TokenManager
+from app.adapters.kiwoom.auth import KST, TokenManager
+from app.adapters.kiwoom.broker import KiwoomBroker
+from app.adapters.kiwoom.client import KiwoomHttpClient
+from app.adapters.kiwoom.errors import RateLimitError
 from app.core.config import Settings
 
 pytestmark = pytest.mark.live
 
 MOCK_BASE = "https://mockapi.kiwoom.com"
+
+T = TypeVar("T")
+
+
+async def _retry_on_token_rate_limit(fn: Callable[[], Awaitable[T]]) -> T:
+    """토큰 발급 429 충돌 시 짧게 대기 후 재시도한다 (최대 3회)."""
+    for delay in (2.0, 4.0, None):
+        try:
+            return await fn()
+        except RateLimitError:
+            if delay is None:
+                raise
+            await asyncio.sleep(delay)
+    raise AssertionError("unreachable")
 
 
 @pytest.fixture
@@ -33,3 +62,47 @@ async def test_live_토큰_발급과_폐기(settings):
         token = await tm.get_token()
         assert token  # 값 자체는 출력하지 않는다
         await tm.revoke()
+
+
+@pytest.mark.anyio
+async def test_live_삼성전자_현재가(settings):
+    b = KiwoomBroker(KiwoomHttpClient(settings))
+    try:
+        q = await _retry_on_token_rate_limit(lambda: b.get_quote("005930"))
+        assert q.name and q.price > 0
+        print(f"[live] 005930 {q.name} price={q.price} rate={q.change_rate}")
+    finally:
+        await b.aclose()
+
+
+@pytest.mark.anyio
+async def test_live_삼성전자_일봉_5개(settings):
+    b = KiwoomBroker(KiwoomHttpClient(settings))
+    try:
+        candles = await _retry_on_token_rate_limit(
+            lambda: b.get_daily_candles("005930", count=5))
+        assert len(candles) == 5
+        assert candles[0].date < candles[-1].date  # 과거→최신
+        assert all(c.high >= c.low > 0 for c in candles)
+    finally:
+        await b.aclose()
+
+
+@pytest.mark.anyio
+async def test_live_일봉_원본응답은_최신부터다(settings):
+    """broker.py의 정렬 로직을 우회해 키움 원본 응답 순서를 실측한다 —
+    rows[:count] 절단이 실제로 최신 봉들을 취하는지 증명한다."""
+    client = KiwoomHttpClient(settings)
+    try:
+        body = {
+            "stk_cd": "005930",
+            "base_dt": datetime.now(KST).strftime("%Y%m%d"),
+            "upd_stkpc_tp": "1",
+        }
+        data, _, _ = await _retry_on_token_rate_limit(
+            lambda: client.call("chart", "ka10081", body))
+        rows = data["stk_dt_pole_chart_qry"]
+        assert rows[0]["dt"] > rows[-1]["dt"]  # 내림차순 = 최신→과거
+        print(f"[live] raw dt order (first 3): {[r['dt'] for r in rows[:3]]}")
+    finally:
+        await client.aclose()
