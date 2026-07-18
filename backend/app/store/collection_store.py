@@ -5,11 +5,12 @@ import logging
 from collections.abc import Callable, Iterable
 from datetime import date, datetime, timezone
 
-from sqlalchemy import Engine, bindparam, func, select, update
+from sqlalchemy import Engine, delete, func, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.domain.broker import Candle, Instrument, Sector
-from app.store.models import CandleRow, CollectionRunRow, InstrumentRow, SectorRow
+from app.store.models import (CandleRow, CollectionRunRow, InstrumentRow,
+                              SectorMembershipRow, SectorRow)
 
 logger = logging.getLogger(__name__)
 
@@ -36,47 +37,53 @@ class CollectionStore:
         self._sessions = sessionmaker(bind=engine)
         self._now = now or (lambda: datetime.now(timezone.utc))
 
-    def upsert_sectors(self, sectors: Iterable[Sector]) -> None:
-        rows = [{"code": s.code, "market": s.market, "name": s.name} for s in sectors]
+    def upsert_sectors(self, sectors: Iterable[Sector],
+                       group_types: dict[str, str]) -> None:
+        """group_types: code → group_type (도메인 분류 맵이 결정 — store는 무지)."""
+        rows = [{"code": s.code, "market": s.market, "name": s.name,
+                 "group_type": group_types.get(s.code, "unclassified")}
+                for s in sectors]
         with self._sessions.begin() as session:
             _upsert(session, SectorRow, rows, ["code"])
 
     def upsert_instruments(self, instruments: Iterable[Instrument]) -> None:
         now = self._now()
+        # pg는 VARCHAR 초과 시 예외 — 수집 전체 실패 방지용 방어적 절단
         rows = [{"symbol": i.symbol, "name": i.name, "market": i.market,
-                 "instrument_type": i.instrument_type, "is_active": True,
+                 "instrument_type": i.instrument_type, "state": i.state[:128],
+                 "audit_info": i.audit_info[:32], "is_active": True,
                  "updated_at": now} for i in instruments]
         with self._sessions.begin() as session:
             _upsert(session, InstrumentRow, rows, ["symbol"])
 
     def set_sector_codes(self, mapping: dict[str, str]) -> int:
-        """Update sector codes for instruments. Returns count of successfully updated symbols.
+        """Deprecated — Task 3에서 replace_sector_memberships로 전환하며 제거된다.
+        sector_code 칼럼은 마이그레이션 0003에서 삭제됨 (손상 데이터, 소비자 없음)."""
+        logger.warning("set_sector_codes is deprecated and now a no-op (removed in Task 3)")
+        return 0
 
-        Skips symbols not found in database and logs a warning for missing symbols.
-        Uses executemany batch update.
-        """
+    def replace_sector_memberships(self, memberships: dict[str, list[str]]) -> int:
+        """업종 소속 전체 교체 (delete-and-insert, 단일 트랜잭션).
+
+        전체 교체인 이유: 소속은 편출입이 있는 스냅샷 데이터라 이전 실행의
+        소속이 남으면 안 된다. instruments에 없는 symbol은 스킵하고 경고
+        (FK 위반 방지 — 정규화 차이/신규 상장 타이밍). 반환: 삽입 행 수."""
         with self._sessions.begin() as session:
-            # Query existing symbols
-            existing = set(session.scalars(select(InstrumentRow.symbol)
-                                          .where(InstrumentRow.symbol.in_(mapping))))
-            known = existing & set(mapping.keys())
-
-            # Log if any symbols are unknown
-            if len(known) < len(mapping):
-                unknown_count = len(mapping) - len(known)
-                logger.warning("sector mapping skipped for %d unknown symbols", unknown_count)
-
-            # Executemany batch update for known symbols
-            if known:
-                session.execute(
-                    update(InstrumentRow)
-                    .where(InstrumentRow.symbol == bindparam("b_sym"))
-                    .values(sector_code=bindparam("b_code")),
-                    [{"b_sym": s, "b_code": mapping[s]} for s in known],
-                    execution_options={"dml_strategy": "core_only"},
-                )
-
-            return len(known)
+            all_symbols = {s for members in memberships.values() for s in members}
+            known = set(session.scalars(
+                select(InstrumentRow.symbol)
+                .where(InstrumentRow.symbol.in_(all_symbols))))
+            unknown = len(all_symbols - known)
+            if unknown:
+                logger.warning(
+                    "sector memberships skipped for %d unknown symbols", unknown)
+            rows = [{"sector_code": code, "symbol": s}
+                    for code, members in memberships.items()
+                    for s in members if s in known]
+            session.execute(delete(SectorMembershipRow))
+            if rows:
+                session.execute(SectorMembershipRow.__table__.insert(), rows)
+            return len(rows)
 
     def upsert_candles(self, candles: Iterable[Candle]) -> None:
         rows = [{"symbol": c.symbol, "date": c.date, "open": c.open, "high": c.high,
