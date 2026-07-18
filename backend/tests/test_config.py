@@ -44,3 +44,21 @@ def test_mock_false면_mode는_real(monkeypatch):
     _set_env(monkeypatch)
     monkeypatch.setenv("KIWOOM_MOCK", "false")
     assert Settings(_env_file=None).mode == "real"
+
+
+def test_naver_키는_옵셔널(monkeypatch):
+    _set_env(monkeypatch)
+    monkeypatch.delenv("NAVER_CLIENT_ID", raising=False)
+    monkeypatch.delenv("NAVER_CLIENT_SECRET", raising=False)
+    s = Settings(_env_file=None)
+    assert s.naver_client_id is None
+    assert s.naver_client_secret is None
+
+
+def test_naver_키가_있으면_로드된다(monkeypatch):
+    _set_env(monkeypatch)
+    monkeypatch.setenv("NAVER_CLIENT_ID", "nid")
+    monkeypatch.setenv("NAVER_CLIENT_SECRET", "nsec")
+    s = Settings(_env_file=None)
+    assert s.naver_client_id.get_secret_value() == "nid"
+    assert s.naver_client_secret.get_secret_value() == "nsec"

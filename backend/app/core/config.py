@@ -14,6 +14,11 @@ class Settings(BaseSettings):
     kiwoom_mock: bool = True
     database_url: SecretStr
 
+    # 네이버 뉴스 검색 API 키 — 옵셔널. 키 미발급 상태에서도 기동은 정상이며,
+    # 서비스는 키 부재 시 뉴스 조회를 생략하고 경고만 남긴다 (스펙 §4).
+    naver_client_id: SecretStr | None = None
+    naver_client_secret: SecretStr | None = None
+
     @property
     def mode(self) -> str:
         return "mock" if self.kiwoom_mock else "real"
