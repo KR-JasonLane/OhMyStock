@@ -1,0 +1,213 @@
+"""AI 분석 오케스트레이션 — ScoringService/CollectionService와 동일한 실행
+패턴(원자적 start(), 태스크 강참조, 예외 경계). conflict_check는 주입하지
+않는다: 입력을 succeeded score run_id로 고정해 읽고(insert-only 저장) candles/
+instruments를 직접 건드리지 않으므로, 수집/스코어링 파이프라인과 동시
+실행돼도 데이터 일관성이 깨지지 않는다(스펙 §3)."""
+
+import asyncio
+import json
+import logging
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
+from datetime import date, datetime
+
+from app.core.background_service import BackgroundRunService
+from app.core.market_calendar import KST
+from app.domain.analysis.config import AnalysisConfig
+from app.domain.analysis.graph import AnalysisPipeline
+from app.domain.analysis.ports import (CandidateInput, Headline, LlmError,
+                                       LlmPort, NewsError, NewsPort)
+from app.domain.analysis.prompts import prompt_hash
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class AnalysisProgress:
+    run_id: int
+    status: str  # running | succeeded | failed
+    stage: str   # gate | news | economist | traders | synthesize | finished
+    done: int
+    total: int
+    failure_reason: str | None = None
+
+
+class AnalysisService(BackgroundRunService):
+    def __init__(self, store, llm: LlmPort, news: NewsPort | None,
+                 config: AnalysisConfig | None = None,
+                 today: Callable[[], date] | None = None) -> None:
+        """news=None이면(네이버 키 미발급) 뉴스 조회를 생략하고 경고만 남긴
+        채 진행한다 — 뉴스는 판정 보조 자료이지 필수 입력이 아니다(스펙 §4).
+
+        today: 연쇄 신선도 게이트(스코어링 결과 기준일 대비 경과일)의 "오늘"
+        판정에 쓴다. 기본값은 `datetime.now(KST).date` — 스코어링과 달리
+        여기서는 채점 대상 심볼별 최신 캔들 날짜가 아니라 스코어링 런
+        자체의 reference_date를 오늘과 비교하므로, ScoringService처럼
+        전 거래일로 당길 필요가 없다."""
+        super().__init__(task_label="analysis", logger=logger)
+        self._store = store
+        self._llm = llm
+        self._news = news
+        self._config = config or AnalysisConfig()
+        self._today = today or (lambda: datetime.now(KST).date())
+        self._progress: AnalysisProgress | None = None
+
+    def progress(self) -> AnalysisProgress | None:
+        return self._progress
+
+    def latest_results(self) -> dict | None:
+        """최근 succeeded 실행 결과 위임 — API가 store를 직접 알지 않도록
+        분리한다(T7 패턴과 동일한 의도)."""
+        return self._store.latest_results()
+
+    async def _run(self) -> None:
+        """`_running` 복원은 베이스 `_execute()`의 finally가 구조적으로
+        보장한다.
+
+        1단계 게이트(스코어링 런 부재/신선도)는 `create_run` **이전**에
+        판정한다 — 아직 score_run_id 자체가 없거나 신뢰할 수 없는
+        상태이므로, 감사 이력에 남길 분석 run을 만들지 않는다(만들 근거가
+        되는 score_run_id가 확정되기 전이라 store.finish_run을 호출할
+        대상 run이 없다). 이후 단계(빈 후보/빈 섹터 표 등)는 이미 만든
+        run을 실패로 마감해야 하므로 `_fail(run_id, ...)`을 쓴다."""
+        cfg = self._config
+        self._set(0, "running", "gate", 0, 0)
+
+        gate = await asyncio.to_thread(self._store.latest_succeeded_score_run)
+        if gate is None:
+            self._set(0, "failed", "gate", 0, 0,
+                      "no succeeded scoring run - run scoring first")
+            return
+        score_run_id, reference_date = gate
+        age_days = (self._today() - reference_date).days
+        if age_days > cfg.score_max_age_days:
+            self._set(
+                0, "failed", "gate", 0, 0,
+                f"scoring results stale (reference={reference_date.isoformat()}) "
+                "- run scoring first")
+            return
+
+        run_id = await asyncio.to_thread(
+            self._store.create_run, score_run_id, cfg.model, prompt_hash(),
+            cfg.to_json())
+        total = 0
+        try:
+            candidates = await asyncio.to_thread(
+                self._store.load_candidates, score_run_id)
+            if not candidates:
+                await self._fail(run_id, total, "no candidates in scoring run")
+                return
+            total = len(candidates)
+
+            snapshot = await asyncio.to_thread(
+                self._store.market_snapshot, score_run_id)
+            if snapshot.sector_table == "":
+                # 트레이더 게이트(MUST) — breadth 0.0이 "데이터 없음"인지
+                # "전 업종 하락"인지 구분 불가하므로 LLM을 호출하지 않고
+                # 보수적으로 실패한다.
+                await self._fail(
+                    run_id, total,
+                    "no sector aggregates in scoring run - cannot judge "
+                    "market regime")
+                return
+
+            self._set(run_id, "running", "news", 0, total)
+            market_headlines, symbol_headlines, news_warnings = \
+                await self._collect_news(candidates)
+
+            self._set(run_id, "running", "economist", 0, total)
+            # AnalysisPipeline은 런마다 새로 만든다 — 생성자의 LangSmith
+            # 환경변수 가드(RuntimeError)가 서비스 생성 시점이 아니라 실행
+            # 시점 값으로 평가되게 하기 위함(P4-T2 보안 패널 의도를 유지:
+            # 배치 스케줄러가 다른 프로세스에서 환경변수를 바꿔도 다음
+            # 런부터 즉시 반영). 인스턴스 자체는 무상태 래퍼라 비용도
+            # 무시할 수준이다(그래프 컴파일만 반복).
+            pipeline = AnalysisPipeline(self._llm, cfg)
+            result = await pipeline.run(snapshot, candidates,
+                                        market_headlines, symbol_headlines)
+            self._set(run_id, "running", "traders", total, total)
+
+            self._set(run_id, "running", "synthesize", total, total)
+            # regime/market_summary/warnings는 한 번만 추출해 로컬 변수로
+            # 고정한 뒤 finish_run에 넘긴다(save_results는 result 객체
+            # 전체를 받으므로 별도 추출이 필요 없다) — 이중 추출 방지
+            # (T4 패널 개발자 리뷰 이월).
+            regime = result.market.regime
+            market_summary = result.market.summary
+            # "; ".join 대신 JSON 배열 문자열로 저장 — 역파싱 안전.
+            # latest_results()가 노출하는 warnings 필드는 이 JSON 문자열
+            # 그대로다(carry-over #6).
+            warnings = json.dumps([*result.warnings, *news_warnings],
+                                  ensure_ascii=False)
+            news = {"market": market_headlines, **symbol_headlines}
+
+            await asyncio.to_thread(
+                self._store.save_results, run_id, result, news)
+            await asyncio.to_thread(
+                self._store.finish_run, run_id, "succeeded", regime,
+                market_summary, warnings, None)
+            self._set(run_id, "succeeded", "finished", total, total)
+            logger.info(
+                "analysis run %d: %d candidates, regime=%s, %d picks",
+                run_id, total, regime, len(result.picks))
+        except LlmError as exc:
+            # LLM 접속 실패는 economist/traders 어느 단계에서 나든 전체
+            # 실패로 취급한다(스펙 §8) — 이미 완료된 trader 판정 일부가
+            # 있어도 부분 저장하지 않는다(mid-traders 유실, T3 이월). 그
+            # 사실을 실패 사유에 명시해 운영자가 "부분 결과가 저장됐나?"
+            # 헷갈리지 않게 한다.
+            await self._fail(
+                run_id, total,
+                f"{exc} - 부분 결과는 저장되지 않음 - 재실행 필요")
+        except asyncio.CancelledError:
+            await self._fail(run_id, total, "cancelled")
+            raise
+        except Exception as exc:
+            logger.exception("analysis run %s failed unexpectedly", run_id)
+            await self._fail(run_id, total, f"unexpected: {type(exc).__name__}")
+            raise
+
+    async def _collect_news(
+            self, candidates: Sequence[CandidateInput]
+    ) -> tuple[list[Headline], dict[str, list[Headline]], list[str]]:
+        """시장 키워드별 + 종목명별 헤드라인 조회. `NewsError`는 건별로 잡아
+        경고로 누적하고 계속한다(스펙 §4) — 뉴스 한 건 실패로 전체 분석
+        런을 실패시키지 않는다."""
+        if self._news is None:
+            return [], {}, ["news skipped (no naver keys)"]
+
+        warnings: list[str] = []
+        market_headlines: list[Headline] = []
+        for keyword in self._config.market_keywords:
+            try:
+                market_headlines.extend(await self._news.search_headlines(
+                    keyword, self._config.news_per_symbol))
+            except NewsError as exc:
+                warnings.append(f"market news failed for '{keyword}': {exc}")
+
+        symbol_headlines: dict[str, list[Headline]] = {}
+        for candidate in candidates:
+            # 동음이의·일반명사 종목명("동양" 등) 단독 검색 시 무관 기사가
+            # 섞이는 문제를 완화 — "주가"를 붙여 검색 특이도를 높인다
+            # (스펙 §4, T3 패널 이월).
+            query = f"{candidate.name} 주가"
+            try:
+                symbol_headlines[candidate.symbol] = \
+                    await self._news.search_headlines(
+                        query, self._config.news_per_symbol)
+            except NewsError as exc:
+                warnings.append(
+                    f"symbol news failed for {candidate.symbol}: {exc}")
+
+        return market_headlines, symbol_headlines, warnings
+
+    async def _fail(self, run_id: int, total: int, reason: str) -> None:
+        logger.warning("analysis run %d rejected: %s", run_id, reason)
+        await asyncio.to_thread(
+            self._store.finish_run, run_id, "failed", None, None, None, reason)
+        self._set(run_id, "failed", "finished", 0, total, reason)
+
+    def _set(self, run_id: int, status: str, stage: str, done: int,
+             total: int, failure_reason: str | None = None) -> None:
+        self._progress = AnalysisProgress(run_id, status, stage, done, total,
+                                          failure_reason)
