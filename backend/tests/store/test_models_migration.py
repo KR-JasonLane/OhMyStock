@@ -113,3 +113,46 @@ def test_0004의_run_id_외래키_3종은_CASCADE_삭제다(tmp_path, monkeypatc
         fks = insp.get_foreign_keys(table)
         run_id_fk = next(fk for fk in fks if fk["constrained_columns"] == ["run_id"])
         assert run_id_fk["options"].get("ondelete") == "CASCADE", table
+
+
+def test_0005가_분석_결과_테이블_3종을_만든다(tmp_path, monkeypatch):
+    db_url = f"sqlite+pysqlite:///{tmp_path / 'mig.db'}"
+    monkeypatch.setenv("DATABASE_URL", db_url)
+    cfg = Config(str(BACKEND_DIR / "alembic.ini"))
+    cfg.set_main_option("script_location", str(BACKEND_DIR / "alembic"))
+    command.upgrade(cfg, "head")
+    names = set(inspect(create_engine(db_url)).get_table_names())
+    assert {"analysis_runs", "analysis_verdicts", "analysis_news"} <= names
+
+
+def test_0005_downgrade_후_다시_upgrade해도_성공한다(tmp_path, monkeypatch):
+    db_url = f"sqlite+pysqlite:///{tmp_path / 'mig.db'}"
+    monkeypatch.setenv("DATABASE_URL", db_url)
+    cfg = Config(str(BACKEND_DIR / "alembic.ini"))
+    cfg.set_main_option("script_location", str(BACKEND_DIR / "alembic"))
+
+    command.upgrade(cfg, "head")
+    command.downgrade(cfg, "0004")
+    insp = inspect(create_engine(db_url))
+    names = set(insp.get_table_names())
+    assert not {"analysis_runs", "analysis_verdicts", "analysis_news"} & names
+
+    command.upgrade(cfg, "head")
+    insp = inspect(create_engine(db_url))
+    names = set(insp.get_table_names())
+    assert {"analysis_runs", "analysis_verdicts", "analysis_news"} <= names
+
+
+def test_0005의_run_id_외래키_2종은_CASCADE_삭제다(tmp_path, monkeypatch):
+    """analysis_runs 삭제(retention 정리) 시 verdicts/news가 수동 순서 없이도
+    함께 정리돼야 한다 — 0004의 CASCADE 패턴과 동일."""
+    db_url = f"sqlite+pysqlite:///{tmp_path / 'mig.db'}"
+    monkeypatch.setenv("DATABASE_URL", db_url)
+    cfg = Config(str(BACKEND_DIR / "alembic.ini"))
+    cfg.set_main_option("script_location", str(BACKEND_DIR / "alembic"))
+    command.upgrade(cfg, "head")
+    insp = inspect(create_engine(db_url))
+    for table in ("analysis_verdicts", "analysis_news"):
+        fks = insp.get_foreign_keys(table)
+        run_id_fk = next(fk for fk in fks if fk["constrained_columns"] == ["run_id"])
+        assert run_id_fk["options"].get("ondelete") == "CASCADE", table

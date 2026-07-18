@@ -1,4 +1,4 @@
-"""수집·스코어링 파이프라인 스키마. Alembic 마이그레이션(최신 0004)과 1:1 정합성 유지."""
+"""수집·스코어링·분석 파이프라인 스키마. Alembic 마이그레이션(최신 0005)과 1:1 정합성 유지."""
 
 from datetime import date, datetime
 
@@ -126,3 +126,44 @@ class ScoreDetailRow(Base):
     win_rate: Mapped[float] = mapped_column(Float)
     occurrences: Mapped[int] = mapped_column(Integer)
     score: Mapped[float] = mapped_column(Float)
+
+
+class AnalysisRunRow(Base):
+    __tablename__ = "analysis_runs"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True)
+    status: Mapped[str] = mapped_column(String(16))
+    score_run_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("score_runs.id"))
+    model: Mapped[str] = mapped_column(String(64))
+    prompt_hash: Mapped[str] = mapped_column(String(16))
+    config: Mapped[str] = mapped_column(Text, default="{}", server_default="{}")
+    regime: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    market_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    warnings: Mapped[str | None] = mapped_column(Text, nullable=True)
+    failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class AnalysisVerdictRow(Base):
+    __tablename__ = "analysis_verdicts"
+    run_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("analysis_runs.id", ondelete="CASCADE"), primary_key=True)
+    symbol: Mapped[str] = mapped_column(String(12), primary_key=True)
+    verdict: Mapped[str] = mapped_column(String(8))
+    confidence: Mapped[float] = mapped_column(Float)
+    reasons: Mapped[str] = mapped_column(Text)
+    risk_flags: Mapped[str] = mapped_column(Text)
+    picked: Mapped[bool] = mapped_column(Boolean)
+    pick_rank: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
+class AnalysisNewsRow(Base):
+    __tablename__ = "analysis_news"
+    run_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("analysis_runs.id", ondelete="CASCADE"), primary_key=True)
+    scope: Mapped[str] = mapped_column(String(12), primary_key=True)
+    url: Mapped[str] = mapped_column(String(512), primary_key=True)
+    title: Mapped[str] = mapped_column(String(256))
+    published_at: Mapped[str] = mapped_column(String(64))
