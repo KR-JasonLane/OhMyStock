@@ -16,13 +16,19 @@ def test_집계_규모_등급_지수_분류():
 
 
 def test_우산_업종():
-    assert classify_sector("021") == "industry_umbrella"  # kospi 금융
     assert classify_sector("027") == "industry_umbrella"  # kospi 제조
     assert classify_sector("106") == "industry_umbrella"  # kosdaq 제조(시장 61%)
 
 
+def test_하위_산업은_로테이션_제외():
+    """021(금융) ⊇ 024∪025 완전 포함 실측(p3-task-1-finance-probe.txt) —
+    상위 021이 industry, 완전 포함된 024/025는 industry_sub로 중복 집계 방지."""
+    assert classify_sector("024") == "industry_sub"  # 증권 ⊂ 금융
+    assert classify_sector("025") == "industry_sub"  # 보험 ⊂ 금융
+
+
 def test_산업_업종():
-    for code in ("005", "008", "013", "024", "030", "103", "120", "141"):
+    for code in ("005", "008", "013", "021", "030", "103", "120", "141"):
         assert classify_sector(code) == INDUSTRY
 
 
@@ -31,10 +37,10 @@ def test_미지_코드는_unclassified():
 
 
 def test_분류_전수_개수():
-    """실측 65개 코드가 전부 맵에 있고 industry는 kospi 22 + kosdaq 21."""
+    """실측 65개 코드가 전부 맵에 있고 industry는 kospi 21 + kosdaq 21."""
     from app.domain.sector_classification import _CLASSIFICATION
     assert len(_CLASSIFICATION) == 65
-    assert sum(1 for v in _CLASSIFICATION.values() if v == INDUSTRY) == 43
+    assert sum(1 for v in _CLASSIFICATION.values() if v == INDUSTRY) == 42
 
 
 def test_instrument_상태_필드_기본값():

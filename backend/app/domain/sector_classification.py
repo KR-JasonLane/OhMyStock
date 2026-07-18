@@ -3,8 +3,15 @@
 
 키움 ka10101 업종 목록은 산업 분류 외에 규모·등급·지수·집계 그룹이 섞여 있고
 한 종목이 여러 그룹에 중복 소속된다. 스코어링(섹터 로테이션)은 industry만
-소비한다. industry_umbrella(금융⊇증권·보험, 제조⊇제조 하위업종)는 하위
-업종과 중복 집계를 피하기 위해 로테이션에서 제외한다."""
+소비한다. industry_umbrella(제조⊇제조 하위업종)는 하위 업종과 중복 집계를
+피하기 위해, industry_sub(증권·보험 ⊂ 금융)는 상위 industry와 중복 집계를
+피하기 위해 로테이션에서 제외한다.
+
+금융 계열 재분류 근거 (T1 패널 트레이더 지적 → ka20002 실측,
+.superpowers/sdd/p3-task-1-finance-probe.txt): 021(금융)은 024(증권)∪025(보험)를
+완전 포함하면서 어느 하위 코드에도 없는 잔여 98종목(은행·지주 등)을 가진다 —
+021을 우산으로 제외하면 이 98종목이 로테이션에서 소실되므로 021을 industry로
+승격하고, 완전 포함된 024/025를 industry_sub로 제외한다."""
 
 INDUSTRY = "industry"
 UNCLASSIFIED = "unclassified"
@@ -22,15 +29,18 @@ _CLASSIFICATION: dict[str, str] = {
     "150": "index", "151": "index",                        # KOSDAQ150/글로벌지수
     "160": "index", "165": "index",                        # F-KOSDAQ150(인버스)
     # 우산 산업 (하위 업종 포함 — 중복 집계 방지 위해 로테이션 제외)
-    "021": "industry_umbrella",   # kospi 금융 (⊇ 증권 024, 보험 025)
     "027": "industry_umbrella",   # kospi 제조 (실측 557명)
     "106": "industry_umbrella",   # kosdaq 제조 (실측 1,116명 = 시장 61%)
-    # 산업 — kospi 22개
+    # 하위 산업 (상위 industry에 완전 포함 — 중복 집계 방지 위해 로테이션 제외)
+    "024": "industry_sub",        # kospi 증권 (⊂ 금융 021, 실측 29/29)
+    "025": "industry_sub",        # kospi 보험 (⊂ 금융 021, 실측 14/14)
+    # 산업 — kospi 21개
     "005": INDUSTRY, "006": INDUSTRY, "007": INDUSTRY, "008": INDUSTRY,
     "009": INDUSTRY, "010": INDUSTRY, "011": INDUSTRY, "012": INDUSTRY,
     "013": INDUSTRY, "014": INDUSTRY, "015": INDUSTRY, "016": INDUSTRY,
     "017": INDUSTRY, "018": INDUSTRY, "019": INDUSTRY, "020": INDUSTRY,
-    "024": INDUSTRY, "025": INDUSTRY, "026": INDUSTRY, "028": INDUSTRY,
+    "021": INDUSTRY,              # 금융 — 은행·지주 포함 (재분류 근거는 모듈 docstring)
+    "026": INDUSTRY, "028": INDUSTRY,
     "029": INDUSTRY, "030": INDUSTRY,
     # 산업 — kosdaq 21개
     "103": INDUSTRY, "107": INDUSTRY, "108": INDUSTRY, "110": INDUSTRY,
