@@ -185,6 +185,8 @@ class KiwoomBroker:
                             name=row["name"],
                             market=market,
                             instrument_type=str(row.get("kind") or ""),
+                            state=(row.get("state") or "").strip(),
+                            audit_info=(row.get("auditInfo") or "").strip(),
                         ))
         except (KeyError, ValueError, ArithmeticError, TypeError, AttributeError) as exc:
             raise BrokerError(

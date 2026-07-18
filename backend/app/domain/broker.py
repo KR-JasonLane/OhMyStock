@@ -12,6 +12,8 @@ class Instrument:
     name: str
     market: str           # "kospi" | "kosdaq" | "etf"
     instrument_type: str  # 브로커가 주는 구분값 원문
+    state: str = ""       # ka10099 state 원문 (예: "증거금100%|거래정지")
+    audit_info: str = ""  # ka10099 auditInfo 원문 (예: "정상", "관리종목")
 
 
 @dataclass(frozen=True)

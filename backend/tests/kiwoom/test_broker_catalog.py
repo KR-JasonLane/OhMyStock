@@ -70,6 +70,26 @@ async def test_list_instruments는_도메인_모델로_변환한다():
 
 @pytest.mark.anyio
 @respx.mock
+async def test_list_instruments는_상태_필드를_매핑한다():
+    # 실측: ka10099 행에는 state(증거금/신용 등급 등)와 auditInfo(관리종목 여부
+    # 등)가 원문 문자열로 실려 온다 — Instrument.state/audit_info로 그대로 매핑.
+    _mock_auth()
+    state_json = {"return_code": 0, "list": [
+        {"code": "005930", "name": "삼성전자", "marketCode": "0", "marketName": "거래소",
+         "upName": "전기전자", "kind": "0",
+         "state": "증거금20%|담보대출|신용가능", "auditInfo": "정상"},
+    ]}
+    respx.post(f"{BASE}/api/dostk/stkinfo").respond(
+        json=state_json, headers={"cont-yn": "N", "next-key": ""})
+    b = _broker()
+    items = await b.list_instruments("kospi")
+    assert items[0].state == "증거금20%|담보대출|신용가능"
+    assert items[0].audit_info == "정상"
+    await b.aclose()
+
+
+@pytest.mark.anyio
+@respx.mock
 async def test_list_instruments는_모르는_시장이면_ValueError():
     _mock_auth()
     b = _broker()
