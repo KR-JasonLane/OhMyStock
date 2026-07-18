@@ -120,7 +120,7 @@ warnings)`. 노드 3개 선형 연결. LLM 호출은 economist/trader만.
 |---|---|
 | `analysis_runs` | id, started_at, finished_at, status, **score_run_id(FK score_runs)**, model, prompt_hash, config(JSON), regime, market_summary, warnings, failure_reason |
 | `analysis_verdicts` | run_id FK, symbol, verdict, confidence, reasons(JSON), risk_flags(JSON), picked(bool), pick_rank(nullable) — PK(run_id, symbol) |
-| `analysis_news` | run_id FK, scope("market"\|종목코드), title, press, published_at, url — PK(run_id, scope, url) |
+| `analysis_news` | run_id FK, scope("market"\|종목코드), title, published_at, url — PK(run_id, scope, url). (정정: 네이버 검색 API 응답에 언론사 필드가 없어 press 칼럼 제외 — 제목·originallink·pubDate만 제공됨) |
 
 ## 7. API
 
