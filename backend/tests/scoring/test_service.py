@@ -1,9 +1,11 @@
 """ScoringService 오케스트레이션 검증 — 가짜 store, 스텁 전략, 고정 기준일."""
 
+import contextlib
 from datetime import date
 
 import pytest
 
+from app.core.market_calendar import scoring_reference_date
 from app.domain.scoring.config import ScoringConfig
 from app.domain.scoring.service import ScoringService
 from tests.scoring.test_indicators import make_candles
@@ -141,3 +143,68 @@ async def test_start는_중복_실행을_거부():
     assert task is not None
     assert service.start() is None
     await task
+
+
+def test_기본_reference_provider는_scoring_reference_date():
+    """previous_weekday를 쓰면 자정 배치에서 전 종목이 낡음 판정된다
+    (T7 패널 트레이더 Critical) — 주입 없이 생성한 기본값이 scoring_reference_date
+    여야 한다."""
+    store = FakeStore([], {}, {}, {})
+    service = ScoringService(store, config=CFG, strategies=(AlwaysOn(),))
+    assert service._reference_provider is scoring_reference_date
+
+
+@pytest.mark.anyio
+async def test_conflict_check가_참이면_start는_None을_반환한다():
+    candles = make_candles([10, 20, 30, 40, 50, 60, 70, 80])
+    store = FakeStore([normal("AAA111")], {"005": ["AAA111"]},
+                      {"005": "음식료"}, {"AAA111": candles})
+    service = ScoringService(store, config=CFG, strategies=(AlwaysOn(),),
+                             reference_provider=lambda: candles[-1].date,
+                             conflict_check=lambda: True)
+    assert service.start() is None
+    assert service.is_running() is False
+
+
+@pytest.mark.anyio
+async def test_conflict_check가_참이면_run은_RuntimeError():
+    store = FakeStore([], {}, {}, {})
+    service = ScoringService(store, config=CFG, strategies=(AlwaysOn(),),
+                             reference_provider=lambda: REF,
+                             conflict_check=lambda: True)
+    with pytest.raises(RuntimeError, match="conflicting run in progress"):
+        await service.run()
+
+
+@pytest.mark.anyio
+async def test_create_run이_실패해도_running_상태가_풀린다():
+    class ExplodingCreateRunStore(FakeStore):
+        def create_run(self, reference_date, config_json):
+            raise RuntimeError("db down")
+
+    store = ExplodingCreateRunStore([], {}, {}, {})
+    service = ScoringService(store, config=CFG, strategies=(AlwaysOn(),),
+                             reference_provider=lambda: REF)
+    task = service.start()
+    with contextlib.suppress(RuntimeError):
+        await task
+    assert service.is_running() is False
+
+
+@pytest.mark.anyio
+async def test_예상치_못한_예외도_run을_failed로_마감한다():
+    """collection 쪽 sibling과 동일한 커버리지 (T7 패널 dev)."""
+    class ExplodingStore(FakeStore):
+        def save_results(self, run_id, result):
+            raise RuntimeError("db exploded")
+
+    candles = make_candles([10, 20, 30, 40, 50, 60, 70, 80])
+    store = ExplodingStore([normal("AAA111")], {"005": ["AAA111"]},
+                           {"005": "음식료"}, {"AAA111": candles})
+    service = ScoringService(store, config=CFG, strategies=(AlwaysOn(),),
+                             reference_provider=lambda: candles[-1].date)
+    with pytest.raises(RuntimeError):
+        await service.run()
+    assert store.finished[0] == "failed"
+    assert store.finished[3].startswith("unexpected:")
+    assert service.is_running() is False

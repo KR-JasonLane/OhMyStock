@@ -35,11 +35,11 @@ async def scoring_status(request: Request) -> dict:
 async def latest_scores(request: Request) -> dict:
     try:
         results = await asyncio.to_thread(
-            request.app.state.scoring_store.latest_results)
-    except json.JSONDecodeError:
+            request.app.state.scoring.latest_results)
+    except json.JSONDecodeError as exc:
         # score_runs.config 손상(DB 변조 등) — 내부 정보 노출 없는 일반 오류로 변환
         raise HTTPException(status_code=500,
-                            detail="stored scoring config is corrupted")
+                            detail="stored scoring config is corrupted") from exc
     if results is None:
         raise HTTPException(status_code=404, detail="no succeeded scoring run")
     return results

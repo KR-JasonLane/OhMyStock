@@ -33,10 +33,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.engine = create_db_engine(settings)
         try:
             app.state.broker = KiwoomBroker(KiwoomHttpClient(settings))
+            # conflict_check 람다는 app.state를 통해 늦은 바인딩되므로 두 서비스의
+            # 생성 순서와 무관하다 (아래에서 scoring이 나중에 만들어져도 안전).
             app.state.collection = CollectionService(
-                app.state.broker, CollectionStore(app.state.engine))
+                app.state.broker, CollectionStore(app.state.engine),
+                conflict_check=lambda: app.state.scoring.is_running())
             app.state.scoring_store = ScoringStore(app.state.engine)
-            app.state.scoring = ScoringService(app.state.scoring_store)
+            app.state.scoring = ScoringService(
+                app.state.scoring_store,
+                conflict_check=lambda: app.state.collection.is_running())
             try:
                 yield
             finally:

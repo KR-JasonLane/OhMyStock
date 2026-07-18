@@ -404,6 +404,43 @@ async def test_unclassified_경고가_런_결과로_전파된다():
 
 
 @pytest.mark.anyio
+async def test_conflict_check가_참이면_start는_None을_반환한다():
+    """상호 배제는 도메인 계약 — 반대편(scoring) 실행 중이면 start()가
+    거부된다. API의 409는 사용자 메시지용 1차 관문일 뿐, 여기가 실제
+    방어선(T7 패널 트레이더/아키텍트)."""
+    broker, store = FakeBroker(), MemoryStore()
+    svc = CollectionService(broker, store, markets=("kospi",),
+                            conflict_check=lambda: True)
+    assert svc.start() is None
+    assert svc.is_running() is False
+
+
+@pytest.mark.anyio
+async def test_conflict_check가_참이면_run은_RuntimeError():
+    broker, store = FakeBroker(), MemoryStore()
+    svc = CollectionService(broker, store, markets=("kospi",),
+                            conflict_check=lambda: True)
+    with pytest.raises(RuntimeError, match="conflicting run in progress"):
+        await svc.run()
+
+
+@pytest.mark.anyio
+async def test_create_run이_실패해도_running_상태가_풀린다():
+    """create_run이 try 블록 밖에 있으면 예외 시 finally가 실행되지 않아
+    _running이 영구히 True로 고착된다 (T7 패널 아키텍트 발견)."""
+    class ExplodingCreateRunStore(MemoryStore):
+        def create_run(self):
+            raise RuntimeError("db down")
+
+    broker, store = FakeBroker(), ExplodingCreateRunStore()
+    svc = CollectionService(broker, store, markets=("kospi",))
+    task = svc.start()
+    with contextlib.suppress(RuntimeError):
+        await task
+    assert svc.is_running() is False
+
+
+@pytest.mark.anyio
 async def test_start된_태스크의_미처리_예외는_done_callback이_로깅한다(caplog):
     class ExplodingStore(MemoryStore):
         def upsert_sectors(self, sectors, group_types=None):

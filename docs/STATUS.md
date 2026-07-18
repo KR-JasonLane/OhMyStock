@@ -42,6 +42,8 @@
   `cur_prc` 등)와 `avg_price` 원 단위 반올림 가정을 실측 검증해야 한다. 검증용
   라이브 테스트(`test_live_잔고_원본응답_avg_price_실측`)는 이미 존재 — 포지션만
   생기면 즉시 재실행 가능.
+  - 쓰기 엔드포인트(`POST /collect`·`POST /score`) 인증/CORS 오리진 제한 도입
+    여부 확정 (T7 보안 패널, P3 spec §10).
 - ✅ **PRE-GATE — Phase 3(스코어링) 3건: 2026-07-18 라이브 프로브로 실측 완료.**
   정책 결정만 Phase 3 브레인스토밍에 남음. 증거:
   `.superpowers/sdd/p3-pregate-sectors.txt`(1차 — 페이지네이션 누락으로 100행
@@ -149,7 +151,7 @@
 | 13 | 4-에이전트 패널이 **8개 코드 태스크 중 7개**에서 Critical/Important 결함을 잡아 수정시킴(1개만 1차 전원승인) — 패널 프로세스(결정 #12)의 유효성이 실측으로 입증됨 | 락-sleep 전역 직렬화, 401/429 재시도 예산 혼합, silent-0 금액 필드 등 실제 결함을 코드 작성 직후 잡아냄 | `docs/retrospectives/2026-07-17-phase1-kiwoom-broker-adapter.md` §3 총괄 |
 | 14 | 트레이딩 엔진 관련 정책(긴급 TR 우선순위·타임아웃)은 **Phase 1에서 설계하지 않고 Phase 5로 이관** | Phase 1은 주문을 다루지 않아 "긴급"을 정의할 도메인 지식(소비자)이 없음 — 조기 설계는 추측 기반이 됨(YAGNI). 인프라(레이트리미터 락-바깥 sleep)는 이미 이를 지원하도록 준비됨 | `docs/retrospectives/2026-07-17-phase1-kiwoom-broker-adapter.md` §6 |
 | 15 | P2 유니버스 = **전 종목** (ETF/ETN 포함, 구분 필드 저장) | 사용자 결정 — 유연성 우선, 필터는 소비 단계에서 | P2 spec §1 |
-| 16 | P2 수집 시동 = **HTTP API** (`POST /collect` + status) | 사용자 결정 — Phase 7 대시보드 버튼의 토대. localhost 바인딩 전제, 인증은 Phase 7 전 재평가 | P2 spec §1·§8 |
+| 16 | P2 수집 시동 = **HTTP API** (`POST /collect` + status) | 사용자 결정 — Phase 7 대시보드 버튼의 토대. localhost 바인딩 전제, `POST /collect`·`POST /score` 둘 다 무인증 쓰기 — CORS `allow_origins=["*"]` 하에서는 drive-by 트리거 가능. Phase 5·Phase 7 전 인증/CORS 오리진 제한 재평가 필요(T7 패널 보안) | P2 spec §1·§8, P3 spec §10 |
 | 17 | 일봉은 1페이지(600봉)를 **그대로 upsert** (6개월로 자르지 않음) | 추가 비용 없이 오는 데이터 — 소비자가 잘라 씀. 재실행 멱등 | P2 spec §1 |
 | 18 | 섹터 매핑 = 키움 TR(ka10101+ka20002) 우선, **실측 스파이크로 확정** — 불발 시 KRX 정보데이터시스템 파일 조인(대안 B) | ka20002의 "구성종목 반환"이 미검증 추정이라 코드 작성 전 실측이 최선 | P2 spec §1·§5 |
 | 19 | 무효 토큰 응답(HTTP 200 + `[8005]`)은 기존 401 재발급 경로와 **동일한 1회성 invalidate-and-reissue 분기**로 처리(별도 정책 신설 안 함) | 401과 본질이 같은 "토큰이 더 이상 유효하지 않다"는 신호 — 별도 상태기계를 만들면 재시도 예산 이중관리 위험(Phase 1 Task 5의 401/429 혼합 버그와 동일 클래스) | CLAUDE.md §5, `backend/app/adapters/kiwoom/client.py`(commit `50391ac`) |

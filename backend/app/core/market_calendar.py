@@ -27,3 +27,18 @@ def previous_weekday(now: datetime | None = None) -> date:
     while t.weekday() >= 5:
         t -= timedelta(days=1)
     return t
+
+
+def scoring_reference_date(now: datetime | None = None) -> date:
+    """오늘 이전(strictly before today)의 마지막 평일 — 스코어링 신선도 게이트 기준일.
+
+    previous_weekday(수집 재개용 — 오늘이 평일이면 오늘)와 의미가 다르다:
+    스코어링은 자정 배치라 '어젯밤 수집분(전 거래일 종가)'이 최신이며, 기준일이
+    오늘이면 전 종목이 낡음 판정되어 매 자정 실행이 실패한다(T7 패널 트레이더
+    Critical). 당일 저녁(수집 직후) 실행 시 하루 낡은 데이터가 게이트를 통과하는
+    트레이드오프가 있으나 fail-safe 방향이고, Phase 6 스케줄러의 수집→스코어링
+    순서 강제로 소멸한다. 휴장일 캘린더 없는 근사는 previous_weekday와 동일."""
+    t = (now or datetime.now(KST)).date() - timedelta(days=1)
+    while t.weekday() >= 5:
+        t -= timedelta(days=1)
+    return t

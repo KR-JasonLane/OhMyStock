@@ -13,6 +13,11 @@ _MARKET_HOURS_WARNING = "market-hours run may store unconfirmed candles"
 
 @router.post("/collect", status_code=202)
 async def start_collection(request: Request) -> dict:
+    if request.app.state.scoring.is_running():
+        # score.py의 대칭 가드 — 스코어링이 store를 읽는 도중 수집이 소속/상태/
+        # 봉을 갱신해 반쪽 데이터를 만드는 것을 방지 (스펙 §6)
+        raise HTTPException(status_code=409,
+                            detail="scoring is running - retry after it finishes")
     service = request.app.state.collection
     warning = _MARKET_HOURS_WARNING if is_market_hours() else None
     task = service.start(warning=warning)

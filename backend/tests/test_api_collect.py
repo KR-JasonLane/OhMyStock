@@ -37,6 +37,23 @@ class StubService:
         return self._progress
 
 
+class FakeScoring:
+    """scoring 실행 중 여부만 흉내낸다 — /collect의 대칭 409 가드 검증용.
+
+    lifespan 종료 시 app.state.scoring.current_task()도 호출되므로
+    (StubService의 동일 docstring 참고) 여기서도 구현해야 한다.
+    """
+
+    def __init__(self, running=False):
+        self._running = running
+
+    def is_running(self):
+        return self._running
+
+    def current_task(self):
+        return None
+
+
 def test_collect는_시작하면_202():
     app = create_app(_settings())
     with TestClient(app) as client:
@@ -51,6 +68,16 @@ def test_이미_실행중이면_409():
     with TestClient(app) as client:
         app.state.collection = StubService(running=True)
         assert client.post("/collect").status_code == 409
+
+
+def test_스코어링_실행중이면_409():
+    app = create_app(_settings())
+    with TestClient(app) as client:
+        app.state.scoring = FakeScoring(running=True)
+        app.state.collection = StubService()
+        r = client.post("/collect")
+    assert r.status_code == 409
+    assert "scoring" in r.json()["detail"]
 
 
 def test_status는_progress를_그대로_노출한다():

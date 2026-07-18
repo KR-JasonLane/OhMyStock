@@ -10,9 +10,10 @@ from app.domain.scoring.service import ScoringProgress
 
 
 class FakeScoring:
-    def __init__(self, running=False, progress=None):
+    def __init__(self, running=False, progress=None, latest=None):
         self._running = running
         self._progress = progress
+        self._latest = latest
 
     def is_running(self):
         return self._running
@@ -23,6 +24,9 @@ class FakeScoring:
     def progress(self):
         return self._progress
 
+    def latest_results(self):
+        return self._latest
+
 
 class FakeCollection:
     def __init__(self, running=False):
@@ -32,28 +36,19 @@ class FakeCollection:
         return self._running
 
 
-class FakeScoringStore:
-    def __init__(self, latest=None):
-        self._latest = latest
-
-    def latest_results(self):
-        return self._latest
-
-
-class BrokenScoringStore:
+class BrokenScoring(FakeScoring):
     """score_runs.config 손상(DB 변조 등) 시나리오 재현용 — latest_results가
-    json.JSONDecodeError를 던진다 (T6 보안 캐리오버)."""
+    json.JSONDecodeError를 던진다 (T6 보안 캐리오버, T7에서 delegate 경유로 갱신)."""
 
     def latest_results(self):
         raise json.JSONDecodeError("Expecting value", "", 0)
 
 
-def make_client(scoring=None, collection=None, store=None) -> TestClient:
+def make_client(scoring=None, collection=None) -> TestClient:
     app = FastAPI()
     app.include_router(router)
     app.state.scoring = scoring or FakeScoring()
     app.state.collection = collection or FakeCollection()
-    app.state.scoring_store = store or FakeScoringStore()
     return TestClient(app)
 
 
@@ -93,12 +88,12 @@ def test_latest_없으면_404():
 
 def test_latest_반환():
     latest = {"run_id": 7, "candidates": []}
-    resp = make_client(store=FakeScoringStore(latest=latest)).get("/score/latest")
+    resp = make_client(scoring=FakeScoring(latest=latest)).get("/score/latest")
     assert resp.status_code == 200 and resp.json() == latest
 
 
 def test_latest_손상된_config_JSON은_스택트레이스_없는_500():
-    resp = make_client(store=BrokenScoringStore()).get("/score/latest")
+    resp = make_client(scoring=BrokenScoring()).get("/score/latest")
     assert resp.status_code == 500
     body = resp.json()
     assert body == {"detail": "stored scoring config is corrupted"}

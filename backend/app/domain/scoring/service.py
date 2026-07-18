@@ -8,7 +8,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date
 
-from app.core.market_calendar import previous_weekday
+from app.core.market_calendar import scoring_reference_date
 from app.domain.scoring.config import ScoringConfig
 from app.domain.scoring.engine import run_scoring
 from app.domain.scoring.strategies import Strategy, default_strategies
@@ -17,6 +17,13 @@ logger = logging.getLogger(__name__)
 
 
 def _log_task_exception(task: asyncio.Task) -> None:
+    """scoring task의 done 콜백 — 취소가 아니면서 예외로 끝났다면 로깅한다.
+
+    fire-and-forget 태스크(asyncio.create_task)는 예외를 조회하지 않으면
+    조용히 삼켜지고 "Task exception was never retrieved" 경고만 남는다.
+    run()/_run() 내부에서 이미 실패 상태를 store에 기록하지만, 이 콜백은
+    태스크 자체의 예외를 놓치지 않기 위한 마지막 안전망이다.
+    """
     if task.cancelled():
         return
     exc = task.exception()
@@ -44,11 +51,21 @@ def _passes_universe(audit_info: str, state: str) -> bool:
 class ScoringService:
     def __init__(self, store, config: ScoringConfig | None = None,
                  strategies: tuple[Strategy, ...] | None = None,
-                 reference_provider: Callable[[], date] | None = None) -> None:
+                 reference_provider: Callable[[], date] | None = None,
+                 conflict_check: Callable[[], bool] | None = None) -> None:
+        """reference_provider: 런 시작 시 1회 호출해 고정한다 (CollectionService와
+        동일 계약) — 러닝 중 자정 등 날짜 경계를 통과해도 한 런 안에서는 신선도
+        판정이 일관되도록 하기 위함.
+
+        conflict_check: 반대편 서비스(CollectionService)가 실행 중인지 묻는
+        콜러블. 상호 배제는 도메인 계약이다 — Phase 6 스케줄러가 HTTP를
+        우회해 start()를 직접 호출해도 반쪽 데이터 읽기가 차단된다(API의
+        409 응답은 사용자 메시지용 1차 관문일 뿐, 여기가 실제 방어선)."""
         self._store = store
         self._config = config or ScoringConfig()
         self._strategies = strategies or default_strategies()
-        self._reference_provider = reference_provider or previous_weekday
+        self._reference_provider = reference_provider or scoring_reference_date
+        self._conflict_check = conflict_check
         self._running = False
         self._progress: ScoringProgress | None = None
         self._task: asyncio.Task | None = None
@@ -62,9 +79,16 @@ class ScoringService:
     def current_task(self) -> asyncio.Task | None:
         return self._task
 
+    def latest_results(self) -> dict | None:
+        """최근 succeeded 실행 결과 위임 — API가 store를 직접 알지 않도록
+        분리한다. Phase 4도 이 진입점을 통해 스코어링 결과를 소비한다."""
+        return self._store.latest_results()
+
     def start(self) -> asyncio.Task | None:
         """원자적 시작 — check와 set 사이에 await 없음 (CollectionService와 동일)."""
         if self._running:
+            return None
+        if self._conflict_check is not None and self._conflict_check():
             return None
         self._running = True
         self._task = asyncio.create_task(self._run())
@@ -74,14 +98,20 @@ class ScoringService:
     async def run(self) -> None:
         if self._running:
             raise RuntimeError("scoring already running")
+        if self._conflict_check is not None and self._conflict_check():
+            raise RuntimeError("conflicting run in progress")
         self._running = True
         await self._run()
 
     async def _run(self) -> None:
         cfg = self._config
         reference = self._reference_provider()
-        run_id = await asyncio.to_thread(
-            self._store.create_run, reference, cfg.to_json())
+        try:
+            run_id = await asyncio.to_thread(
+                self._store.create_run, reference, cfg.to_json())
+        except Exception:
+            self._running = False
+            raise
         universe_count = stale_excluded = 0
         try:
             self._set(run_id, "running", "loading", 0, 0)
@@ -134,18 +164,12 @@ class ScoringService:
                 sum(1 for s in result.sectors if s.selected), universe_count,
                 stale_excluded, result.excluded_short_history)
         except asyncio.CancelledError:
-            await asyncio.to_thread(self._store.finish_run, run_id, "failed",
-                                    universe_count, stale_excluded, "cancelled")
-            self._set(run_id, "failed", "finished", 0, universe_count,
-                      "cancelled")
+            await self._fail(run_id, universe_count, stale_excluded, "cancelled")
             raise
         except Exception as exc:
             logger.exception("scoring run %s failed unexpectedly", run_id)
-            await asyncio.to_thread(self._store.finish_run, run_id, "failed",
-                                    universe_count, stale_excluded,
-                                    f"unexpected: {type(exc).__name__}")
-            self._set(run_id, "failed", "finished", 0, universe_count,
-                      f"unexpected: {type(exc).__name__}")
+            await self._fail(run_id, universe_count, stale_excluded,
+                             f"unexpected: {type(exc).__name__}")
             raise
         finally:
             self._running = False

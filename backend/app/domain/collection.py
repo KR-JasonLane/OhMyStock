@@ -51,8 +51,14 @@ class CollectionService:
                  markets: tuple[str, ...] = ("kospi", "kosdaq", "etf"),
                  candle_count: int = 600,
                  max_consecutive_failures: int = 20,
-                 reference_provider: Callable[[], date] | None = None) -> None:
+                 reference_provider: Callable[[], date] | None = None,
+                 conflict_check: Callable[[], bool] | None = None) -> None:
         """markets: 수집 대상 시장 목록.
+
+        conflict_check: 반대편 서비스(ScoringService)가 실행 중인지 묻는
+        콜러블. 상호 배제는 도메인 계약이다 — Phase 6 스케줄러가 HTTP를
+        우회해 start()를 직접 호출해도 반쪽 데이터 읽기가 차단된다(API의
+        409 응답은 사용자 메시지용 1차 관문일 뿐, 여기가 실제 방어선).
 
         reference_provider: candles 단계에서 스킵 판단에 쓸 기준일을 반환하는
         콜러블 (기본 `previous_weekday` — 휴장일 캘린더 없는 근사, 공휴일에는
@@ -76,6 +82,7 @@ class CollectionService:
         self._candle_count = candle_count
         self._max_consec = max_consecutive_failures
         self._reference_provider = reference_provider or previous_weekday
+        self._conflict_check = conflict_check
         self._running = False
         self._progress: CollectionProgress | None = None
         self._warning: str | None = None
@@ -100,6 +107,8 @@ class CollectionService:
         """
         if self._running:
             return None
+        if self._conflict_check is not None and self._conflict_check():
+            return None
         self._running = True
         self._warning = warning
         self._task = asyncio.create_task(self._run())
@@ -110,6 +119,8 @@ class CollectionService:
         """단독 호출용 진입점 (테스트/스크립트). API는 start()를 쓴다."""
         if self._running:
             raise RuntimeError("collection already running")
+        if self._conflict_check is not None and self._conflict_check():
+            raise RuntimeError("conflicting run in progress")
         self._running = True
         self._warning = None
         await self._run()
@@ -123,7 +134,11 @@ class CollectionService:
         이 서비스의 책임이 아니라 Phase 6 스케줄러가 진다 (거래일 캘린더가
         필요하기 때문).
         """
-        run_id = await asyncio.to_thread(self._store.create_run)
+        try:
+            run_id = await asyncio.to_thread(self._store.create_run)
+        except Exception:
+            self._running = False
+            raise
         succeeded = failed = total = 0
         notes: list[str] = []
         try:
