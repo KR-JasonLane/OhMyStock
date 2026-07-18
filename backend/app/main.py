@@ -8,13 +8,19 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.adapters.kiwoom.broker import KiwoomBroker
 from app.adapters.kiwoom.client import KiwoomHttpClient
+from app.adapters.naver.client import NaverNewsClient
+from app.adapters.ollama.client import OllamaClient
+from app.api.analyze import router as analyze_router
 from app.api.collect import router as collect_router
 from app.api.health import router as health_router
 from app.api.score import router as score_router
 from app.api.ws import router as ws_router
 from app.core.config import Settings, get_settings
+from app.domain.analysis.config import AnalysisConfig
+from app.domain.analysis.service import AnalysisService
 from app.domain.collection import CollectionService
 from app.domain.scoring.service import ScoringService
+from app.store.analysis_store import AnalysisStore
 from app.store.collection_store import CollectionStore
 from app.store.db import create_db_engine
 from app.store.scoring_store import ScoringStore
@@ -42,16 +48,38 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             app.state.scoring = ScoringService(
                 app.state.scoring_store,
                 conflict_check=lambda: app.state.collection.is_running())
+
+            # AnalysisConfig 기본값으로 Ollama 클라이언트를 만든다(모델/베이스
+            # URL/타임아웃 — cfg.to_json()이 매 런 config 스냅샷으로 저장하는
+            # 값과 동일한 출처). 네이버 키는 옵셔널이라 둘 다 있을 때만
+            # NaverNewsClient를 만들고, 아니면 news=None으로 넘겨 AnalysisService가
+            # 뉴스 조회를 생략하고 경고만 남기게 한다(스펙 §4).
+            analysis_cfg = AnalysisConfig()
+            app.state.llm = OllamaClient(
+                analysis_cfg.ollama_base_url, analysis_cfg.model,
+                analysis_cfg.temperature, analysis_cfg.llm_timeout_s)
+            if settings.naver_client_id is not None \
+                    and settings.naver_client_secret is not None:
+                app.state.news = NaverNewsClient(
+                    settings.naver_client_id, settings.naver_client_secret)
+            else:
+                app.state.news = None
+            app.state.analysis = AnalysisService(
+                AnalysisStore(app.state.engine), app.state.llm, app.state.news)
             try:
                 yield
             finally:
-                for service in (app.state.scoring, app.state.collection):
+                for service in (app.state.scoring, app.state.collection,
+                                app.state.analysis):
                     task = service.current_task()
                     if task is not None and not task.done():
                         task.cancel()
                         with contextlib.suppress(asyncio.CancelledError):
                             await task
                 await app.state.broker.aclose()
+                await app.state.llm.aclose()
+                if app.state.news is not None:
+                    await app.state.news.aclose()
         finally:
             app.state.engine.dispose()
 
@@ -68,4 +96,5 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(ws_router)
     app.include_router(collect_router)
     app.include_router(score_router)
+    app.include_router(analyze_router)
     return app
