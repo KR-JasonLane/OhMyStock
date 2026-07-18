@@ -30,6 +30,8 @@ def simulate(candles: list[Candle], strategy: Strategy,
         if not strategy.signal(candles, at, cfg):
             continue
         entry = candles[at + 1].open
+        # Candle이 open>0을 보장하므로 방어적 이중 가드(도달 불가 기대) —
+        # 지표/데이터 경로 변경 대비.
         if entry <= 0:
             continue
         returns.append(candles[exit_idx].close / entry - 1)
@@ -37,5 +39,5 @@ def simulate(candles: list[Candle], strategy: Strategy,
         return StrategyFitness(avg_return=0.0, win_rate=0.0, occurrences=0)
     wins = sum(1 for r in returns if r > 0)
     return StrategyFitness(avg_return=sum(returns) / len(returns),
-                           win_rate=wins / len(returns),
-                           occurrences=len(returns))
+                            win_rate=wins / len(returns),
+                            occurrences=len(returns))

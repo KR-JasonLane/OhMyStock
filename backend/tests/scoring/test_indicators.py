@@ -55,4 +55,21 @@ def test_config_기본값():
     cfg = ScoringConfig()
     assert (cfg.top_sectors, cfg.top_candidates, cfg.hold_days) == (5, 20, 10)
     assert cfg.sector_weight_r20 + cfg.sector_weight_r60 + cfg.sector_weight_r5 == 1.0
+
+
+def test_범위_밖_at은_None():
+    candles = make_candles([1, 2, 3, 4, 5])
+    assert moving_average(candles, 3, len(candles)) is None   # at == len(candles)
+    assert moving_average(candles, 3, -1) is None              # 음수 at
+    assert period_return(candles, 2, -1) is None
+    assert rolling_high(candles, 2, -1) is None
+
+
+def test_config_to_json_왕복():
+    import json
+
+    from app.domain.scoring.config import ScoringConfig
+    cfg = ScoringConfig()
+    assert json.loads(cfg.to_json())["hold_days"] == 10
+    assert cfg.to_json() == cfg.to_json()
     assert cfg.final_weight_sector + cfg.final_weight_strategy == 1.0

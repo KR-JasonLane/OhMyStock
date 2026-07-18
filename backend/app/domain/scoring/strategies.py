@@ -62,6 +62,9 @@ class BreakoutStrategy:
 
     def signal(self, candles: list[Candle], at: int, cfg: ScoringConfig) -> bool:
         box_high = rolling_high(candles, cfg.breakout_lookback, at)
+        # 거래량 평균 창은 별도 파라미터 없이 cfg.ma_short(기본 20일)를 의도적으로
+        # 재사용 — ma_short 변경 시 돌파 거래량 조건도 함께 바뀜(스펙 §4-6에
+        # 별도 창 없음).
         avg_vol = average_volume(candles, cfg.ma_short, at)
         if box_high is None or avg_vol is None or avg_vol <= 0:
             return False
