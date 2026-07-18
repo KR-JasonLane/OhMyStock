@@ -166,6 +166,12 @@ warnings)`. 노드 3개 선형 연결. LLM 호출은 economist/trader만.
    판정·사유가 전부 저장되므로 복기로 평가, 모델은 설정 교체 가능.
    AI 필터는 보수 방향(축소만 가능, 점수 순위를 올리지는 못함)이라 최악의
    경우에도 P3 후보보다 나쁜 종목이 추가되지는 않는다.
+4. **LangSmith 텔레메트리:** langgraph의 전이 의존성(langsmith)이
+   `LANGCHAIN_TRACING_V2`/`LANGSMITH_TRACING` 환경변수 옵트인 시 프롬프트·
+   응답(전략 기밀)을 외부 SaaS로 전송한다 — `AnalysisPipeline.__init__`의
+   런타임 가드(해당 env가 truthy면 `RuntimeError`)와 `docker-compose.yml`의
+   두 변수 `"false"` 고정으로 차단(운영 규칙: 해당 env 활성화 금지, P4-T2
+   보안 패널).
 
 ## 11. 사용자 준비물 (구현 중 요청)
 

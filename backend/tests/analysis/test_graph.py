@@ -79,6 +79,31 @@ async def test_LlmError는_전파된다():
         await AnalysisPipeline(llm, CFG).run(SNAP, [cand("AAA111", 0.9)], [], {})
 
 
+@pytest.mark.anyio
+async def test_economist_폴백과_trader_성공이_공존한다():
+    """LangGraph 상태 채널 병합(LastValue) 회귀 테스트 — economist가 폴백
+    경고를 남긴 뒤에도 이어지는 trader 노드의 승인 결과(verdicts/picks)가
+    유실 없이 최종 상태까지 전달돼야 한다."""
+    llm = ScriptedLlm(["broken", "also broken", approve(0.9)])  # economist 2회 실패 → 폴백
+    result = await AnalysisPipeline(llm, CFG).run(SNAP, [cand("AAA111", 0.9)], [], {})
+    assert "economist-parse-fallback" in result.warnings
+    assert result.verdicts["AAA111"].verdict == "approve"
+    assert result.picks == (Pick("AAA111", 1),)
+
+
+@pytest.mark.parametrize("var", ["LANGSMITH_TRACING_V2", "LANGCHAIN_TRACING_V2",
+                                 "LANGSMITH_TRACING", "LANGCHAIN_TRACING"])
+def test_langsmith_추적_환경변수_활성화시_초기화가_거부된다(monkeypatch, var):
+    """설치된 langsmith SDK가 실제 인식하는 4개 이름 전부 차단 (보안 패널 실측 —
+    2개만 덮으면 LANGSMITH_TRACING_V2 등 우선순위 높은 이름으로 우회 가능)."""
+    for v in ("LANGSMITH_TRACING_V2", "LANGCHAIN_TRACING_V2",
+              "LANGSMITH_TRACING", "LANGCHAIN_TRACING"):
+        monkeypatch.delenv(v, raising=False)
+    monkeypatch.setenv(var, "true")
+    with pytest.raises(RuntimeError):
+        AnalysisPipeline(ScriptedLlm([]), CFG)
+
+
 def test_synthesize_정렬과_상한과_동률():
     market = MarketContext("risk_off", "s", 1, ())   # advice=1이 상한
     verdicts = {

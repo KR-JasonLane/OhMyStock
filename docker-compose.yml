@@ -20,6 +20,12 @@ services:
     env_file: .env
     environment:
       DATABASE_URL: postgresql+psycopg://ohmystock:${POSTGRES_PASSWORD:-ohmystock}@db:5432/ohmystock
+      # LangSmith 텔레메트리 차단 — 활성화 시 프롬프트/응답(전략 기밀)이 외부 SaaS로 전송된다
+      # (SDK가 인식하는 4개 이름 전부 고정 — 보안 패널 실측)
+      LANGSMITH_TRACING_V2: "false"
+      LANGCHAIN_TRACING_V2: "false"
+      LANGSMITH_TRACING: "false"
+      LANGCHAIN_TRACING: "false"
     ports:
       - "127.0.0.1:8000:8000"
     depends_on:

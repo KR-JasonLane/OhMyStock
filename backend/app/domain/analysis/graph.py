@@ -6,9 +6,10 @@
 그래프 밖에 둔다 (스펙 §5-3 — 선정 규칙은 결정론적이어야 재현·테스트 가능).
 """
 
-from collections.abc import Sequence
+import os
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import TypedDict
+from typing import TypedDict, TypeVar
 
 from langgraph.graph import END, START, StateGraph
 
@@ -23,6 +24,17 @@ from app.domain.analysis.ports import (CandidateInput, Headline, LlmPort,
 from app.domain.analysis.prompts import (ECONOMIST_SYSTEM, TRADER_SYSTEM,
                                          build_economist_prompt,
                                          build_trader_prompt)
+
+_T = TypeVar("_T")
+
+# LangSmith 텔레메트리 옵트인 환경변수 — 활성화 시 프롬프트/응답(전략 기밀)이
+# 외부 SaaS로 전송되므로 파이프라인 구성 시점에 차단한다 (P4-T2 보안 패널).
+# 4개 전부 커버해야 한다: 설치된 langsmith(utils.get_env_var, namespaces
+# LANGSMITH/LANGCHAIN × TRACING_V2/TRACING)가 실제로 이 4개 이름을 순서대로
+# 조회함을 SDK 소스로 실측 확인(보안 패널 재검증). SDK 버전업 시 이름 드리프트
+# 가능 — langsmith 업그레이드 시 이 목록을 재확인할 것.
+_LANGSMITH_ENV_VARS = ("LANGSMITH_TRACING_V2", "LANGCHAIN_TRACING_V2",
+                       "LANGSMITH_TRACING", "LANGCHAIN_TRACING")
 
 
 @dataclass(frozen=True)
@@ -40,6 +52,13 @@ class AnalysisResult:
 
 
 class _State(TypedDict):
+    # run() 입력 — 그래프 상태 채널로 격리되어 노드 간에만 공유된다
+    # (인스턴스 필드가 아니므로 동시 run() 호출 간 상태 공유가 없다).
+    snapshot: MarketSnapshot
+    candidates: Sequence[CandidateInput]
+    market_headlines: Sequence[Headline]
+    symbol_headlines: dict[str, list[Headline]]
+    # 노드가 채워나가는 결과
     market: MarketContext | None
     verdicts: dict[str, TraderVerdict]
     warnings: list[str]
@@ -73,17 +92,19 @@ def synthesize(market: MarketContext, verdicts: dict[str, TraderVerdict],
 
 
 class AnalysisPipeline:
-    """`run()`마다 달라지는 입력(스냅샷·후보·뉴스)은 인스턴스 필드로 주입한
-    뒤 컴파일된 그래프를 실행한다 — 그래프 자체는 `__init__`에서 한 번만
-    구성한다."""
+    """인스턴스는 불변 의존성(`_llm`, `_cfg`, 컴파일된 `_graph`)만 보유한다 —
+    run() 동시 호출에도 상태 공유가 없다(입력은 그래프 상태 채널로 격리되며,
+    `run()`마다 새 초기 상태를 `ainvoke`에 전달한다)."""
 
     def __init__(self, llm: LlmPort, cfg: AnalysisConfig) -> None:
+        for var in _LANGSMITH_ENV_VARS:
+            if os.environ.get(var, "").strip().lower() in ("1", "true", "yes"):
+                raise RuntimeError(
+                    f"{var} 활성화 금지 - LangSmith 트레이싱은 프롬프트/응답(전략 기밀)을 "
+                    "외부 SaaS로 전송한다 (P4-T2 보안 패널)")
+
         self._llm = llm
         self._cfg = cfg
-        self._snapshot: MarketSnapshot | None = None
-        self._candidates: Sequence[CandidateInput] = ()
-        self._market_headlines: Sequence[Headline] = ()
-        self._symbol_headlines: dict[str, list[Headline]] = {}
 
         graph = StateGraph(_State)
         graph.add_node("economist", self._economist_node)
@@ -93,34 +114,43 @@ class AnalysisPipeline:
         graph.add_edge("traders", END)
         self._graph = graph.compile()
 
-    async def _economist_node(self, state: _State) -> dict:
-        prompt = build_economist_prompt(self._snapshot, self._market_headlines)
+    async def _generate_with_retry(
+            self, system: str, prompt: str,
+            parse_fn: Callable[[str], _T]) -> _T | None:
+        """`parse_retries + 1`회까지 시도, `ParseError`만 잡아 재시도한다.
+        전량 실패하면 `None`(호출자가 폴백 적용 + 경고 기록). `LlmError`는
+        잡지 않고 그대로 전파된다(스펙 §8 — LLM 접속 실패는 런 실패)."""
         for _ in range(self._cfg.parse_retries + 1):
             try:
-                raw = await self._llm.generate_json(ECONOMIST_SYSTEM, prompt)
-                return {"market": parse_market_context(raw, self._cfg.max_picks)}
+                raw = await self._llm.generate_json(system, prompt)
+                return parse_fn(raw)
             except ParseError:
                 continue
-        return {
-            "market": neutral_fallback(self._cfg.max_picks),
-            "warnings": [*state["warnings"], "economist-parse-fallback"],
-        }
+        return None
+
+    async def _economist_node(self, state: _State) -> dict:
+        prompt = build_economist_prompt(state["snapshot"],
+                                        state["market_headlines"],
+                                        self._cfg.max_picks)
+        market = await self._generate_with_retry(
+            ECONOMIST_SYSTEM, prompt,
+            lambda raw: parse_market_context(raw, self._cfg.max_picks))
+        if market is None:
+            return {
+                "market": neutral_fallback(self._cfg.max_picks),
+                "warnings": [*state["warnings"], "economist-parse-fallback"],
+            }
+        return {"market": market}
 
     async def _traders_node(self, state: _State) -> dict:
         market = state["market"]
         verdicts = dict(state["verdicts"])
         warnings = list(state["warnings"])
-        for candidate in self._candidates:
-            headlines = self._symbol_headlines.get(candidate.symbol, [])
+        for candidate in state["candidates"]:
+            headlines = state["symbol_headlines"].get(candidate.symbol, [])
             prompt = build_trader_prompt(candidate, market, headlines)
-            verdict: TraderVerdict | None = None
-            for _ in range(self._cfg.parse_retries + 1):
-                try:
-                    raw = await self._llm.generate_json(TRADER_SYSTEM, prompt)
-                    verdict = parse_trader_verdict(raw)
-                    break
-                except ParseError:
-                    continue
+            verdict = await self._generate_with_retry(
+                TRADER_SYSTEM, prompt, parse_trader_verdict)
             if verdict is None:
                 verdict = parse_failure_reject()
                 warnings.append(f"trader-parse-failure:{candidate.symbol}")
@@ -131,13 +161,17 @@ class AnalysisPipeline:
                   candidates: Sequence[CandidateInput],
                   market_headlines: Sequence[Headline],
                   symbol_headlines: dict[str, list[Headline]]) -> AnalysisResult:
-        self._snapshot = snapshot
-        self._candidates = candidates
-        self._market_headlines = market_headlines
-        self._symbol_headlines = symbol_headlines
-
-        final_state: _State = await self._graph.ainvoke(
-            {"market": None, "verdicts": {}, "warnings": []})
+        """candidates 순서는 최종 선정에 영향 없음(synthesize가 재정렬)."""
+        initial_state: _State = {
+            "snapshot": snapshot,
+            "candidates": candidates,
+            "market_headlines": market_headlines,
+            "symbol_headlines": symbol_headlines,
+            "market": None,
+            "verdicts": {},
+            "warnings": [],
+        }
+        final_state: _State = await self._graph.ainvoke(initial_state)
 
         market = final_state["market"]
         verdicts = final_state["verdicts"]
