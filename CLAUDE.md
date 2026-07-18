@@ -207,6 +207,13 @@ evidence trail.
   (this is how the 8005 case was discovered). Operational rule: **never issue a
   Kiwoom token from a host-side script/second process while the backend is running**
   a live `TokenManager` against the same appkey.
+- **⚠️ Mock daily-candle feed lags — verified live (2026-07-18, Phase 3 T8):**
+  a full collection run on Saturday 2026-07-18 still returned candles only
+  through 2026-07-16 (Friday 2026-07-17's candle absent, and it was a normal
+  trading day). Until the mock feed catches up, the scoring freshness gate
+  (reference = last weekday strictly before today) will correctly reject runs
+  on mock — this is the gate working as designed, not a pipeline bug. Re-check
+  before relying on same-day candles from `mockapi.kiwoom.com`.
 - **Degenerate candle responses exist:** symbol `012510` returned a single candle
   row with all OHLCV fields as empty strings during the full-universe run.
   Client-side OHLC validation (`Candle.__post_init__`, domain-level, fail-loud)

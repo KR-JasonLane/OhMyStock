@@ -4,15 +4,38 @@
 > 새 세션에서 재개할 때 이 문서를 가장 먼저 읽으세요. 매 작업 세션이 끝날 때마다
 > 이 문서를 갱신합니다(핸드오프 문서).
 
-- **최종 수정:** 2026-07-17
+- **최종 수정:** 2026-07-18
 - **프로젝트:** OhMyStock — 한국 주식 자동매매 시스템
 
 ---
 
 ## ▶ 여기서 재개 (다음 액션)
 
-**Phase 2(데이터 수집 파이프라인) 완료 — Phase 3(스코어링 엔진) spec
-브레인스토밍부터 재개.**
+**Phase 3(스코어링 엔진) 완료 — Phase 4(AI 멀티에이전트 분석) spec
+브레인스토밍부터 재개.** 단, **착수 전 선행 리팩터 1건**: CollectionService/
+ScoringService 공통 오케스트레이션 베이스 추출 (P3 spec §9, T7 아키텍트
+조건부 수용).
+
+- Phase 3 산출물: `backend/app/domain/scoring/`(config·indicators·strategies·
+  simulation·engine·service), `backend/app/domain/sector_classification.py`,
+  `backend/app/store/scoring_store.py`(+Alembic `0003`/`0004` — 멤버십 다대다,
+  상태 필드, 스코어링 4테이블), `backend/app/api/score.py`(`POST /score` +
+  status/latest). 테스트 **187 passed** (8 deselected 라이브).
+- **✅ 수용 검증 (2026-07-18, 모의서버 실데이터):** 재수집 65분(3,886/3,887),
+  **industry 중복 소속률 0.00%**(기준 <5%), 프로덕션 신선도 게이트가 낡은
+  데이터 정확 거부 실증, 기준일 주입 실행으로 end-to-end 성공 — 유니버스
+  2,514, **계산 9.3초**, 선정 업종 5(금융 포함 — T1 재분류 수정의 실증) /
+  후보 18종목. 증거: `.superpowers/sdd/p3-task-8-*`.
+- **⚠️ 스코어링 운영 노트:** 모의서버 일봉 피드는 지연됨(토 7/18 수집에도
+  최신 봉 7/16) — 피드가 따라잡기 전 모의 환경 야간 스코어링은 게이트에서
+  실패하는 것이 정상. 수집↔스코어링은 도메인 레벨 상호 배제(conflict_check)
+  + API 409 양방향 가드.
+- Phase 3 회고록: `docs/retrospectives/2026-07-18-phase3-scoring-engine.md`
+  (태스크별 커밋, 패널 핵심 결함 8건, 프로세스 사건 4건, 백로그, 실측 통계).
+- Phase 3 spec: `docs/specs/2026-07-18-phase3-scoring-engine-design.md`
+  (§4-3/§4-4-b 한계 명문화, §9 이후 연계, §10 무인증 쓰기 리스크).
+
+(직전 마일스톤 기록 — Phase 2 완료 시점 상태:)
 
 - Phase 2 산출물: `backend/app/domain/collection.py`(`CollectionService`),
   `backend/app/store/{models.py,collection_store.py}`(4개 테이블 + upsert
@@ -126,10 +149,13 @@
     67분/캔들 212만행) + 재실행 멱등 확인, 실측 팩트 CLAUDE.md §5 반영
     (2026-07-17)
 [x] Phase 2 회고록 (docs/retrospectives/2026-07-17-phase2-data-collection-pipeline.md)
-[x] Phase 3 PRE-GATE 3건 라이브 프로브 실측 (2026-07-18 — 위 재개 지점 참고)
-[ ] Phase 3: 스코어링 엔진 스펙 브레인스토밍                  <-- 다음 (산업 업종
-    화이트리스트/ETF 포함 여부/관리종목 필터/신선도 게이트 결정 포함)
-... Phase 4~8 (CLAUDE.md 로드맵 참고)
+[x] Phase 3 PRE-GATE 3건 라이브 프로브 실측 (2026-07-18)
+[x] Phase 3: 스코어링 엔진 — Task 1~8 완료, 187 passed, 실데이터 수용 검증
+    통과 (2026-07-18)
+[x] Phase 3 회고록 (docs/retrospectives/2026-07-18-phase3-scoring-engine.md)
+[ ] Phase 4: AI 멀티에이전트 분석 스펙 브레인스토밍            <-- 다음 (착수 전:
+    서비스 공통 베이스 추출 선행 리팩터 — P3 spec §9)
+... Phase 5~8 (CLAUDE.md 로드맵 참고)
 ```
 
 ## 결정 로그 (무엇을, 왜 정했나)
