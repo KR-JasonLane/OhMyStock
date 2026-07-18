@@ -239,6 +239,37 @@ Sources: https://openapi.kiwoom.com/guide/index , https://github.com/younghwan91
 live verification against `mockapi.kiwoom.com` (2026-07-17, Phase 1 implementation;
 2026-07-17, Phase 2 implementation including full-universe collection).
 
+## 5b. Verified external-service facts (Phase 4 — Ollama / Naver)
+
+Measured live during Phase 4 acceptance (2026-07-18); see
+`docs/retrospectives/2026-07-18-phase4-ai-analysis.md` §3 for evidence.
+
+- **⚠️ Naver: legacy Open API and NAVER API HUB keys are NOT interchangeable.**
+  Keys issued on NAVER API HUB (secret is 40 chars) are rejected by the legacy
+  `openapi.naver.com/v1/search/news.json` with 401 / errorCode 024. The adapter
+  targets the API HUB: `https://naverapihub.apigw.ntruss.com/search/v1/news`,
+  headers `X-NCP-APIGW-API-KEY-ID` / `X-NCP-APIGW-API-KEY`. Response body
+  format is identical to the legacy API (items/title/originallink/link/
+  description/pubDate, `<b>` tags + HTML entities; JSON is the default without
+  a `format` param). Daily quota 25,000 calls
+  (https://api.ncloud-docs.com/docs/naver-api-hub-search-news).
+- **⚠️ Ollama cloud inference ignores `format: "json"`.** `gemma4:31b-cloud`
+  (remote inference via ollama.com; requires `ollama signin`) wraps responses
+  in markdown fences (```json ... ```) despite the format constraint. The
+  adapter strips exactly one symmetric fence (backreference-matched backtick
+  count) before returning; domain parsing stays strict/fail-loud. Local models
+  honoring `format` pass through unchanged.
+- **Container → host Ollama works with default binding.** Docker Desktop
+  (Windows) proxies `host.docker.internal:11434` to the host loopback, so
+  `OLLAMA_HOST=0.0.0.0` (LAN exposure) is NOT needed — keep the default
+  127.0.0.1 binding. From host processes, `host.docker.internal` resolves to
+  the LAN IP and is refused — host-side live smokes use `127.0.0.1`.
+- **LangSmith telemetry is quadruple-blocked** (the 4 env var names the
+  installed SDK recognizes are pinned "false" in docker-compose AND
+  `AnalysisPipeline.__init__` raises if any is truthy) — prompts/verdicts
+  must never leave for a third-party SaaS. (Cloud model inference is a
+  separate, user-accepted exposure — re-evaluate before live trading.)
+
 ## 6. Roadmap (each phase = its own spec → plan → build → retrospective)
 
 | Phase | Name | Depends on |

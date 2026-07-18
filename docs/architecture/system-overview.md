@@ -63,9 +63,16 @@ Phase 0 계획서(Task 6)에 정의된 실제 compose 토폴로지는 다음과 
 - **프론트엔드:** compose에 포함되지 않는다. 호스트에서 `pnpm dev` / `pnpm start`로
   별도 실행되어 `http://127.0.0.1:8000`(HTTP)과 `ws://127.0.0.1:8000/ws`(WebSocket)로
   접속한다.
-- **Ollama(Phase 4):** 추후 `docker-compose.yml`에 서비스로 추가하거나, Windows GPU
-  패스스루 제약을 피하기 위해 `host.docker.internal`을 통해 호스트 네이티브 Ollama를
-  사용하는 대안이 검토 중이다(spec §9 미해결 항목).
+- **Ollama(Phase 4 — 확정):** **호스트 네이티브 Ollama**를
+  `host.docker.internal:11434`로 접근한다(컨테이너화하지 않음 — Windows GPU
+  패스스루 제약 회피, 모델은 `gemma4:31b-cloud` 클라우드 추론).
+  **2026-07-18 실측:** Docker Desktop(Windows) 게이트웨이가 컨테이너 →
+  호스트 루프백을 프록시하므로 Ollama 기본 바인딩(127.0.0.1) 그대로
+  `host.docker.internal:11434` HTTP 200 확인 — **`OLLAMA_HOST=0.0.0.0`
+  (LAN 노출) 설정이 불필요하며, 보안상 기본 바인딩을 유지해야 한다.**
+  (반대로 호스트 프로세스에서는 `host.docker.internal`이 LAN IP로 풀려
+  연결이 거부된다 — 호스트 측 라이브 스모크는 `127.0.0.1` 사용. 증거:
+  `.superpowers/sdd/p4-task-7-ollama.txt`, P4 회고록 §3-3.)
 
 > ✅ **검증 상태:** 위 compose 구성은 2026-07-17 실제 `docker compose up` 기동과
 > E2E DoD 검증을 마쳤다. 상세 내용은
