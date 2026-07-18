@@ -55,7 +55,8 @@ class ScoringStore:
                     run_id=run_id, symbol=c.symbol, rank=c.rank,
                     total_score=c.total_score, sector_code=c.sector_code,
                     sector_score=c.sector_score,
-                    strategy_score=c.strategy_score))
+                    strategy_score=c.strategy_score,
+                    strategy_score_norm=c.strategy_score_norm))
                 for d in c.details:
                     session.add(ScoreDetailRow(
                         run_id=run_id, symbol=c.symbol, strategy=d.strategy,
@@ -100,13 +101,17 @@ class ScoringStore:
                      "total_score": s.total_score, "sector_code": s.sector_code,
                      "sector_score": s.sector_score,
                      "strategy_score": s.strategy_score,
+                     "strategy_score_norm": s.strategy_score_norm,
                      "details": by_symbol.get(s.symbol, [])} for s in scores],
             }
 
     # ---------- 스코어링 입력 조회 ----------
 
     def active_common_instruments(self) -> list[tuple[str, str, str]]:
-        """(symbol, audit_info, state) — kospi/kosdaq 활성 종목만 (etf 제외)."""
+        """(symbol, audit_info, state) — kospi/kosdaq 활성 종목만 (etf 제외).
+        audit_info/state 값에 따른 정상/비정상 필터링(스펙 §4-2: '정상' 아님,
+        '거래정지'·'관리종목' 포함 등)은 이 메서드의 책임이 아니다 — 호출자
+        (ScoringService §4-2)가 반환된 raw 값을 보고 판단한다."""
         with self._sessions() as session:
             rows = session.execute(
                 select(InstrumentRow.symbol, InstrumentRow.audit_info,

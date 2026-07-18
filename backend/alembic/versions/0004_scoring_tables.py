@@ -29,7 +29,8 @@ def upgrade() -> None:
     )
     op.create_table(
         "score_sectors",
-        sa.Column("run_id", sa.Integer, sa.ForeignKey("score_runs.id"),
+        sa.Column("run_id", sa.Integer,
+                  sa.ForeignKey("score_runs.id", ondelete="CASCADE"),
                   primary_key=True),
         sa.Column("sector_code", sa.String(8), primary_key=True),
         sa.Column("r20", sa.Float, nullable=False),
@@ -41,7 +42,8 @@ def upgrade() -> None:
     )
     op.create_table(
         "scores",
-        sa.Column("run_id", sa.Integer, sa.ForeignKey("score_runs.id"),
+        sa.Column("run_id", sa.Integer,
+                  sa.ForeignKey("score_runs.id", ondelete="CASCADE"),
                   primary_key=True),
         sa.Column("symbol", sa.String(12), primary_key=True),
         sa.Column("rank", sa.Integer, nullable=False),
@@ -49,10 +51,12 @@ def upgrade() -> None:
         sa.Column("sector_code", sa.String(8), nullable=False),
         sa.Column("sector_score", sa.Float, nullable=False),
         sa.Column("strategy_score", sa.Float, nullable=False),
+        sa.Column("strategy_score_norm", sa.Float, nullable=False),
     )
     op.create_table(
         "score_details",
-        sa.Column("run_id", sa.Integer, sa.ForeignKey("score_runs.id"),
+        sa.Column("run_id", sa.Integer,
+                  sa.ForeignKey("score_runs.id", ondelete="CASCADE"),
                   primary_key=True),
         sa.Column("symbol", sa.String(12), primary_key=True),
         sa.Column("strategy", sa.String(32), primary_key=True),

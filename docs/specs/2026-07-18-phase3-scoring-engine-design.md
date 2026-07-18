@@ -118,6 +118,11 @@ api/score.py
 - 섹터 점수 = R20 × 0.5 + R60 × 0.3 + R5 × 0.2 (Rn = n거래일 수익률).
 - 전 업종 점수를 min-max 정규화([0,1], 실행 내) 후 상위 **K=5** 업종 진출.
 
+> **주의:** 상대 정규화라 전 업종 하락장에서도 상위 K가 선정된다(시장
+> 국면 필터는 Phase 5 설계 항목). 동일가중 평균은 소형 업종에서 단일
+> 종목 급등에 민감(`min_sector_members=5` — Phase 4/5 파라미터 재검토
+> 항목).
+
 ### 4-4. 3전략 신호 + 적합도 (2단계)
 
 진출 업종의 유니버스 종목마다, 전략별로:
@@ -151,6 +156,11 @@ Phase 5(실거래 임계치) 소비 시 이 한계를 전제로 해석해야 한
    사건 1회일 수 있다.
 3. **거래비용 미반영** — raw 가격 수익률(왕복 수수료+거래세 약 0.2~0.3%p
    미차감). 평균수익률이 이 비용 이하인 전략은 실질 손실 전략일 수 있다.
+4. **상대 정규화와 게이트 상호작용** — 게이트(표본<3)된 전략 점수는 정규화
+   후에도 0으로 클램프된다(구현 규칙 — 클램프 없이 순수 min-max만 적용하면
+   표본 부족(원점수 0)이 검증된 음의 성과보다 유리해지는 역전이 발생하기
+   때문). 점수는 실행 내 상대값이며 절대 신뢰도가 아니다 — Phase 4 AI는
+   occurrences를 함께 참조할 것.
 
 **(c) 종목 전략 점수** = 오늘 신호가 켜진 전략들의 정규화 적합도 합.
 신호가 하나도 없는 종목은 후보 제외.
@@ -181,7 +191,7 @@ Phase 5(실거래 임계치) 소비 시 이 한계를 전제로 해석해야 한
 |---|---|
 | `score_runs` | id, started_at, finished_at, status(running/succeeded/failed), reference_date, universe_count, stale_excluded, failure_reason, config(JSON 스냅샷) |
 | `score_sectors` | run_id FK, sector_code, sector_return_20/60/5, score, rank, selected(bool) |
-| `scores` | run_id FK, symbol, rank, total_score, sector_code, sector_score, strategy_score |
+| `scores` | run_id FK, symbol, rank, total_score, sector_code, sector_score, strategy_score(정규화 전 원값, 참고용), strategy_score_norm(후보 간 정규화값 — total_score 공식에 실제 사용된 값. `total_score = final_weight_sector×sector_score + final_weight_strategy×strategy_score_norm`이 저장값만으로 재현된다) |
 | `score_details` | run_id FK, symbol, strategy(문자열), signal(bool), avg_return, win_rate, occurrences, score — 전략 추가 시 스키마 변경 없이 행만 증가 |
 
 upsert 불필요 (run 단위 insert-only). sqlite/PostgreSQL 양쪽 지원 (기존 store 패턴).

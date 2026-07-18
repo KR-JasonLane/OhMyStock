@@ -89,7 +89,7 @@ class ScoreRunRow(Base):
 class ScoreSectorRow(Base):
     __tablename__ = "score_sectors"
     run_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("score_runs.id"), primary_key=True)
+        Integer, ForeignKey("score_runs.id", ondelete="CASCADE"), primary_key=True)
     sector_code: Mapped[str] = mapped_column(String(8), primary_key=True)
     r20: Mapped[float] = mapped_column(Float)
     r60: Mapped[float] = mapped_column(Float)
@@ -100,21 +100,25 @@ class ScoreSectorRow(Base):
 
 
 class ScoreRow(Base):
+    """total_score = final_weight_sector×sector_score +
+    final_weight_strategy×strategy_score_norm 공식이 저장값만으로 재현된다.
+    strategy_score는 정규화 전 원값(참고용, 후보 간 비교 불가)."""
     __tablename__ = "scores"
     run_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("score_runs.id"), primary_key=True)
+        Integer, ForeignKey("score_runs.id", ondelete="CASCADE"), primary_key=True)
     symbol: Mapped[str] = mapped_column(String(12), primary_key=True)
     rank: Mapped[int] = mapped_column(Integer)
     total_score: Mapped[float] = mapped_column(Float)
     sector_code: Mapped[str] = mapped_column(String(8))
     sector_score: Mapped[float] = mapped_column(Float)
     strategy_score: Mapped[float] = mapped_column(Float)
+    strategy_score_norm: Mapped[float] = mapped_column(Float)
 
 
 class ScoreDetailRow(Base):
     __tablename__ = "score_details"
     run_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("score_runs.id"), primary_key=True)
+        Integer, ForeignKey("score_runs.id", ondelete="CASCADE"), primary_key=True)
     symbol: Mapped[str] = mapped_column(String(12), primary_key=True)
     strategy: Mapped[str] = mapped_column(String(32), primary_key=True)
     signal: Mapped[bool] = mapped_column(Boolean)

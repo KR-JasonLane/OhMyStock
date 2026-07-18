@@ -1,9 +1,11 @@
+import math
 from datetime import date, datetime, timezone
 
 import pytest
 from sqlalchemy import create_engine
 
 from app.domain.broker import Candle, Instrument, Sector
+from app.domain.scoring.config import ScoringConfig
 from app.domain.scoring.engine import (Candidate, ScoringResult, SectorScore,
                                        StrategyDetail)
 from app.store.collection_store import CollectionStore
@@ -24,11 +26,17 @@ def test_run_라이프사이클과_결과_왕복(engine):
     store = ScoringStore(engine)
     run_id = store.create_run(reference_date=date(2026, 7, 17),
                               config_json='{"k": 1}')
+    cfg = ScoringConfig()  # final_weight_sector=0.4, final_weight_strategy=0.6
+    sector_score = 1.0
+    strategy_score_norm = 5 / 6
+    total_score = (cfg.final_weight_sector * sector_score
+                   + cfg.final_weight_strategy * strategy_score_norm)  # 0.9
     result = ScoringResult(
         sectors=(SectorScore("005", "음식료", 0.1, 0.2, 0.05, 1.0, 1, True),),
         candidates=(Candidate(
-            symbol="AAA111", sector_code="005", rank=1, total_score=0.9,
-            sector_score=1.0, strategy_score=0.8,
+            symbol="AAA111", sector_code="005", rank=1, total_score=total_score,
+            sector_score=sector_score, strategy_score=0.8,
+            strategy_score_norm=strategy_score_norm,
             details=(StrategyDetail("momentum", True, 0.05, 0.6, 4, 0.8),)),),
         excluded_short_history=2)
     store.save_results(run_id, result)
@@ -38,6 +46,13 @@ def test_run_라이프사이클과_결과_왕복(engine):
     assert latest["candidates"][0]["symbol"] == "AAA111"
     assert latest["candidates"][0]["details"][0]["strategy"] == "momentum"
     assert latest["sectors"][0]["code"] == "005"
+
+    # strategy_score_norm이 왕복되고, total_score 공식이 저장값만으로 재현된다.
+    persisted = latest["candidates"][0]
+    assert persisted["strategy_score_norm"] == strategy_score_norm
+    reproduced = (cfg.final_weight_sector * persisted["sector_score"]
+                  + cfg.final_weight_strategy * persisted["strategy_score_norm"])
+    assert math.isclose(reproduced, persisted["total_score"])
 
 
 def test_latest는_succeeded만(engine):
