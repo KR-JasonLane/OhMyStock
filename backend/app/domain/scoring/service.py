@@ -8,27 +8,13 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date
 
+from app.core.background_service import BackgroundRunService
 from app.core.market_calendar import scoring_reference_date
 from app.domain.scoring.config import ScoringConfig
 from app.domain.scoring.engine import run_scoring
 from app.domain.scoring.strategies import Strategy, default_strategies
 
 logger = logging.getLogger(__name__)
-
-
-def _log_task_exception(task: asyncio.Task) -> None:
-    """scoring task의 done 콜백 — 취소가 아니면서 예외로 끝났다면 로깅한다.
-
-    fire-and-forget 태스크(asyncio.create_task)는 예외를 조회하지 않으면
-    조용히 삼켜지고 "Task exception was never retrieved" 경고만 남는다.
-    run()/_run() 내부에서 이미 실패 상태를 store에 기록하지만, 이 콜백은
-    태스크 자체의 예외를 놓치지 않기 위한 마지막 안전망이다.
-    """
-    if task.cancelled():
-        return
-    exc = task.exception()
-    if exc is not None:
-        logger.error("scoring task failed: %s", exc)
 
 
 @dataclass(frozen=True)
@@ -48,7 +34,7 @@ def _passes_universe(audit_info: str, state: str) -> bool:
             and "관리종목" not in state)
 
 
-class ScoringService:
+class ScoringService(BackgroundRunService):
     def __init__(self, store, config: ScoringConfig | None = None,
                  strategies: tuple[Strategy, ...] | None = None,
                  reference_provider: Callable[[], date] | None = None,
@@ -61,57 +47,30 @@ class ScoringService:
         콜러블. 상호 배제는 도메인 계약이다 — Phase 6 스케줄러가 HTTP를
         우회해 start()를 직접 호출해도 반쪽 데이터 읽기가 차단된다(API의
         409 응답은 사용자 메시지용 1차 관문일 뿐, 여기가 실제 방어선)."""
+        super().__init__(task_label="scoring", conflict_check=conflict_check,
+                          logger=logger)
         self._store = store
         self._config = config or ScoringConfig()
         self._strategies = strategies or default_strategies()
         self._reference_provider = reference_provider or scoring_reference_date
-        self._conflict_check = conflict_check
-        self._running = False
         self._progress: ScoringProgress | None = None
-        self._task: asyncio.Task | None = None
-
-    def is_running(self) -> bool:
-        return self._running
 
     def progress(self) -> ScoringProgress | None:
         return self._progress
-
-    def current_task(self) -> asyncio.Task | None:
-        return self._task
 
     def latest_results(self) -> dict | None:
         """최근 succeeded 실행 결과 위임 — API가 store를 직접 알지 않도록
         분리한다. Phase 4도 이 진입점을 통해 스코어링 결과를 소비한다."""
         return self._store.latest_results()
 
-    def start(self) -> asyncio.Task | None:
-        """원자적 시작 — check와 set 사이에 await 없음 (CollectionService와 동일)."""
-        if self._running:
-            return None
-        if self._conflict_check is not None and self._conflict_check():
-            return None
-        self._running = True
-        self._task = asyncio.create_task(self._run())
-        self._task.add_done_callback(_log_task_exception)
-        return self._task
-
-    async def run(self) -> None:
-        if self._running:
-            raise RuntimeError("scoring already running")
-        if self._conflict_check is not None and self._conflict_check():
-            raise RuntimeError("conflicting run in progress")
-        self._running = True
-        await self._run()
-
     async def _run(self) -> None:
+        """`_running` 복원은 베이스 `_execute()`의 finally가 구조적으로
+        보장한다 — create_run 실패를 포함해 이 메서드 어디서 예외가 나든
+        별도 처리가 필요 없다."""
         cfg = self._config
         reference = self._reference_provider()
-        try:
-            run_id = await asyncio.to_thread(
-                self._store.create_run, reference, cfg.to_json())
-        except Exception:
-            self._running = False
-            raise
+        run_id = await asyncio.to_thread(
+            self._store.create_run, reference, cfg.to_json())
         universe_count = stale_excluded = 0
         try:
             self._set(run_id, "running", "loading", 0, 0)
@@ -171,8 +130,6 @@ class ScoringService:
             await self._fail(run_id, universe_count, stale_excluded,
                              f"unexpected: {type(exc).__name__}")
             raise
-        finally:
-            self._running = False
 
     async def _fail(self, run_id: int, universe_count: int,
                     stale_excluded: int, reason: str) -> None:

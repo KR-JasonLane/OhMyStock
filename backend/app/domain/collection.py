@@ -7,27 +7,13 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date
 
+from app.core.background_service import BackgroundRunService
 from app.core.market_calendar import previous_weekday
 from app.domain.broker import BrokerPort
 from app.domain.errors import AuthError, BrokerError, RateLimitError
 from app.domain.sector_classification import UNCLASSIFIED, classify_sector
 
 logger = logging.getLogger(__name__)
-
-
-def _log_task_exception(task: asyncio.Task) -> None:
-    """collection_task의 done 콜백 — 취소가 아니면서 예외로 끝났다면 로깅한다.
-
-    fire-and-forget 태스크(asyncio.create_task)는 예외를 조회하지 않으면
-    조용히 삼켜지고 "Task exception was never retrieved" 경고만 남는다.
-    run()/_run() 내부에서 이미 실패 상태를 store에 기록하지만, 이 콜백은
-    태스크 자체의 예외를 놓치지 않기 위한 마지막 안전망이다.
-    """
-    if task.cancelled():
-        return
-    exc = task.exception()
-    if exc is not None:
-        logger.error("collection task failed: %s", exc)
 
 
 # 상장폐지 반영(deactivate_missing) 실행 전제 — 이 전체 시장 집합과 markets가
@@ -46,7 +32,7 @@ class CollectionProgress:
     warning: str | None = None
 
 
-class CollectionService:
+class CollectionService(BackgroundRunService):
     def __init__(self, broker: BrokerPort, store,
                  markets: tuple[str, ...] = ("kospi", "kosdaq", "etf"),
                  candle_count: int = 600,
@@ -76,54 +62,38 @@ class CollectionService:
         않는다 — 그렇지 않으면 조회되지 않은 시장의 종목 전체가 "이번 런에 없음"
         으로 오판되어 비활성화되는 사고로 이어진다.
         """
+        super().__init__(task_label="collection", conflict_check=conflict_check,
+                          logger=logger)
         self._broker = broker
         self._store = store
         self._markets = markets
         self._candle_count = candle_count
         self._max_consec = max_consecutive_failures
         self._reference_provider = reference_provider or previous_weekday
-        self._conflict_check = conflict_check
-        self._running = False
         self._progress: CollectionProgress | None = None
         self._warning: str | None = None
-        self._task: asyncio.Task | None = None
-
-    def is_running(self) -> bool:
-        return self._running
 
     def progress(self) -> CollectionProgress | None:
         return self._progress
 
-    def current_task(self) -> asyncio.Task | None:
-        return self._task
-
     def start(self, warning: str | None = None) -> asyncio.Task | None:
-        """원자적 시작: 이미 실행 중이면 None. 태스크 강참조는 서비스가 보유한다.
-
-        check(self._running)와 set(self._running = True) 사이에 await가 없어
-        원자적이다 — API 레이어의 별도 락 없이도 동시 POST 요청 중 하나만
-        시작을 얻는다(TOCTOU 없음). 태스크 자체를 여기서 보유하므로 호출자가
-        GC로 태스크를 잃어버릴 걱정도 없다.
+        """CollectionService 전용 `warning` 파라미터를 흡수한 뒤 베이스
+        start()에 위임한다. 베이스가 실제로 새 실행을 수락했을 때만(반환값이
+        태스크일 때만) `_warning`을 갱신한다 — 태스크는 아직 실행을 시작하지
+        않았으므로(다음 이벤트 루프 틱에야 시작) 이 시점에 설정해도 `_run()`이
+        읽는 값과 경쟁하지 않는다. 거부된 호출(이미 실행 중/충돌)은
+        `_warning`을 건드리지 않아, 실행 중인 다른 런의 warning을 덮어쓰지
+        않는 원래 동작을 유지한다.
         """
-        if self._running:
-            return None
-        if self._conflict_check is not None and self._conflict_check():
-            return None
-        self._running = True
-        self._warning = warning
-        self._task = asyncio.create_task(self._run())
-        self._task.add_done_callback(_log_task_exception)
-        return self._task
+        task = super().start()
+        if task is not None:
+            self._warning = warning
+        return task
 
     async def run(self) -> None:
         """단독 호출용 진입점 (테스트/스크립트). API는 start()를 쓴다."""
-        if self._running:
-            raise RuntimeError("collection already running")
-        if self._conflict_check is not None and self._conflict_check():
-            raise RuntimeError("conflicting run in progress")
-        self._running = True
         self._warning = None
-        await self._run()
+        await super().run()
 
     async def _run(self) -> None:
         """전체 수집 파이프라인을 실행한다 (instruments → sectors → candles).
@@ -133,12 +103,12 @@ class CollectionService:
         미확정 봉을 "이미 최신"으로 오판해 고착시킬 수 있다. 실행 시각 강제는
         이 서비스의 책임이 아니라 Phase 6 스케줄러가 진다 (거래일 캘린더가
         필요하기 때문).
+
+        `_running` 복원은 베이스 `_execute()`의 finally가 구조적으로
+        보장한다 — create_run 실패를 포함해 이 메서드 어디서 예외가 나든
+        별도 처리가 필요 없다.
         """
-        try:
-            run_id = await asyncio.to_thread(self._store.create_run)
-        except Exception:
-            self._running = False
-            raise
+        run_id = await asyncio.to_thread(self._store.create_run)
         succeeded = failed = total = 0
         notes: list[str] = []
         try:
@@ -262,8 +232,6 @@ class CollectionService:
                                     f"unexpected: {type(exc).__name__}")
             self._set(run_id, "failed", "finished", succeeded + failed, total, failed)
             raise
-        finally:
-            self._running = False
 
     def _set(self, run_id: int, status: str, stage: str,
              done: int, total: int, failed: int) -> None:
