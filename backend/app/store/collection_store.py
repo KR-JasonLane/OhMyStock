@@ -43,10 +43,9 @@ class CollectionStore:
                        group_types: dict[str, str] | None = None) -> None:
         """group_types: code → group_type (도메인 분류 맵이 결정 — store는 무지).
 
-        Optional인 이유: domain/collection.py가 Task 3 전환 전까지 1-인자로
-        호출한다 — 필수 인자면 중간 상태에서 수집 파이프라인 전체가
-        TypeError로 크래시(라이브 회귀)한다. None이면 모든 섹터가
-        "unclassified"로 저장된다."""
+        Optional인 이유: 패널 결정으로 영구 옵셔널 — None이면 전 업종
+        "unclassified"로 저장(방어적 폴백), 정상 경로(CollectionService)는
+        항상 분류 dict를 명시 전달한다."""
         group_types = group_types or {}
         rows = [{"code": s.code, "market": s.market, "name": s.name,
                  "group_type": group_types.get(s.code, "unclassified")}

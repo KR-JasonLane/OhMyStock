@@ -23,7 +23,8 @@ def _collection_logger_enabled():
 class FakeBroker:
     def __init__(self, symbols=("005930", "000660"), fail: set[str] | None = None,
                  sectors=None, market_symbols: dict[str, tuple[str, ...]] | None = None,
-                 members: dict[tuple[str, str], list[str]] | None = None):
+                 members: dict[tuple[str, str], list[str]] | None = None,
+                 member_fail: dict[str, Exception] | None = None):
         self.symbols = list(symbols)
         self.fail = fail or set()
         self.candle_calls: list[str] = []
@@ -37,6 +38,9 @@ class FakeBroker:
         # 싶을 때만 지정. 미지정 시 기존 동작(모든 업종이 self.symbols 전체를
         # 반환)을 유지.
         self._members = members
+        # member_fail: sector_code → list_sector_members에서 던질 예외.
+        # 특정 업종의 멤버십 조회 실패를 모사하고 싶을 때만 지정.
+        self._member_fail = member_fail or {}
 
     async def list_instruments(self, market):
         if self._market_symbols is not None:
@@ -52,6 +56,8 @@ class FakeBroker:
         return self._sectors
 
     async def list_sector_members(self, sector_code, market):
+        if sector_code in self._member_fail:
+            raise self._member_fail[sector_code]
         if self._members is not None:
             return list(self._members.get((sector_code, market), []))
         return list(self.symbols)
@@ -75,6 +81,7 @@ class MemoryStore:
         self.saved_group_types: dict[str, str] = {}
         self.candles: dict[str, list[Candle]] = {}
         self.runs: dict[int, dict] = {}
+        self.replace_sector_memberships_calls = 0
         self._next = 1
 
     def upsert_sectors(self, sectors, group_types=None):
@@ -83,6 +90,7 @@ class MemoryStore:
         for i in instruments:
             self.instruments[i.symbol] = i
     def replace_sector_memberships(self, memberships):
+        self.replace_sector_memberships_calls += 1
         self.saved_memberships = {code: list(members)
                                   for code, members in memberships.items()}
         return sum(len(members) for members in memberships.values())
@@ -348,6 +356,51 @@ async def test_start는_완료_후_재시작을_허용한다():
     assert second is not None
     await second
     assert svc.current_task() is second
+
+
+@pytest.mark.anyio
+async def test_업종_멤버십_조회_실패는_격리되고_교체를_건너뛴다():
+    """한 업종의 list_sector_members가 BrokerError를 던져도 런 전체가 중단되지
+    않는다 — 실패 업종만 격리되고, 부분 수집분으로 교체하면 실패 업종의 기존
+    소속이 삭제되므로 replace 자체를 건너뛰어 직전 완전 스냅샷을 보존한다.
+    candles 단계는 계속 실행되어야 한다."""
+    sectors = [Sector("013", "kospi", "전기전자"), Sector("005", "kospi", "음식료/담배")]
+    broker = FakeBroker(sectors=sectors,
+                        member_fail={"013": BrokerError("boom 013")})
+    store = MemoryStore()
+    svc = CollectionService(broker, store, markets=("kospi",))
+    await svc.run()
+    p = svc.progress()
+    assert p.status == "done"
+    assert broker.candle_calls  # candles 단계가 실행됐다
+    assert store.replace_sector_memberships_calls == 0  # 교체를 건너뛰었다
+    assert "NOT replaced" in store.runs[p.run_id]["error"]
+
+
+@pytest.mark.anyio
+async def test_업종_멤버십_조회_AuthError는_전체_중단():
+    """AuthError는 업종 격리 대상이 아니라 기존 candles 단계와 동일하게
+    시스템 장애로 취급해 런 전체를 중단해야 한다."""
+    broker = FakeBroker(member_fail={"013": AuthError("token dead")})
+    store = MemoryStore()
+    svc = CollectionService(broker, store, markets=("kospi",))
+    await svc.run()
+    assert svc.progress().status == "failed"
+
+
+@pytest.mark.anyio
+async def test_unclassified_경고가_런_결과로_전파된다():
+    """분류 맵에 없는 업종 코드는 경고 로그뿐 아니라 런의 error_summary와
+    진행상황 warning(GET /collect/status)에도 전파돼야 운영자가 알아챌 수 있다."""
+    broker = FakeBroker(sectors=[Sector("777", "kospi", "신설업종")],
+                        members={("777", "kospi"): ["A0001"]})
+    store = MemoryStore()
+    svc = CollectionService(broker, store, markets=("kospi",))
+    await svc.run()
+    p = svc.progress()
+    assert p.status == "done"
+    assert "unclassified sector codes" in store.runs[p.run_id]["error"]
+    assert "unclassified sector codes" in p.warning
 
 
 @pytest.mark.anyio

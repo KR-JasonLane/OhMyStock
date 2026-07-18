@@ -125,6 +125,7 @@ class CollectionService:
         """
         run_id = await asyncio.to_thread(self._store.create_run)
         succeeded = failed = total = 0
+        notes: list[str] = []
         try:
             self._set(run_id, "running", "instruments", 0, 0, 0)
             seen: set[str] = set()
@@ -148,6 +149,8 @@ class CollectionService:
             self._set(run_id, "running", "sectors", 0, 0, 0)
             sectors = await self._broker.list_sectors()
             group_types = {s.code: classify_sector(s.code) for s in sectors}
+            unclassified_codes = {s.code for s in sectors
+                                  if group_types[s.code] == UNCLASSIFIED}
             for s in sectors:
                 if group_types[s.code] == UNCLASSIFIED:
                     # 분류 맵(2026-07-18 실측 65개)에 없는 신설 코드 — 소비
@@ -155,16 +158,42 @@ class CollectionService:
                     logger.warning("unclassified sector code %s (%s) - "
                                    "update sector_classification map",
                                    s.code, s.name)
+            if unclassified_codes:
+                notes.append(
+                    f"unclassified sector codes: {sorted(unclassified_codes)[:10]} "
+                    f"(count={len(unclassified_codes)}) - update sector_classification map")
             await asyncio.to_thread(self._store.upsert_sectors, sectors,
                                     group_types)
             memberships: dict[str, list[str]] = {}
+            failed_sector_codes: list[str] = []
             for sector in sectors:
-                memberships[sector.code] = await self._broker.list_sector_members(
-                    sector.code, sector.market)
-            n = await asyncio.to_thread(
-                self._store.replace_sector_memberships, memberships)
-            logger.info("stored %d sector membership rows across %d groups",
-                        n, len(sectors))
+                try:
+                    memberships[sector.code] = await self._broker.list_sector_members(
+                        sector.code, sector.market)
+                except (AuthError, RateLimitError):
+                    raise  # 서버/인증 장애 — 업종 격리 대상이 아님, 전체 중단
+                except BrokerError as exc:
+                    failed_sector_codes.append(sector.code)
+                    logger.warning("sector membership fetch failed for %s (%s): %s",
+                                   sector.code, sector.name, exc)
+            if failed_sector_codes:
+                # 전체 교체(delete-and-insert) 의미론에서 부분 수집분으로 교체하면
+                # 실패 업종의 기존 소속이 삭제되어 그 업종이 로테이션에서 소실된다
+                # — 낡았지만 완전한 직전 스냅샷 보존이 매매 관점에서 안전. 멤버십은
+                # 느리게 변하는 데이터라 하루 지연은 수용 가능.
+                logger.warning(
+                    "skipping sector membership replace: %d/%d sectors failed "
+                    "(sample: %s) - keeping previous snapshot",
+                    len(failed_sector_codes), len(sectors), failed_sector_codes[:5])
+                notes.append(
+                    f"sector memberships NOT replaced - {len(failed_sector_codes)} "
+                    f"fetch failures (sample: {failed_sector_codes[:5]}), previous "
+                    "snapshot kept")
+            else:
+                n = await asyncio.to_thread(
+                    self._store.replace_sector_memberships, memberships)
+                logger.info("stored %d sector membership rows across %d groups",
+                            n, len(sectors))
 
             symbols = await asyncio.to_thread(self._store.list_symbols)
             total = len(symbols)
@@ -196,8 +225,11 @@ class CollectionService:
                         succeeded += 1
                 self._set(run_id, "running", "candles", i, total, failed)
 
+            if notes:
+                self._warning = "; ".join(filter(None, [self._warning, *notes]))
             await asyncio.to_thread(self._store.finish_run, run_id, "done",
-                                    total, succeeded, failed, None)
+                                    total, succeeded, failed,
+                                    "; ".join(notes) if notes else None)
             self._set(run_id, "done", "finished", total, total, failed)
         except BrokerError as exc:
             await asyncio.to_thread(self._store.finish_run, run_id, "failed",
