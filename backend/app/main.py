@@ -58,14 +58,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             app.state.llm = OllamaClient(
                 analysis_cfg.ollama_base_url, analysis_cfg.model,
                 analysis_cfg.temperature, analysis_cfg.llm_timeout_s)
-            if settings.naver_client_id is not None \
-                    and settings.naver_client_secret is not None:
+            if (settings.naver_client_id is not None
+                    and settings.naver_client_secret is not None):
                 app.state.news = NaverNewsClient(
                     settings.naver_client_id, settings.naver_client_secret)
             else:
                 app.state.news = None
+            # SSOT — OllamaClient를 만든 것과 동일한 analysis_cfg 인스턴스를
+            # config=로 넘긴다. 넘기지 않으면 AnalysisService가 내부에서
+            # AnalysisConfig()를 새로 만들어 두 설정이 서로 다른 인스턴스가
+            # 되고, 실제 LLM 호출 설정과 DB에 남는 config 스냅샷/감사 기록이
+            # 드리프트될 수 있다.
             app.state.analysis = AnalysisService(
-                AnalysisStore(app.state.engine), app.state.llm, app.state.news)
+                AnalysisStore(app.state.engine), app.state.llm, app.state.news,
+                config=analysis_cfg)
             try:
                 yield
             finally:

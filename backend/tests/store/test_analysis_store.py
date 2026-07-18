@@ -203,6 +203,12 @@ def test_run_라이프사이클과_결과_왕복(engine):
     assert latest["regime"] == "neutral"
     assert latest["market_summary"] == "관망 우세"
     assert latest["warnings"] == "w1; w2"
+    # SECURITY 게이트 (T6): create_run에 넘긴 config_json('{"k": 1}')이
+    # latest_results() 응답에 그대로 노출되면 안 된다 — 여기서 실제로
+    # config_json이 저장된 run에 대해 확인해야 회귀를 잡을 수 있다
+    # (test_api_analyze.py의 fake 기반 테스트는 전송 경로만 검증하며, 이
+    # 테스트가 진짜 게이트다).
+    assert "config" not in latest
 
     # picks는 pick_rank 순, 승인된 2건 중 실제 선정된 1건만
     assert [p["symbol"] for p in latest["picks"]] == ["AAA111"]

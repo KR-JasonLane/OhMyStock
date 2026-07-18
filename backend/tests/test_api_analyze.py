@@ -92,10 +92,14 @@ def test_latest_반환():
 
 
 def test_latest_응답에_config가_노출되지_않는다():
-    # SECURITY (T6 게이트): analysis_runs.config(전체 설정 JSON)는 API
-    # 응답에 절대 노출되지 않아야 한다. AnalysisStore.latest_results가 이미
-    # config를 빼고 반환하므로 여기서는 fake latest에도 config 키가 없는
-    # 정상 사전을 그대로 통과시켜 회귀를 잡는다.
+    # 전송 경로만 검증한다: /analyze/latest가 service.latest_results()의
+    # 반환값을 그대로 통과시키는지 (config 키가 없는 정상 사전을 fake로
+    # 넘겨 응답에도 없는지 확인). 실제 config 비노출 보장의 게이트는
+    # AnalysisStore 레벨이다 — 이 fake는 config_json을 실제로 저장/조회하지
+    # 않으므로 그 경로의 회귀를 잡을 수 없다. 진짜 게이트는
+    # tests/store/test_analysis_store.py::test_run_라이프사이클과_결과_왕복
+    # 의 `assert "config" not in latest` (config_json='{"k": 1}'로 실제
+    # 저장 후 조회).
     latest = {"run_id": 7, "verdicts": [], "picks": []}
     resp = make_client(analysis=FakeAnalysis(latest=latest)).get(
         "/analyze/latest")
