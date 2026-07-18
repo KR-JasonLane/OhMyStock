@@ -1,8 +1,12 @@
 """AI 분석 오케스트레이션 — ScoringService/CollectionService와 동일한 실행
 패턴(원자적 start(), 태스크 강참조, 예외 경계). conflict_check는 주입하지
-않는다: 입력을 succeeded score run_id로 고정해 읽고(insert-only 저장) candles/
-instruments를 직접 건드리지 않으므로, 수집/스코어링 파이프라인과 동시
-실행돼도 데이터 일관성이 깨지지 않는다(스펙 §3)."""
+않는다: 입력을 succeeded score run_id로 고정해 읽고(insert-only 저장),
+candles는 전혀 읽지 않으며 instruments는 name 칼럼만 읽는다(단순 SELECT
+JOIN — 원자적 upsert 대상이라 사실상 불변이고 이 경로에는 쓰기가 없다,
+`AnalysisStore.load_candidates`). 따라서 수집/스코어링 파이프라인과 동시
+실행돼도 데이터 일관성이 깨지지 않는다(스펙 §3). (이 근거는 이 모듈
+docstring에만 서술한다 — `__init__`/`_run` 쪽 docstring은 각자의 관심사만
+다루므로 중복 없음.)"""
 
 import asyncio
 import json
@@ -24,7 +28,13 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class AnalysisProgress:
-    run_id: int
+    """run_id는 오직 한 경우에만 None이다: 스코어링 런 자체가 없어
+    (`latest_succeeded_score_run()` → None) `analysis_runs.score_run_id`
+    (NOT NULL FK)를 채울 수 없어 run을 아예 만들지 않은 경우. 그 외 모든
+    running/succeeded/failed 상태는 create_run 이후이므로 항상 실제 정수
+    run_id를 갖는다 — **T6 API는 run_id가 None이면 "생성된 런 없음"으로
+    표현해야 한다(계약)**."""
+    run_id: int | None
     status: str  # running | succeeded | failed
     stage: str   # gate | news | economist | traders | synthesize | finished
     done: int
@@ -64,38 +74,55 @@ class AnalysisService(BackgroundRunService):
         """`_running` 복원은 베이스 `_execute()`의 finally가 구조적으로
         보장한다.
 
-        1단계 게이트(스코어링 런 부재/신선도)는 `create_run` **이전**에
-        판정한다 — 아직 score_run_id 자체가 없거나 신뢰할 수 없는
-        상태이므로, 감사 이력에 남길 분석 run을 만들지 않는다(만들 근거가
-        되는 score_run_id가 확정되기 전이라 store.finish_run을 호출할
-        대상 run이 없다). 이후 단계(빈 후보/빈 섹터 표 등)는 이미 만든
-        run을 실패로 마감해야 하므로 `_fail(run_id, ...)`을 쓴다."""
+        게이트 두 개는 의도적으로 비대칭이다:
+        (a) 스코어링 런 자체가 없음 — `score_run_id`가 없어
+            `analysis_runs.score_run_id`(NOT NULL FK, 마이그레이션 0005)를
+            채울 수 없으므로 run을 만들지 않는다. `store.finish_run`을
+            호출할 대상 run이 없으므로 progress만 남기고(`run_id=None`)
+            경고 로그를 남긴다.
+        (b) 스코어링 런은 있으나 낡음(reference_date가 `score_max_age_days`
+            초과) — `score_run_id`가 이미 확보돼 있으므로 **create_run을
+            먼저 호출**해 감사 이력에 남긴 뒤 `_fail`로 실패 마감한다.
+            ScoringService가 실패도 run으로 기록하는 것과 대칭이며,
+            "언제부터 게이트가 걸렸는지"를 DB에서 추적할 수 있다.
+        이후 단계(빈 후보/빈 섹터 표 등)는 이미 run이 만들어진 뒤이므로
+        전부 `_fail(run_id, stage, ...)`을 쓴다 — `_fail`은 실패 시점의
+        stage를 progress에 그대로 보존한다(더 이상 "finished"로 뭉개지
+        않음, T5 패널 개발자/트레이더 리뷰)."""
         cfg = self._config
-        self._set(0, "running", "gate", 0, 0)
+        self._set(None, "running", "gate", 0, 0)
 
         gate = await asyncio.to_thread(self._store.latest_succeeded_score_run)
         if gate is None:
-            self._set(0, "failed", "gate", 0, 0,
+            logger.warning("analysis rejected: no succeeded scoring run")
+            self._set(None, "failed", "gate", 0, 0,
                       "no succeeded scoring run - run scoring first")
             return
         score_run_id, reference_date = gate
-        age_days = (self._today() - reference_date).days
-        if age_days > cfg.score_max_age_days:
-            self._set(
-                0, "failed", "gate", 0, 0,
-                f"scoring results stale (reference={reference_date.isoformat()}) "
-                "- run scoring first")
-            return
 
         run_id = await asyncio.to_thread(
             self._store.create_run, score_run_id, cfg.model, prompt_hash(),
             cfg.to_json())
+        # create_run 직후 progress를 즉시 동기화 — 이 시점부터 DB에 run이
+        # 실재하므로 run_id=None("런 미생성") 계약을 위반하는 시간창을 없앤다
+        # (T5 아키텍트 재검증 지적).
+        self._set(run_id, "running", "gate", 0, 0)
+
+        age_days = (self._today() - reference_date).days
+        if age_days > cfg.score_max_age_days:
+            await self._fail(
+                run_id, "gate", 0,
+                f"scoring results stale (reference={reference_date.isoformat()}) "
+                "- run scoring first")
+            return
+
         total = 0
         try:
             candidates = await asyncio.to_thread(
                 self._store.load_candidates, score_run_id)
             if not candidates:
-                await self._fail(run_id, total, "no candidates in scoring run")
+                await self._fail(run_id, "gate", total,
+                                 "no candidates in scoring run")
                 return
             total = len(candidates)
 
@@ -106,7 +133,7 @@ class AnalysisService(BackgroundRunService):
                 # "전 업종 하락"인지 구분 불가하므로 LLM을 호출하지 않고
                 # 보수적으로 실패한다.
                 await self._fail(
-                    run_id, total,
+                    run_id, "gate", total,
                     "no sector aggregates in scoring run - cannot judge "
                     "market regime")
                 return
@@ -122,7 +149,17 @@ class AnalysisService(BackgroundRunService):
             # 배치 스케줄러가 다른 프로세스에서 환경변수를 바꿔도 다음
             # 런부터 즉시 반영). 인스턴스 자체는 무상태 래퍼라 비용도
             # 무시할 수준이다(그래프 컴파일만 반복).
-            pipeline = AnalysisPipeline(self._llm, cfg)
+            try:
+                pipeline = AnalysisPipeline(self._llm, cfg)
+            except RuntimeError as exc:
+                # graph.py의 LangSmith 텔레메트리 가드가 던지는
+                # RuntimeError만 좁게 잡는다 — 아래 `except Exception`으로
+                # 흘려보내면 사유가 "unexpected: RuntimeError"로 뭉개져
+                # 어떤 env var가 문제인지 알 수 없게 된다(아키텍처 패널).
+                # 여기서 잡으면 exc 메시지(env var 이름 포함)가 그대로
+                # failure_reason에 남는다.
+                await self._fail(run_id, "economist", total, str(exc))
+                return
             result = await pipeline.run(snapshot, candidates,
                                         market_headlines, symbol_headlines)
             self._set(run_id, "running", "traders", total, total)
@@ -155,16 +192,21 @@ class AnalysisService(BackgroundRunService):
             # 실패로 취급한다(스펙 §8) — 이미 완료된 trader 판정 일부가
             # 있어도 부분 저장하지 않는다(mid-traders 유실, T3 이월). 그
             # 사실을 실패 사유에 명시해 운영자가 "부분 결과가 저장됐나?"
-            # 헷갈리지 않게 한다.
+            # 헷갈리지 않게 한다. stage는 예외 발생 시점에 progress에
+            # 남아있던 값을 그대로 넘긴다 — LlmError는 파이프라인 실행
+            # 구간(economist/traders 노드 모두)에서만 발생 가능하고, 그
+            # 구간 전체가 stage="economist"로 표시되므로(스펙 §7 addendum)
+            # 항상 "economist"로 기록된다.
             await self._fail(
-                run_id, total,
+                run_id, self._progress.stage, total,
                 f"{exc} - 부분 결과는 저장되지 않음 - 재실행 필요")
         except asyncio.CancelledError:
-            await self._fail(run_id, total, "cancelled")
+            await self._fail(run_id, self._progress.stage, total, "cancelled")
             raise
         except Exception as exc:
             logger.exception("analysis run %s failed unexpectedly", run_id)
-            await self._fail(run_id, total, f"unexpected: {type(exc).__name__}")
+            await self._fail(run_id, self._progress.stage, total,
+                             f"unexpected: {type(exc).__name__}")
             raise
 
     async def _collect_news(
@@ -201,13 +243,18 @@ class AnalysisService(BackgroundRunService):
 
         return market_headlines, symbol_headlines, warnings
 
-    async def _fail(self, run_id: int, total: int, reason: str) -> None:
+    async def _fail(self, run_id: int, stage: str, total: int,
+                    reason: str) -> None:
+        """호출자가 넘긴 `stage`(실패 시점의 진행 단계)를 그대로 progress에
+        남긴다 — 이전에는 항상 stage="finished"로 덮어써서 "어느 단계에서
+        실패했는지"가 최종 progress에서 사라졌다(T5 패널 개발자/트레이더
+        리뷰). status는 "failed"로 고정."""
         logger.warning("analysis run %d rejected: %s", run_id, reason)
         await asyncio.to_thread(
             self._store.finish_run, run_id, "failed", None, None, None, reason)
-        self._set(run_id, "failed", "finished", 0, total, reason)
+        self._set(run_id, "failed", stage, 0, total, reason)
 
-    def _set(self, run_id: int, status: str, stage: str, done: int,
+    def _set(self, run_id: int | None, status: str, stage: str, done: int,
              total: int, failure_reason: str | None = None) -> None:
         self._progress = AnalysisProgress(run_id, status, stage, done, total,
                                           failure_reason)

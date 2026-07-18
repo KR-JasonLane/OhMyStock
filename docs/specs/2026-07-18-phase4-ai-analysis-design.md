@@ -44,8 +44,10 @@ api/analyze.py
 - `domain/analysis/`는 어댑터를 임포트하지 않는다 — LLM/뉴스는 포트 뒤
   (BrokerPort와 동일 원칙). LangGraph는 도메인 내 그래프 정의에만 사용.
 - AnalysisService는 수집/스코어링과 **상호 배제 불필요**: 입력을 succeeded
-  스코어링 run_id로 고정해 읽고(insert-only), candles/instruments를 읽지
-  않는다 — 이 근거를 코드에 문서화. conflict_check 미주입.
+  스코어링 run_id로 고정해 읽고(insert-only), candles는 전혀 읽지 않으며
+  instruments는 name 칼럼만 읽는다(단순 SELECT JOIN — 원자적 upsert 대상이라
+  사실상 불변이고 이 경로에 쓰기가 없다) — 따라서 수집/스코어링과 동시
+  실행에도 일관. 이 근거를 코드에 문서화. conflict_check 미주입.
 - 신규 런타임 의존성: `langgraph` 1개 (버전 고정). 신규 시크릿:
   `NAVER_CLIENT_ID`/`NAVER_CLIENT_SECRET` (SecretStr, 키움 키와 동일 취급).
 
@@ -130,14 +132,25 @@ warnings)`. 노드 3개 선형 연결. LLM 호출은 economist/trader만.
 | 엔드포인트 | 동작 |
 |---|---|
 | `POST /analyze` | 202 + run_id. 분석 실행 중이면 409 (수집/스코어링과는 배제 불필요 — §3 근거) |
-| `GET /analyze/status` | 단계(news/economist/traders/synthesize/finished), done/total(후보 수), 실패 사유 |
+| `GET /analyze/status` | 단계(gate/news/economist/traders/synthesize/finished), done/total(후보 수), 실패 사유 |
 | `GET /analyze/latest` | 최근 succeeded 런: 최종 매수 리스트(≤5) + 전 종목 판정 + regime·요약 — Phase 5/7 소비 |
+
+비고: `economist` 단계는 economist 노드뿐 아니라 파이프라인 실행 구간
+전체(trader 노드 포함)를 커버한다 — 노드별 진행 콜백이 없는 단순화이며,
+T6 소비 측(UI/모니터링)은 stage를 정밀한 진행률이 아니라 대략적 지표로만
+다뤄야 한다.
 
 ## 8. 에러 처리
 
 - **연쇄 신선도 게이트:** succeeded 스코어링 런 없음 → 실패("run scoring
   first"). 있어도 reference_date가 `score_max_age_days`(기본 3일) 초과로
-  낡음 → 실패 — 낡은 점수 위의 분석 차단.
+  낡음 → 실패 — 낡은 점수 위의 분석 차단. **한계(트레이더 이월):**
+  `score_max_age_days`는 캘린더 일수(거래일 캘린더 아님)라 KRX 연휴(설/
+  추석 등 3일 이상 연속 휴장)에는 오탐 가능 — 정상 스코어링 결과인데도
+  낡음으로 오판할 수 있다. 이 경우 실패 사유의 "run scoring first" 문구가
+  부정확할 수 있음(스코어링을 다시 돌려도 reference_date가 동일하게
+  나올 수 있음)을 운영자가 인지해야 한다. Phase 6에서 거래일 캘린더
+  기반 판정으로 교체 예정.
 - **Ollama 접속 불가/타임아웃:** 런 실패 + 설치·기동 안내 포함 사유.
   LLM 없는 폴백 없음(AI 단계의 존재 이유 상실).
 - **네이버 실패:** 뉴스 없이 진행 + 경고 (§4).
