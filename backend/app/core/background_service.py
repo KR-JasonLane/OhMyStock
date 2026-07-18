@@ -34,10 +34,7 @@ class BackgroundRunService:
         네임스페이스(및 그에 걸린 테스트의 caplog/로거-활성화 픽스처)를
         그대로 유지한다.
 
-        conflict_check: 상호 배제 대상 서비스가 실행 중인지 묻는 콜러블.
-        상호 배제는 도메인 계약이다 — 스케줄러가 HTTP를 우회해 start()를
-        직접 호출해도 반쪽 데이터 읽기가 차단된다(API의 409 응답은 사용자
-        메시지용 1차 관문일 뿐, 여기가 실제 방어선).
+        conflict_check: 동시 실행 금지 콜러블 — 진행 중이면 시작 거부.
         """
         self._task_label = task_label
         self._conflict_check = conflict_check
@@ -59,23 +56,34 @@ class BackgroundRunService:
         원자적이다 — 별도 락 없이도 동시 호출 중 하나만 시작을 얻는다
         (TOCTOU 없음). 태스크 자체를 여기서 보유하므로 호출자가 GC로 태스크를
         잃어버릴 걱정도 없다.
+
+        계약: 이 메서드를 오버라이드하는 서브클래스는 super()의 가드(중복/충돌
+        검사) 통과가 확인되기 전에 관찰 가능한 상태를 변형해서는 안 된다 —
+        대신 `_on_accepted()` 훅을 구현할 것.
         """
         if self._running:
             return None
         if self._conflict_check is not None and self._conflict_check():
             return None
         self._running = True
+        self._on_accepted()
         self._task = asyncio.create_task(self._execute())
         self._task.add_done_callback(self._log_task_exception)
         return self._task
 
     async def run(self) -> None:
-        """단독 호출용 진입점 (테스트/스크립트). API는 start()를 쓴다."""
+        """단독 호출용 진입점 (테스트/스크립트). API는 start()를 쓴다.
+
+        계약: 이 메서드를 오버라이드하는 서브클래스는 super()의 가드(중복/충돌
+        검사) 통과가 확인되기 전에 관찰 가능한 상태를 변형해서는 안 된다 —
+        대신 `_on_accepted()` 훅을 구현할 것.
+        """
         if self._running:
             raise RuntimeError(f"{self._task_label} already running")
         if self._conflict_check is not None and self._conflict_check():
             raise RuntimeError("conflicting run in progress")
         self._running = True
+        self._on_accepted()
         await self._execute()
 
     async def _execute(self) -> None:
@@ -92,6 +100,17 @@ class BackgroundRunService:
 
     async def _run(self) -> None:
         raise NotImplementedError
+
+    def _on_accepted(self) -> None:
+        """가드(_running/conflict_check) 통과 직후, 실행 시작 전에 호출되는 훅.
+
+        서브클래스가 실행별 상태(예: warning)를 세팅하는 유일한 안전 지점이다.
+        계약: start()/run() 오버라이드는 super() 가드 통과가 확인되기 전에
+        관찰 가능한 상태를 변형해서는 안 된다 — 대신 이 훅을 구현할 것.
+        추가 계약: 이 훅은 예외를 던지지 않아야 한다 — 호출 시점이 _running=True
+        직후·_execute() 진입 전이라, 예외 시 _running이 고착된다(단순 필드
+        대입만 수행할 것. 검증 로직이 필요해지면 베이스에 try/except 방어를
+        먼저 추가할 것 — P4-pre 아키텍트 패널 잔여 Minor)."""
 
     def _log_task_exception(self, task: asyncio.Task) -> None:
         """start()로 생성한 태스크의 done 콜백 — 취소가 아니면서 예외로

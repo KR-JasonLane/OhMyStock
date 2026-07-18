@@ -441,6 +441,73 @@ async def test_create_run이_실패해도_running_상태가_풀린다():
 
 
 @pytest.mark.anyio
+async def test_실행_중_run_오용은_경고를_지우지_않는다():
+    """T7 패널 발견 결함의 회귀 테스트. 과거 `run()` 오버라이드는 가드
+    (super().run()의 _running 검사) 통과 여부와 무관하게 `self._warning = None`을
+    먼저 실행했다 — 이미 실행 중인 인스턴스에 `run()`을 오용하면(정상 API는
+    start()) RuntimeError로 끝나기 전에 살아있는 런의 warning이 지워졌다.
+    지금은 `_on_accepted()` 훅이 가드 통과가 확정된 뒤에만 `_warning`을
+    갱신하므로, 거부되는 호출은 `_warning`을 건드리지 않는다."""
+    release = asyncio.Event()
+
+    class BlockingBroker(FakeBroker):
+        async def list_instruments(self, market):
+            await release.wait()
+            return await super().list_instruments(market)
+
+    broker, store = BlockingBroker(), MemoryStore()
+    svc = CollectionService(broker, store, markets=("kospi",))
+    task = svc.start(warning="W")
+    # instruments 단계 진입 시점(self._set 호출 직후)까지 이벤트 루프에 양보한다
+    # — 그 지점에서 progress().warning이 "W"로 세팅돼 있어야 블로킹 지점에서
+    # run() 오용을 시도할 수 있다.
+    for _ in range(10):
+        await asyncio.sleep(0)
+        if svc.progress() is not None:
+            break
+    assert svc.progress() is not None
+    assert svc.progress().warning == "W"
+
+    with pytest.raises(RuntimeError):
+        await svc.run()
+    assert svc.progress().warning == "W"  # run() 오용이 살아있는 런의 경고를 지우지 않음
+
+    release.set()
+    await task
+    assert svc.progress().warning == "W"
+
+
+@pytest.mark.anyio
+async def test_start_거부시_pending_warning이_잔류하지_않는다():
+    """이미 실행 중인 인스턴스에 start(warning="X")를 재호출하면 거부(None)
+    되고, 그 "X"가 `_pending_warning`에 잔류해 이후 정상 start()의 새 런
+    warning으로 새어들지 않아야 한다."""
+    release = asyncio.Event()
+
+    class BlockingBroker(FakeBroker):
+        async def list_instruments(self, market):
+            await release.wait()
+            return await super().list_instruments(market)
+
+    broker, store = BlockingBroker(), MemoryStore()
+    svc = CollectionService(broker, store, markets=("kospi",))
+    task = svc.start(warning="W")
+    await asyncio.sleep(0)
+
+    rejected = svc.start(warning="X")  # 이미 실행 중 — 거부
+    assert rejected is None
+
+    release.set()
+    await task
+    assert svc.progress().warning == "W"  # 거부된 "X"가 진행 중이던 런에 새지 않음
+
+    second = svc.start()  # 새 런, warning 없음
+    assert second is not None
+    await second
+    assert svc.progress().warning is None  # 거부됐던 "X"가 다음 런으로 새지 않음
+
+
+@pytest.mark.anyio
 async def test_start된_태스크의_미처리_예외는_done_callback이_로깅한다(caplog):
     class ExplodingStore(MemoryStore):
         def upsert_sectors(self, sectors, group_types=None):

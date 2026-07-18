@@ -72,28 +72,36 @@ class CollectionService(BackgroundRunService):
         self._reference_provider = reference_provider or previous_weekday
         self._progress: CollectionProgress | None = None
         self._warning: str | None = None
+        self._pending_warning: str | None = None
 
     def progress(self) -> CollectionProgress | None:
         return self._progress
 
     def start(self, warning: str | None = None) -> asyncio.Task | None:
-        """CollectionService 전용 `warning` 파라미터를 흡수한 뒤 베이스
-        start()에 위임한다. 베이스가 실제로 새 실행을 수락했을 때만(반환값이
-        태스크일 때만) `_warning`을 갱신한다 — 태스크는 아직 실행을 시작하지
-        않았으므로(다음 이벤트 루프 틱에야 시작) 이 시점에 설정해도 `_run()`이
-        읽는 값과 경쟁하지 않는다. 거부된 호출(이미 실행 중/충돌)은
-        `_warning`을 건드리지 않아, 실행 중인 다른 런의 warning을 덮어쓰지
-        않는 원래 동작을 유지한다.
+        """CollectionService 전용 `warning` 파라미터를 흡수한다.
+
+        `_pending_warning`에 잠정 저장해두고 베이스 start()에 위임한다 —
+        베이스의 가드(중복/충돌 검사) 통과 여부가 확인되기 전에는 `_warning`
+        (관찰 가능한 상태)을 건드리지 않는다. 가드를 통과하면 `_on_accepted()`
+        훅이 `_pending_warning`을 `_warning`으로 확정한다. 거부된 호출(반환값이
+        None)은 `_pending_warning`을 리셋해, 다음 정상 start()로 새는 것을
+        막는다.
         """
+        self._pending_warning = warning
         task = super().start()
-        if task is not None:
-            self._warning = warning
+        if task is None:
+            self._pending_warning = None
         return task
 
-    async def run(self) -> None:
-        """단독 호출용 진입점 (테스트/스크립트). API는 start()를 쓴다."""
-        self._warning = None
-        await super().run()
+    def _on_accepted(self) -> None:
+        """베이스 가드 통과 직후(실행 시작 전) `_pending_warning`을 이번 런의
+        `_warning`으로 확정한다. `run()`(단독 호출 경로)은 `start()`를 거치지
+        않아 `_pending_warning`이 항상 None이므로, 이 훅만으로 `_warning`이
+        자동으로 None이 된다 — 원래 `run()` 오버라이드가 하던
+        `self._warning = None`과 동일한 결과를, 가드 통과 이후 시점에 안전하게
+        재현한다."""
+        self._warning = self._pending_warning
+        self._pending_warning = None
 
     async def _run(self) -> None:
         """전체 수집 파이프라인을 실행한다 (instruments → sectors → candles).

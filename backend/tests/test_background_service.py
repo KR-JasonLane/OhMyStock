@@ -14,11 +14,15 @@ class DummyService(BackgroundRunService):
         super().__init__(task_label="dummy", conflict_check=conflict_check)
         self.ran = 0
         self._boom = boom
+        self.accepted_calls = 0
 
     async def _run(self) -> None:
         self.ran += 1
         if self._boom:
             raise RuntimeError("boom")
+
+    def _on_accepted(self) -> None:
+        self.accepted_calls += 1
 
 
 @pytest.mark.anyio
@@ -67,3 +71,30 @@ async def test_run은_중복_또는_충돌시_RuntimeError():
     conflicted = DummyService(conflict_check=lambda: True)
     with pytest.raises(RuntimeError, match="conflicting run in progress"):
         await conflicted.run()
+
+
+@pytest.mark.anyio
+async def test_on_accepted_훅은_가드_통과_직후에만_호출된다():
+    """_on_accepted()는 start()/run()이 가드(중복/충돌 검사)를 통과했을 때만
+    호출된다 — 거부된 호출(이미 실행 중, conflict_check=True)에서는 호출되지
+    않아야 한다. 서브클래스가 실행별 상태를 세팅하는 유일한 안전 지점이라는
+    계약을 검증한다."""
+    svc = DummyService()
+    assert svc.accepted_calls == 0
+
+    task = svc.start()
+    assert svc.accepted_calls == 1  # 가드 통과 → 호출됨
+
+    second = svc.start()  # 이미 실행 중 — 거부
+    assert second is None
+    assert svc.accepted_calls == 1  # 거부된 호출은 훅을 호출하지 않음
+    await task
+
+    conflicted = DummyService(conflict_check=lambda: True)
+    with pytest.raises(RuntimeError):
+        await conflicted.run()
+    assert conflicted.accepted_calls == 0  # conflict_check 거부도 호출 안 됨
+
+    plain = DummyService()
+    await plain.run()
+    assert plain.accepted_calls == 1  # run()의 가드 통과 경로도 호출됨
