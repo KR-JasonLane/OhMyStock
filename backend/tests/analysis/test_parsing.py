@@ -1,5 +1,7 @@
 """LLM 응답 파싱·검증 손계산 검증."""
 
+import json
+
 import pytest
 
 from app.domain.analysis.parsing import (MarketContext, ParseError,
@@ -49,10 +51,55 @@ def test_trader_verdict_정상():
     '{"verdict": "approve", "confidence": -0.1}',
     '{"verdict": "approve", "confidence": true}',    # bool 함정
     '{"verdict": "approve"}',                        # confidence 부재
+    '{"verdict": "approve", "confidence": NaN}',      # NaN
+    '{"verdict": "approve", "confidence": Infinity}',  # +Infinity
+    '{"verdict": "approve", "confidence": -Infinity}',  # -Infinity
 ])
 def test_trader_verdict_불량은_ParseError(raw):
     with pytest.raises(ParseError):
         parse_trader_verdict(raw)
+
+
+def test_reasons_비문자열_요소는_ParseError():
+    raw = '{"verdict": "approve", "confidence": 0.5, "reasons": ["a", 1]}'
+    with pytest.raises(ParseError):
+        parse_trader_verdict(raw)
+
+
+def test_cautions_비문자열_요소는_ParseError():
+    raw = '{"regime": "neutral", "max_picks_advice": 3, "cautions": ["금리", 1]}'
+    with pytest.raises(ParseError):
+        parse_market_context(raw, max_picks=5)
+
+
+def test_reason_긴_문자열은_200자로_절단():
+    long_reason = "가" * 201
+    raw = json.dumps({"verdict": "approve", "confidence": 0.5,
+                      "reasons": [long_reason]})
+    v = parse_trader_verdict(raw)
+    assert v.reasons == (long_reason[:200],)
+    assert len(v.reasons[0]) == 200
+
+
+def test_summary_숫자는_ParseError():
+    raw = '{"regime": "neutral", "max_picks_advice": 3, "summary": 0}'
+    with pytest.raises(ParseError):
+        parse_market_context(raw, max_picks=5)
+
+
+def test_summary_부재는_빈문자열():
+    raw = '{"regime": "neutral", "max_picks_advice": 3}'
+    ctx = parse_market_context(raw, max_picks=5)
+    assert ctx.summary == ""
+
+
+def test_summary_긴_문자열은_500자로_절단():
+    long_summary = "나" * 501
+    raw = json.dumps({"regime": "neutral", "max_picks_advice": 3,
+                      "summary": long_summary})
+    ctx = parse_market_context(raw, max_picks=5)
+    assert len(ctx.summary) == 500
+    assert ctx.summary == long_summary[:500]
 
 
 def test_보수_폴백값():

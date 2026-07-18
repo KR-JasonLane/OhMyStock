@@ -6,10 +6,18 @@ from dataclasses import dataclass
 
 _REGIMES = ("risk_on", "neutral", "risk_off")
 _VERDICTS = ("approve", "reject")
+_MAX_ITEM_LEN = 200
+_MAX_SUMMARY_LEN = 500
 
 
 class ParseError(ValueError):
     pass
+
+
+def _short(value) -> str:
+    """ParseError 메시지에 넣을 값 절단 — LLM 통제 값이 로그로 흐를 때의
+    인젝션/폭주 방지."""
+    return repr(value)[:80]
 
 
 @dataclass(frozen=True)
@@ -43,20 +51,34 @@ def _str_tuple(value, limit: int) -> tuple[str, ...]:
         return ()
     if not isinstance(value, list):
         raise ParseError("expected a list of strings")
-    return tuple(str(v) for v in value[:limit])
+    result = []
+    for v in value[:limit]:
+        if not isinstance(v, str):
+            raise ParseError(f"expected string items: {_short(v)}")
+        result.append(v[:_MAX_ITEM_LEN])  # 초과분 절단, 마커 불필요
+    return tuple(result)
 
 
 def parse_market_context(raw: str, max_picks: int) -> MarketContext:
     obj = _load_obj(raw)
     regime = obj.get("regime")
     if regime not in _REGIMES:
-        raise ParseError(f"invalid regime: {regime!r}")
+        raise ParseError(f"invalid regime: {_short(regime)}")
     advice = obj.get("max_picks_advice")
     if not isinstance(advice, int) or isinstance(advice, bool):
-        raise ParseError(f"invalid max_picks_advice: {advice!r}")
+        raise ParseError(f"invalid max_picks_advice: {_short(advice)}")
     # 범위 밖 advice는 오류가 아니라 클램프 — 모델이 6을 말해도 5로 제한(보수 방향)
     advice = max(0, min(advice, max_picks))
-    return MarketContext(regime=regime, summary=str(obj.get("summary") or ""),
+    # 텍스트 필드도 타입은 강제, 길이는 절단 — LLM/뉴스 유래 비대 문자열이
+    # 저장·표시 계층으로 전파되는 것 차단 (보안 패널)
+    raw_summary = obj.get("summary")
+    if raw_summary is None:
+        summary = ""
+    elif not isinstance(raw_summary, str):
+        raise ParseError(f"invalid summary: {_short(raw_summary)}")
+    else:
+        summary = raw_summary[:_MAX_SUMMARY_LEN]
+    return MarketContext(regime=regime, summary=summary,
                          max_picks_advice=advice,
                          cautions=_str_tuple(obj.get("cautions"), 5))
 
@@ -65,11 +87,12 @@ def parse_trader_verdict(raw: str) -> TraderVerdict:
     obj = _load_obj(raw)
     verdict = obj.get("verdict")
     if verdict not in _VERDICTS:
-        raise ParseError(f"invalid verdict: {verdict!r}")
+        raise ParseError(f"invalid verdict: {_short(verdict)}")
     confidence = obj.get("confidence")
-    if not isinstance(confidence, (int, float)) or isinstance(confidence, bool) \
-            or not 0.0 <= float(confidence) <= 1.0:
-        raise ParseError(f"confidence out of range: {confidence!r}")
+    if not isinstance(confidence, (int, float)) or isinstance(confidence, bool):
+        raise ParseError(f"invalid confidence: {_short(confidence)}")
+    if not 0.0 <= float(confidence) <= 1.0:
+        raise ParseError(f"confidence out of range: {_short(confidence)}")
     return TraderVerdict(verdict=verdict, confidence=float(confidence),
                          reasons=_str_tuple(obj.get("reasons"), 3),
                          risk_flags=_str_tuple(obj.get("risk_flags"), 5))

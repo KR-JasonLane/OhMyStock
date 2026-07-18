@@ -15,7 +15,7 @@ class NewsError(Exception):
 @dataclass(frozen=True)
 class Headline:
     title: str          # 태그 제거된 제목
-    url: str            # originallink 우선, 없으면 link
+    url: str            # 원본 기사 링크(제공 시) 우선, 없으면 포털 링크
     published_at: str   # 원문 pubDate 문자열 보존
 
 
