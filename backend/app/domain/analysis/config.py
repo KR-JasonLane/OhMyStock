@@ -7,7 +7,9 @@ from dataclasses import asdict, dataclass
 
 @dataclass(frozen=True)
 class AnalysisConfig:
-    model: str = "exaone3.5:7.8b"
+    # 기본은 Ollama Cloud 원격 추론(사용자 결정 2026-07-18) — 로컬 폴백은
+    # "exaone3.5:7.8b" 등으로 값만 교체(어댑터 분기 불필요, base_url 불변).
+    model: str = "gemma4:31b-cloud"
     temperature: float = 0.2
     max_picks: int = 5
     news_per_symbol: int = 5

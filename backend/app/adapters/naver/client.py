@@ -23,7 +23,9 @@ _TAG_RE = re.compile(r"</?b>")
 
 
 def _clean_title(title: str) -> str:
-    return html.unescape(_TAG_RE.sub("", title))
+    # 인코딩된 엔티티(예: &lt;b&gt;)가 태그 제거 후에도 잔존하지 않도록
+    # unescape를 먼저 수행한 뒤 태그를 제거한다(방어 심층).
+    return _TAG_RE.sub("", html.unescape(title))
 
 
 class NaverNewsClient:
@@ -32,12 +34,13 @@ class NaverNewsClient:
         client_id: SecretStr,
         client_secret: SecretStr,
         *,
+        timeout_s: float = 10.0,
         http: httpx.AsyncClient | None = None,
     ) -> None:
         self._client_id = client_id
         self._client_secret = client_secret
         self._owns_http = http is None
-        self._http = http or httpx.AsyncClient(base_url=_BASE_URL, timeout=10.0)
+        self._http = http or httpx.AsyncClient(base_url=_BASE_URL, timeout=timeout_s)
 
     async def search_headlines(self, query: str, limit: int) -> list[Headline]:
         headers = {
@@ -52,7 +55,7 @@ class NaverNewsClient:
                 f"네이버 뉴스 검색 접속 실패: {type(exc).__name__}"
             ) from exc
 
-        if resp.status_code < 200 or resp.status_code >= 300:
+        if not resp.is_success:
             raise NewsError(f"네이버 뉴스 검색 응답 오류 http={resp.status_code}")
 
         try:
@@ -64,14 +67,19 @@ class NaverNewsClient:
         if not isinstance(items, list):
             raise NewsError("네이버 뉴스 검색 응답에 items가 없습니다")
 
-        return [
-            Headline(
-                title=_clean_title(item.get("title", "")),
-                url=item.get("originallink") or item.get("link", ""),
-                published_at=item.get("pubDate", ""),
-            )
-            for item in items
-        ]
+        try:
+            return [
+                Headline(
+                    title=_clean_title(item.get("title", "")),
+                    url=item.get("originallink") or item.get("link", ""),
+                    published_at=item.get("pubDate", ""),
+                )
+                for item in items
+            ]
+        except (AttributeError, TypeError) as exc:
+            # items 원소가 dict가 아니면(문자열 등) .get() 호출이 벤더 예외를
+            # 던진다 — NewsPort 계약(NewsError만 누출)을 지키기 위해 변환.
+            raise NewsError("네이버 뉴스 검색 응답의 items 원소 형식이 올바르지 않습니다") from exc
 
     async def aclose(self) -> None:
         if self._owns_http:

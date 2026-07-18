@@ -47,7 +47,7 @@ class OllamaClient:
                 f"{_GUIDE}"
             ) from exc
 
-        if resp.status_code < 200 or resp.status_code >= 300:
+        if not resp.is_success:
             raise LlmError(
                 f"Ollama 응답 오류 [{self._base_url}] "
                 f"http={resp.status_code}. {_GUIDE}"
@@ -64,7 +64,13 @@ class OllamaClient:
             raise LlmError(
                 f"Ollama 응답에 response 키가 없습니다 [{self._base_url}]. {_GUIDE}"
             )
-        return data["response"]
+        response = data["response"]
+        if not isinstance(response, str):
+            raise LlmError(
+                f"Ollama 응답의 response가 문자열이 아닙니다 [{self._base_url}]. "
+                f"{_GUIDE}"
+            )
+        return response
 
     async def aclose(self) -> None:
         if self._owns_http:

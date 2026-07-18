@@ -44,5 +44,37 @@ async def test_비2xx는_NewsError():
     await client.aclose()
 
 
+@pytest.mark.anyio
+@respx.mock
+async def test_접속불가는_NewsError():
+    import httpx
+
+    respx.get(URL).mock(side_effect=httpx.ConnectError("refused"))
+    client = make_client()
+    with pytest.raises(NewsError):
+        await client.search_headlines("q", limit=5)
+    await client.aclose()
+
+
+@pytest.mark.anyio
+@respx.mock
+async def test_items_키_부재는_NewsError():
+    respx.get(URL).respond(json={"unrelated": []})
+    client = make_client()
+    with pytest.raises(NewsError):
+        await client.search_headlines("q", limit=5)
+    await client.aclose()
+
+
+@pytest.mark.anyio
+@respx.mock
+async def test_items_원소가_문자열이면_NewsError():
+    respx.get(URL).respond(json={"items": ["문자열-원소"]})
+    client = make_client()
+    with pytest.raises(NewsError):
+        await client.search_headlines("q", limit=5)
+    await client.aclose()
+
+
 def test_NewsPort_구현():
     assert isinstance(make_client(), NewsPort)

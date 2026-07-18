@@ -59,5 +59,15 @@ async def test_비2xx와_키부재는_LlmError():
         await client2.aclose()
 
 
+@pytest.mark.anyio
+@respx.mock
+async def test_response가_문자열이_아니면_LlmError():
+    respx.post(f"{BASE}/api/generate").respond(json={"response": 123})
+    client = make_client()
+    with pytest.raises(LlmError):
+        await client.generate_json("s", "p")
+    await client.aclose()
+
+
 def test_LlmPort_구현():
     assert isinstance(make_client(), LlmPort)

@@ -10,7 +10,7 @@
 | 1 | 정보 범위 = DB 내부 + **뉴스 헤드라인 추가** | DB만/뉴스/거시지표 | 사용자 선택 — 판단 재료 보강 |
 | 2 | 뉴스 소스 = **네이버 검색 오픈 API** | 네이버 API/RSS/크롤링 | 공식 무료 API, 종목별 검색, 일 25,000회 한도로 충분, 약관 리스크 최소 |
 | 3 | Ollama = **호스트 설치** (`host.docker.internal:11434`) | 호스트/컨테이너 | GPU(RTX 5060 Laptop 8GB) 활용 최단 경로, CLAUDE.md §3 기허용 옵션 |
-| 4 | 기본 모델 = **exaone3.5:7.8b** (설정 교체 가능) | — | 한국어 강점, 8GB VRAM 적정(Q4 양자화). JSON 안정성 미달 시 qwen2.5:7b 폴백 |
+| 4 | 기본 모델 = **gemma4:31b-cloud** (Ollama Cloud 원격 추론) | — | 사용자 결정 2026-07-18로 개정. 로컬 폴백 exaone3.5:7.8b 상시 전환 가능(설정값만 교체, 어댑터 분기 불필요) |
 | 5 | 산출물 = **승인/거부 필터 + 최종 상위 ≤5** | 필터+상위5/재순위/리포트만 | Phase 5가 그대로 매수 대상으로 소비, 거부 사유 저장(복기) |
 | 6 | 오케스트레이션 = **LangGraph 채택** | LangGraph/직접 구현 | 사용자 선택 — 아키텍처 문서 준수, 향후 에이전트 확장 대비. 단 LLM 호출은 자체 어댑터(신규 의존성은 `langgraph` 1개만, langchain 계열 불채택) |
 | 7 | 트리거 = **`POST /analyze` 수동** (Phase 6에서 스케줄러 호출) | — | 결정 #16 패턴 |
@@ -58,6 +58,9 @@ api/analyze.py
 - 실행이 실제로 본 헤드라인은 `analysis_news`에 스냅샷 저장(복기·감사).
 - 네이버 API 실패(부분/전체): 해당 범위 뉴스 없이 진행 + 런 경고 기록 —
   뉴스는 보조 재료라 분석 자체를 막지 않는다.
+- **한계(트레이더 이월):** 종목명 그대로 검색하면 동명·일반명사 종목
+  ("동양" 등)에서 무관 기사가 혼입될 수 있음 — T5 쿼리 조립에서 완화 예정
+  (예: "{종목명} 주가" 형태). 잔여 한계는 §10-3(LLM 품질)과 함께 복기로 평가.
 
 ## 5. 파이프라인 (LangGraph)
 
@@ -108,7 +111,7 @@ warnings)`. 노드 3개 선형 연결. LLM 호출은 economist/trader만.
 
 | 파라미터 | 기본값 | 파라미터 | 기본값 |
 |---|---|---|---|
-| model | "exaone3.5:7.8b" | temperature | 0.2 |
+| model | "gemma4:31b-cloud" | temperature | 0.2 |
 | max_picks | 5 | news_per_symbol | 5 |
 | market_keywords | ("코스피","코스닥","증시") | parse_retries | 2 |
 | llm_timeout_s | 120 (호출당) | score_max_age_days | 3 |
@@ -162,7 +165,8 @@ warnings)`. 노드 3개 선형 연결. LLM 호출은 economist/trader만.
    들어가는 경로 — 데이터 구획 + 지시 무시 명시(§5-4) + 출력 JSON 스키마
    강제 + synthesizer가 순수 코드(LLM이 최종 선정을 직접 조작 불가)로 완화.
    근본 차단은 아님을 인지하고 Phase 5 전 재평가.
-3. **LLM 품질 미지수:** 7.8B 로컬 모델의 판단 품질은 실측 전 미지수 —
+3. **LLM 품질 미지수:** 기본 모델(gemma4:31b-cloud — 로컬 폴백 시 7.8B급)의
+   판단 품질은 실측 전 미지수 —
    판정·사유가 전부 저장되므로 복기로 평가, 모델은 설정 교체 가능.
    AI 필터는 보수 방향(축소만 가능, 점수 순위를 올리지는 못함)이라 최악의
    경우에도 P3 후보보다 나쁜 종목이 추가되지는 않는다.
@@ -172,12 +176,20 @@ warnings)`. 노드 3개 선형 연결. LLM 호출은 economist/trader만.
    런타임 가드(해당 env가 truthy면 `RuntimeError`)와 `docker-compose.yml`의
    두 변수 `"false"` 고정으로 차단(운영 규칙: 해당 env 활성화 금지, P4-T2
    보안 패널).
+5. **외부 추론 수용:** 기본 모델이 Ollama Cloud(원격)이므로 프롬프트·응답
+   (후보·전략 적합도·뉴스·판정 = 전략 데이터)이 Ollama 클라우드 인프라에서
+   처리된다. **모의투자 단계 한정 수용**(사용자 결정 2026-07-18) — **Phase 5
+   실전 전환 전 재평가를 강제**하며, 기본 계획은 로컬 모델(예:
+   exaone3.5:7.8b)로 회귀하는 것이다. LangSmith 텔레메트리(§10-4)와 리스크
+   클래스는 동일(전략 데이터의 외부 SaaS 유출)하나, 이쪽은 차단이 아니라
+   의도적 수용이라는 점이 다르다.
 
 ## 11. 사용자 준비물 (구현 중 요청)
 
-① Windows Ollama 설치 + `ollama pull exaone3.5:7.8b`, ② 네이버 개발자
-센터 앱 등록 → `NAVER_CLIENT_ID`/`NAVER_CLIENT_SECRET`를 루트 `.env`에 추가
-(backend/.env 동기화 포함).
+① Windows Ollama 설치 + `ollama signin`(클라우드 모델 `gemma4:31b-cloud`
+사용 계정 로그인), 로컬 폴백을 원하면 `ollama pull exaone3.5:7.8b` 선택,
+② 네이버 개발자 센터 앱 등록 → `NAVER_CLIENT_ID`/`NAVER_CLIENT_SECRET`를
+루트 `.env`에 추가(backend/.env 동기화 포함).
 
 ## 12. 이후 페이즈 연계
 
