@@ -2,6 +2,7 @@
 결과는 run 단위 insert-only (`ScoringStore`와 동일 패턴 — 스펙 §6)."""
 
 import json
+import logging
 from collections.abc import Callable
 from datetime import date, datetime, timezone
 
@@ -11,9 +12,13 @@ from sqlalchemy.orm import sessionmaker
 from app.domain.analysis.graph import AnalysisResult
 from app.domain.analysis.ports import (CandidateInput, Headline,
                                        MarketSnapshot, StrategyDetailInput)
-from app.store.models import (AnalysisNewsRow, AnalysisRunRow,
-                              AnalysisVerdictRow, InstrumentRow, ScoreDetailRow,
-                              ScoreRow, ScoreRunRow, ScoreSectorRow, SectorRow)
+from app.store.models import (ANALYSIS_NEWS_TITLE_MAX_LEN,
+                              ANALYSIS_NEWS_URL_MAX_LEN, AnalysisNewsRow,
+                              AnalysisRunRow, AnalysisVerdictRow,
+                              InstrumentRow, ScoreDetailRow, ScoreRow,
+                              ScoreRunRow, ScoreSectorRow, SectorRow)
+
+logger = logging.getLogger(__name__)
 
 
 class AnalysisStore:
@@ -42,7 +47,11 @@ class AnalysisStore:
         trader 노드가 이 순서로 후보를 순회하며, 최종 선정 순위는
         `synthesize`가 confidence*total_score 기준으로 별도 재정렬하므로
         입력 순서 자체가 결과를 바꾸지는 않지만, 재현성(동일 입력 → 동일
-        호출 순서)을 위해 계약으로 고정한다."""
+        호출 순서)을 위해 계약으로 고정한다.
+
+        INNER JOIN 특성상 instruments/sectors에 미매칭인 후보는 조인 결과에서
+        조용히 제외된다 (FK 부재는 P3 스키마 결정) — 이 함수는 그 드롭을
+        scores 원본 행수와 비교해 경고로 관측한다."""
         with self._sessions() as session:
             score_rows = session.execute(
                 select(ScoreRow.symbol, ScoreRow.total_score, ScoreRow.sector_code,
@@ -52,6 +61,10 @@ class AnalysisStore:
                 .join(SectorRow, SectorRow.code == ScoreRow.sector_code)
                 .where(ScoreRow.run_id == score_run_id)
                 .order_by(ScoreRow.rank)).all()
+
+            total_score_rows = session.scalar(
+                select(func.count()).select_from(ScoreRow)
+                .where(ScoreRow.run_id == score_run_id))
 
             detail_rows = session.execute(
                 select(ScoreDetailRow.symbol, ScoreDetailRow.strategy,
@@ -66,14 +79,22 @@ class AnalysisStore:
                 strategy=strategy, signal=signal, avg_return=avg_return,
                 win_rate=win_rate, occurrences=occurrences))
 
-        return [
+        candidates = [
             CandidateInput(
                 symbol=symbol, name=name, sector_name=sector_name,
                 total_score=total_score, sector_score=sector_score,
                 strategy_score_norm=strategy_score_norm,
                 details=tuple(details_by_symbol.get(symbol, ())))
-            for symbol, total_score, sector_code, sector_score,
+            for symbol, total_score, _sector_code, sector_score,
                 strategy_score_norm, name, sector_name in score_rows]
+
+        if len(candidates) != total_score_rows:
+            logger.warning(
+                "load_candidates: %d score rows but %d candidates - "
+                "instrument/sector mismatch silently dropped",
+                total_score_rows, len(candidates))
+
+        return candidates
 
     def market_snapshot(self, score_run_id: int) -> MarketSnapshot:
         """score_sectors 전 행(industry만 저장돼 있음 — ScoringService가
@@ -82,7 +103,9 @@ class AnalysisStore:
         줄 정렬: 업종명 오름차순(동률은 sector_code로 tie-break) — 이코노미스트
         프롬프트를 실행마다 결정론적인 순서로 보여주기 위함(내용상 의미는
         없다). breadth: R20 > 0인 업종 비율. 행이 0개면 breadth 0.0, 표는
-        빈 문자열."""
+        빈 문자열 — 이 경우 "데이터 없음"과 "전 업종 하락"을 구분할 수
+        없으므로, 호출자(T5)가 빈 sector_table을 가드해야 한다(보수적 실패
+        권장)."""
         with self._sessions() as session:
             rows = session.execute(
                 select(SectorRow.name, ScoreSectorRow.sector_code,
@@ -96,7 +119,8 @@ class AnalysisStore:
         ordered = sorted(rows, key=lambda r: (r[0], r[1]))
         lines = [f"{name} {r5:.4f} {r20:.4f} {r60:.4f}"
                  for name, _code, r5, r20, r60 in ordered]
-        breadth = sum(1 for *_rest, r20, _r60 in rows if r20 > 0) / len(rows)
+        breadth = sum(1 for _name, _code, _r5, r20, _r60 in rows
+                     if r20 > 0) / len(rows)
         return MarketSnapshot(sector_table="\n".join(lines), breadth=breadth)
 
     # ---------- run 라이프사이클 ----------
@@ -129,8 +153,13 @@ class AnalysisStore:
 
     def save_results(self, run_id: int, result: AnalysisResult,
                      news: dict[str, list[Headline]]) -> None:
-        """verdicts/picks/news 3테이블 insert. news 키는 "market" 또는
-        종목코드(스코프)."""
+        """verdicts/picks(Tx1, 필수) + news(Tx2, best-effort) insert. news
+        키는 "market" 또는 종목코드(스코프).
+
+        두 개의 트랜잭션으로 분리한 이유: 뉴스 스냅샷은 복기 보조 자료일
+        뿐이다 — 그 실패가 그날의 판정 감사 기록(verdicts/picks)을 삭제해선
+        안 된다 (T4 패널 트레이더 리뷰). Tx1이 실패하면 진짜 실패이므로
+        그대로 raise하고, Tx2(news)는 어떤 예외든 경고 로그 후 삼킨다."""
         with self._sessions.begin() as session:
             pick_rank_by_symbol = {p.symbol: p.rank for p in result.picks}
             for symbol, verdict in result.verdicts.items():
@@ -141,11 +170,47 @@ class AnalysisStore:
                     risk_flags=json.dumps(list(verdict.risk_flags), ensure_ascii=False),
                     picked=symbol in pick_rank_by_symbol,
                     pick_rank=pick_rank_by_symbol.get(symbol)))
-            for scope, headlines in news.items():
-                for h in headlines:
-                    session.add(AnalysisNewsRow(
-                        run_id=run_id, scope=scope, url=h.url, title=h.title,
-                        published_at=h.published_at))
+
+        try:
+            self._save_news(run_id, news)
+        except Exception as exc:  # noqa: BLE001 — best-effort, 감사 기록은 지켜야 함
+            logger.warning("analysis news snapshot failed for run %d: %s", run_id, exc)
+
+    def _save_news(self, run_id: int, news: dict[str, list[Headline]]) -> None:
+        """뉴스 스냅샷 insert. `save_results`가 예외를 흡수하므로 여기서는
+        평범하게 raise해도 된다.
+
+        방어 (collection_store 패턴과 동일 원칙):
+        (a) url이 빈 헤드라인은 스킵(경고: 개수+샘플) — url이 PK 구성요소라
+            빈 문자열끼리 겹치면 PK 위반으로 뉴스 저장 전체가 실패한다.
+        (b) (scope, url) 기준 dedup, 첫 항목 우선 — 소스 응답 중복이 PK
+            위반을 일으키지 않도록.
+        (c) title[:256]/url[:512] 절단 — pg는 VARCHAR 초과 시 예외 (T2와
+            동일 방어; 길이는 models.ANALYSIS_NEWS_TITLE_MAX_LEN /
+            ANALYSIS_NEWS_URL_MAX_LEN을 models.py와 공유하는 SSOT)."""
+        entries = [(scope, h) for scope, headlines in news.items() for h in headlines]
+
+        empty_url = [(scope, h.title) for scope, h in entries if not h.url]
+        if empty_url:
+            logger.warning(
+                "analysis news: skipped %d headlines with empty url (sample: %s)",
+                len(empty_url), empty_url[:10])
+
+        deduped: dict[tuple[str, str], tuple[str, Headline]] = {}
+        for scope, h in entries:
+            if h.url:
+                deduped.setdefault((scope, h.url), (scope, h))
+
+        if not deduped:
+            return
+
+        with self._sessions.begin() as session:
+            for scope, h in deduped.values():
+                session.add(AnalysisNewsRow(
+                    run_id=run_id, scope=scope,
+                    url=h.url[:ANALYSIS_NEWS_URL_MAX_LEN],
+                    title=h.title[:ANALYSIS_NEWS_TITLE_MAX_LEN],
+                    published_at=h.published_at))
 
     def latest_results(self) -> dict | None:
         """최근 succeeded 실행의 결과 (API 응답 본문). 뉴스 스냅샷 자체는
@@ -166,6 +231,25 @@ class AnalysisStore:
             news_count = session.scalar(
                 select(func.count()).select_from(AnalysisNewsRow)
                 .where(AnalysisNewsRow.run_id == run.id))
+
+            verdicts_out = []
+            for v in verdicts:
+                try:
+                    reasons = json.loads(v.reasons)
+                    risk_flags = json.loads(v.risk_flags)
+                except json.JSONDecodeError:
+                    # 손상 데이터 1건이 전체 응답을 죽이면 안 됨 — 그 항목만
+                    # 빈 리스트로 폴백하고 경고 로그.
+                    logger.warning(
+                        "latest_results: corrupt reasons/risk_flags json for "
+                        "run %d symbol %s - falling back to []", run.id, v.symbol)
+                    reasons, risk_flags = [], []
+                verdicts_out.append({
+                    "symbol": v.symbol, "verdict": v.verdict,
+                    "confidence": v.confidence, "reasons": reasons,
+                    "risk_flags": risk_flags, "picked": v.picked,
+                    "pick_rank": v.pick_rank})
+
             return {
                 "run_id": run.id,
                 "score_run_id": run.score_run_id,
@@ -180,12 +264,6 @@ class AnalysisStore:
                 "warnings": run.warnings,
                 "failure_reason": run.failure_reason,
                 "picks": [{"symbol": v.symbol, "rank": v.pick_rank} for v in picks],
-                "verdicts": [
-                    {"symbol": v.symbol, "verdict": v.verdict,
-                     "confidence": v.confidence,
-                     "reasons": json.loads(v.reasons),
-                     "risk_flags": json.loads(v.risk_flags),
-                     "picked": v.picked, "pick_rank": v.pick_rank}
-                    for v in verdicts],
+                "verdicts": verdicts_out,
                 "news_count": news_count,
             }

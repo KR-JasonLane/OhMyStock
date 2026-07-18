@@ -21,6 +21,7 @@ def upgrade() -> None:
         sa.Column("started_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("finished_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("status", sa.String(16), nullable=False),
+        # 의도적 non-CASCADE — 스코어 런 정리가 분석 감사 이력을 연쇄 삭제하면 안 됨.
         sa.Column("score_run_id", sa.Integer,
                   sa.ForeignKey("score_runs.id"), nullable=False),
         sa.Column("model", sa.String(64), nullable=False),

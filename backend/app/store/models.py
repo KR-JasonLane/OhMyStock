@@ -12,6 +12,12 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 INSTRUMENT_STATE_MAX_LEN = 128
 INSTRUMENT_AUDIT_INFO_MAX_LEN = 32
 
+# analysis_news.title / analysis_news.url 칼럼 길이 — 모델과 store의 절단
+# 로직(analysis_store._save_news)이 같은 값을 참조하도록 상수화 (T2 SSOT 관례).
+# 마이그레이션 파일(0005)은 Alembic 스냅샷 관례상 리터럴 숫자를 그대로 둔다.
+ANALYSIS_NEWS_TITLE_MAX_LEN = 256
+ANALYSIS_NEWS_URL_MAX_LEN = 512
+
 
 class Base(DeclarativeBase):
     pass
@@ -135,6 +141,9 @@ class AnalysisRunRow(Base):
     finished_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True)
     status: Mapped[str] = mapped_column(String(16))
+    # 의도적 non-CASCADE — 스코어 런 정리(retention)가 분석 감사 이력을
+    # 연쇄 삭제하면 안 됨. retention 설계 시 RESTRICT 제약 선검토 필요
+    # (T4 아키텍트 리뷰).
     score_run_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("score_runs.id"))
     model: Mapped[str] = mapped_column(String(64))
@@ -164,6 +173,6 @@ class AnalysisNewsRow(Base):
     run_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("analysis_runs.id", ondelete="CASCADE"), primary_key=True)
     scope: Mapped[str] = mapped_column(String(12), primary_key=True)
-    url: Mapped[str] = mapped_column(String(512), primary_key=True)
-    title: Mapped[str] = mapped_column(String(256))
+    url: Mapped[str] = mapped_column(String(ANALYSIS_NEWS_URL_MAX_LEN), primary_key=True)
+    title: Mapped[str] = mapped_column(String(ANALYSIS_NEWS_TITLE_MAX_LEN))
     published_at: Mapped[str] = mapped_column(String(64))
