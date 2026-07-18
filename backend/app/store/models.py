@@ -1,10 +1,16 @@
-"""수집 파이프라인 스키마. Alembic 0002_market_data.py와 1:1 정합성 유지."""
+"""수집 파이프라인 스키마. Alembic 마이그레이션(최신 0003)과 1:1 정합성 유지."""
 
 from datetime import date, datetime
 
 from sqlalchemy import (BigInteger, Boolean, Date, DateTime, ForeignKey, Integer,
                         String, Text, literal)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+# instruments.state / instruments.audit_info 칼럼 길이 — 모델과 store의 절단
+# 로직(collection_store.upsert_instruments)이 같은 값을 참조하도록 상수화.
+# 마이그레이션 파일(0003)은 Alembic 스냅샷 관례상 리터럴 숫자를 그대로 둔다.
+INSTRUMENT_STATE_MAX_LEN = 128
+INSTRUMENT_AUDIT_INFO_MAX_LEN = 32
 
 
 class Base(DeclarativeBase):
@@ -34,8 +40,10 @@ class InstrumentRow(Base):
     name: Mapped[str] = mapped_column(String(64))
     market: Mapped[str] = mapped_column(String(16))
     instrument_type: Mapped[str] = mapped_column(String(32), default="", server_default="")
-    state: Mapped[str] = mapped_column(String(128), default="", server_default="")
-    audit_info: Mapped[str] = mapped_column(String(32), default="", server_default="")
+    state: Mapped[str] = mapped_column(
+        String(INSTRUMENT_STATE_MAX_LEN), default="", server_default="")
+    audit_info: Mapped[str] = mapped_column(
+        String(INSTRUMENT_AUDIT_INFO_MAX_LEN), default="", server_default="")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default=literal(True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 

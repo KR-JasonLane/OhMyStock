@@ -9,7 +9,9 @@ from sqlalchemy import Engine, delete, func, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.domain.broker import Candle, Instrument, Sector
-from app.store.models import (CandleRow, CollectionRunRow, InstrumentRow,
+from app.store.models import (INSTRUMENT_AUDIT_INFO_MAX_LEN,
+                              INSTRUMENT_STATE_MAX_LEN, CandleRow,
+                              CollectionRunRow, InstrumentRow,
                               SectorMembershipRow, SectorRow)
 
 logger = logging.getLogger(__name__)
@@ -38,8 +40,14 @@ class CollectionStore:
         self._now = now or (lambda: datetime.now(timezone.utc))
 
     def upsert_sectors(self, sectors: Iterable[Sector],
-                       group_types: dict[str, str]) -> None:
-        """group_types: code → group_type (도메인 분류 맵이 결정 — store는 무지)."""
+                       group_types: dict[str, str] | None = None) -> None:
+        """group_types: code → group_type (도메인 분류 맵이 결정 — store는 무지).
+
+        Optional인 이유: domain/collection.py가 Task 3 전환 전까지 1-인자로
+        호출한다 — 필수 인자면 중간 상태에서 수집 파이프라인 전체가
+        TypeError로 크래시(라이브 회귀)한다. None이면 모든 섹터가
+        "unclassified"로 저장된다."""
+        group_types = group_types or {}
         rows = [{"code": s.code, "market": s.market, "name": s.name,
                  "group_type": group_types.get(s.code, "unclassified")}
                 for s in sectors]
@@ -49,10 +57,22 @@ class CollectionStore:
     def upsert_instruments(self, instruments: Iterable[Instrument]) -> None:
         now = self._now()
         # pg는 VARCHAR 초과 시 예외 — 수집 전체 실패 방지용 방어적 절단
-        rows = [{"symbol": i.symbol, "name": i.name, "market": i.market,
-                 "instrument_type": i.instrument_type, "state": i.state[:128],
-                 "audit_info": i.audit_info[:32], "is_active": True,
-                 "updated_at": now} for i in instruments]
+        rows = []
+        truncated_symbols = []
+        for i in instruments:
+            if len(i.state) > INSTRUMENT_STATE_MAX_LEN or \
+                    len(i.audit_info) > INSTRUMENT_AUDIT_INFO_MAX_LEN:
+                truncated_symbols.append(i.symbol)
+            rows.append({"symbol": i.symbol, "name": i.name, "market": i.market,
+                        "instrument_type": i.instrument_type,
+                        "state": i.state[:INSTRUMENT_STATE_MAX_LEN],
+                        "audit_info": i.audit_info[:INSTRUMENT_AUDIT_INFO_MAX_LEN],
+                        "is_active": True, "updated_at": now})
+        if truncated_symbols:
+            # 조용한 데이터 손실 방지 — 절단 발생 시 배치당 1회 경고(개수 + 표본)
+            logger.warning(
+                "instrument state/audit_info truncated for %d symbols (sample: %s)",
+                len(truncated_symbols), sorted(truncated_symbols)[:10])
         with self._sessions.begin() as session:
             _upsert(session, InstrumentRow, rows, ["symbol"])
 
@@ -66,22 +86,42 @@ class CollectionStore:
         """업종 소속 전체 교체 (delete-and-insert, 단일 트랜잭션).
 
         전체 교체인 이유: 소속은 편출입이 있는 스냅샷 데이터라 이전 실행의
-        소속이 남으면 안 된다. instruments에 없는 symbol은 스킵하고 경고
-        (FK 위반 방지 — 정규화 차이/신규 상장 타이밍). 반환: 삽입 행 수."""
+        소속이 남으면 안 된다. instruments에 없는 symbol과 sectors에 없는
+        sector_code는 각각 스킵하고 경고 (FK 위반으로 트랜잭션 전체가
+        롤백되는 것을 방지 — 정규화 차이/신규 상장·업종 타이밍 및 브로커
+        응답 페이지네이션 중복). 반환: 삽입 행 수."""
         with self._sessions.begin() as session:
             all_symbols = {s for members in memberships.values() for s in members}
-            known = set(session.scalars(
+            known_symbols = set(session.scalars(
                 select(InstrumentRow.symbol)
                 .where(InstrumentRow.symbol.in_(all_symbols))))
-            unknown = len(all_symbols - known)
-            if unknown:
+            unknown_symbols = all_symbols - known_symbols
+            if unknown_symbols:
                 logger.warning(
-                    "sector memberships skipped for %d unknown symbols", unknown)
-            rows = [{"sector_code": code, "symbol": s}
-                    for code, members in memberships.items()
-                    for s in members if s in known]
+                    "sector memberships skipped for %d unknown symbols (sample: %s)",
+                    len(unknown_symbols), sorted(unknown_symbols)[:10])
+
+            known_sectors = set(session.scalars(
+                select(SectorRow.code)
+                .where(SectorRow.code.in_(memberships.keys()))))
+            unknown_sectors = set(memberships.keys()) - known_sectors
+            if unknown_sectors:
+                logger.warning(
+                    "sector memberships skipped for %d unknown sector codes (sample: %s)",
+                    len(unknown_sectors), sorted(unknown_sectors)[:10])
+
+            # 브로커 응답 중복(페이지네이션 등)이 PK 위반으로 전체 롤백을
+            # 일으키지 않도록 (sector_code, symbol) 쌍을 삽입 전 dedup —
+            # dict.fromkeys로 first-seen 순서를 보존한다.
+            pairs = dict.fromkeys(
+                (code, s)
+                for code, members in memberships.items()
+                if code in known_sectors
+                for s in members if s in known_symbols)
+            rows = [{"sector_code": code, "symbol": s} for code, s in pairs]
             session.execute(delete(SectorMembershipRow))
             if rows:
+                # 매 실행 전체 교체라 upsert 불필요 — 대량 bulk insert 경로
                 session.execute(SectorMembershipRow.__table__.insert(), rows)
             return len(rows)
 

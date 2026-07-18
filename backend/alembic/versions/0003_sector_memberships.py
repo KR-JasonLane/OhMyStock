@@ -36,10 +36,17 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # instruments 칼럼 추가/삭제 전부를 batch_alter_table로 묶는다 — sqlite는
+    # ALTER TABLE을 부분 지원하지 않아 recreate 경로를 타는데, 개별 op를
+    # 섞으면(upgrade와의 비대칭) 테스트(sqlite)에서 깨진다.
     with op.batch_alter_table("instruments") as batch:
-        batch.add_column(sa.Column("sector_code", sa.String(8),
-                                   sa.ForeignKey("sectors.code"), nullable=True))
-    op.drop_column("instruments", "audit_info")
-    op.drop_column("instruments", "state")
+        # batch 모드(sqlite recreate)는 이름 없는 FK를 허용하지 않는다 —
+        # 명시적으로 이름을 지정.
+        batch.add_column(sa.Column("sector_code", sa.String(8), nullable=True))
+        batch.create_foreign_key(
+            "fk_instruments_sector_code_sectors", "sectors",
+            ["sector_code"], ["code"])
+        batch.drop_column("audit_info")
+        batch.drop_column("state")
     op.drop_column("sectors", "group_type")
     op.drop_table("sector_memberships")

@@ -106,6 +106,53 @@ def test_instrument_상태_저장(tmp_path):
         assert row.state == "관리종목" and row.audit_info == "관리종목"
 
 
+def test_upsert_sectors는_group_types_생략시_unclassified로_저장한다(tmp_path):
+    """group_types가 optional인 이유: domain/collection.py가 Task 3 전환
+    전까지 1-인자로 호출한다 — 필수 인자면 중간 상태에서 TypeError로
+    수집 파이프라인 전체가 크래시한다."""
+    engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'test.db'}")
+    Base.metadata.create_all(engine)
+    s = CollectionStore(engine, now=lambda: NOW)
+    s.upsert_sectors([Sector(code="001", market="kospi", name="전기전자")])
+    with Session(engine) as session:
+        assert session.get(SectorRow, "001").group_type == "unclassified"
+
+
+def test_멤버십_전체_교체는_중복_symbol_쌍을_제거한다(tmp_path):
+    """브로커 응답 중복(페이지네이션 등)이 PK 위반으로 전체 롤백을 일으키지
+    않도록 store 레벨에서 (sector_code, symbol) 유일성을 보장한다."""
+    engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'test.db'}")
+    Base.metadata.create_all(engine)
+    s = CollectionStore(engine, now=lambda: NOW)
+    s.upsert_sectors([Sector("005", "kospi", "음식료/담배")],
+                     group_types={"005": "industry"})
+    s.upsert_instruments([Instrument("A0001", "가", "kospi", "A")])
+
+    n = s.replace_sector_memberships({"005": ["A0001", "A0001", "A0001"]})
+    assert n == 1  # 중복 3개가 1개로 dedup
+    with Session(engine) as session:
+        rows = session.execute(select(SectorMembershipRow)).scalars().all()
+        assert [(r.sector_code, r.symbol) for r in rows] == [("005", "A0001")]
+
+
+def test_멤버십_전체_교체는_미등록_sector_code를_건너뛴다(tmp_path):
+    """sectors에 없는 sector_code는 FK 위반으로 전체 롤백되지 않도록 스킵
+    (미등록 symbol 스킵과 대칭)."""
+    engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'test.db'}")
+    Base.metadata.create_all(engine)
+    s = CollectionStore(engine, now=lambda: NOW)
+    s.upsert_sectors([Sector("005", "kospi", "음식료/담배")],
+                     group_types={"005": "industry"})
+    s.upsert_instruments([Instrument("A0001", "가", "kospi", "A")])
+
+    n = s.replace_sector_memberships(
+        {"005": ["A0001"], "999": ["A0001"]})  # "999"는 미등록 sector
+    assert n == 1
+    with Session(engine) as session:
+        rows = session.execute(select(SectorMembershipRow)).scalars().all()
+        assert [(r.sector_code, r.symbol) for r in rows] == [("005", "A0001")]
+
+
 def test_sectors_group_type_저장(tmp_path):
     engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'test.db'}")
     Base.metadata.create_all(engine)
