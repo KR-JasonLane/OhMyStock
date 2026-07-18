@@ -59,3 +59,31 @@ def test_0003_downgrade_후_다시_upgrade해도_성공한다(tmp_path, monkeypa
     command.upgrade(cfg, "head")
     insp = inspect(create_engine(db_url))
     assert "sector_memberships" in set(insp.get_table_names())
+
+
+def test_0004가_스코어링_결과_테이블_4종을_만든다(tmp_path, monkeypatch):
+    db_url = f"sqlite+pysqlite:///{tmp_path / 'mig.db'}"
+    monkeypatch.setenv("DATABASE_URL", db_url)
+    cfg = Config(str(BACKEND_DIR / "alembic.ini"))
+    cfg.set_main_option("script_location", str(BACKEND_DIR / "alembic"))
+    command.upgrade(cfg, "head")
+    names = set(inspect(create_engine(db_url)).get_table_names())
+    assert {"score_runs", "score_sectors", "scores", "score_details"} <= names
+
+
+def test_0004_downgrade_후_다시_upgrade해도_성공한다(tmp_path, monkeypatch):
+    db_url = f"sqlite+pysqlite:///{tmp_path / 'mig.db'}"
+    monkeypatch.setenv("DATABASE_URL", db_url)
+    cfg = Config(str(BACKEND_DIR / "alembic.ini"))
+    cfg.set_main_option("script_location", str(BACKEND_DIR / "alembic"))
+
+    command.upgrade(cfg, "head")
+    command.downgrade(cfg, "0003")
+    insp = inspect(create_engine(db_url))
+    names = set(insp.get_table_names())
+    assert not {"score_runs", "score_sectors", "scores", "score_details"} & names
+
+    command.upgrade(cfg, "head")
+    insp = inspect(create_engine(db_url))
+    names = set(insp.get_table_names())
+    assert {"score_runs", "score_sectors", "scores", "score_details"} <= names

@@ -1,9 +1,9 @@
-"""수집 파이프라인 스키마. Alembic 마이그레이션(최신 0003)과 1:1 정합성 유지."""
+"""수집·스코어링 파이프라인 스키마. Alembic 마이그레이션(최신 0004)과 1:1 정합성 유지."""
 
 from datetime import date, datetime
 
-from sqlalchemy import (BigInteger, Boolean, Date, DateTime, ForeignKey, Integer,
-                        String, Text, literal)
+from sqlalchemy import (BigInteger, Boolean, Date, DateTime, Float, ForeignKey,
+                        Integer, String, Text, literal)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 # instruments.state / instruments.audit_info 칼럼 길이 — 모델과 store의 절단
@@ -70,3 +70,55 @@ class CollectionRunRow(Base):
     succeeded: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     failed: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     error_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class ScoreRunRow(Base):
+    __tablename__ = "score_runs"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True)
+    status: Mapped[str] = mapped_column(String(16))
+    reference_date: Mapped[date] = mapped_column(Date)
+    universe_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    stale_excluded: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    config: Mapped[str] = mapped_column(Text, default="{}", server_default="{}")
+
+
+class ScoreSectorRow(Base):
+    __tablename__ = "score_sectors"
+    run_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("score_runs.id"), primary_key=True)
+    sector_code: Mapped[str] = mapped_column(String(8), primary_key=True)
+    r20: Mapped[float] = mapped_column(Float)
+    r60: Mapped[float] = mapped_column(Float)
+    r5: Mapped[float] = mapped_column(Float)
+    score: Mapped[float] = mapped_column(Float)
+    rank: Mapped[int] = mapped_column(Integer)
+    selected: Mapped[bool] = mapped_column(Boolean)
+
+
+class ScoreRow(Base):
+    __tablename__ = "scores"
+    run_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("score_runs.id"), primary_key=True)
+    symbol: Mapped[str] = mapped_column(String(12), primary_key=True)
+    rank: Mapped[int] = mapped_column(Integer)
+    total_score: Mapped[float] = mapped_column(Float)
+    sector_code: Mapped[str] = mapped_column(String(8))
+    sector_score: Mapped[float] = mapped_column(Float)
+    strategy_score: Mapped[float] = mapped_column(Float)
+
+
+class ScoreDetailRow(Base):
+    __tablename__ = "score_details"
+    run_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("score_runs.id"), primary_key=True)
+    symbol: Mapped[str] = mapped_column(String(12), primary_key=True)
+    strategy: Mapped[str] = mapped_column(String(32), primary_key=True)
+    signal: Mapped[bool] = mapped_column(Boolean)
+    avg_return: Mapped[float] = mapped_column(Float)
+    win_rate: Mapped[float] = mapped_column(Float)
+    occurrences: Mapped[int] = mapped_column(Integer)
+    score: Mapped[float] = mapped_column(Float)
