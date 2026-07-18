@@ -58,19 +58,6 @@ def test_run_라이프사이클(tmp_path):
     s.finish_run(run_id, "done", total=10, succeeded=9, failed=1)
 
 
-def test_set_sector_codes는_deprecated_no_op이다(tmp_path):
-    """set_sector_codes: sector_code 칼럼이 0003에서 삭제되어 더 이상 반영할 곳이
-    없다. Task 3에서 domain/collection.py의 호출부를 replace_sector_memberships로
-    전환하며 이 메서드도 제거될 때까지, 시그니처만 유지한 채 항상 0을 반환한다."""
-    s = _store(tmp_path)
-    s.upsert_sectors([Sector(code="001", market="kospi", name="전기전자")],
-                     group_types={"001": "industry"})
-    s.upsert_instruments([_inst(symbol="005930"), _inst(symbol="000660", name="SK하이닉스")])
-
-    result = s.set_sector_codes({"005930": "001", "999999": "001"})
-    assert result == 0
-
-
 def test_멤버십_전체_교체(tmp_path):
     engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'test.db'}")
     Base.metadata.create_all(engine)

@@ -76,12 +76,6 @@ class CollectionStore:
         with self._sessions.begin() as session:
             _upsert(session, InstrumentRow, rows, ["symbol"])
 
-    def set_sector_codes(self, mapping: dict[str, str]) -> int:
-        """Deprecated — Task 3에서 replace_sector_memberships로 전환하며 제거된다.
-        sector_code 칼럼은 마이그레이션 0003에서 삭제됨 (손상 데이터, 소비자 없음)."""
-        logger.warning("set_sector_codes is deprecated and now a no-op (removed in Task 3)")
-        return 0
-
     def replace_sector_memberships(self, memberships: dict[str, list[str]]) -> int:
         """업종 소속 전체 교체 (delete-and-insert, 단일 트랜잭션).
 

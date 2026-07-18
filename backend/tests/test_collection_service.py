@@ -22,7 +22,8 @@ def _collection_logger_enabled():
 
 class FakeBroker:
     def __init__(self, symbols=("005930", "000660"), fail: set[str] | None = None,
-                 sectors=None, market_symbols: dict[str, tuple[str, ...]] | None = None):
+                 sectors=None, market_symbols: dict[str, tuple[str, ...]] | None = None,
+                 members: dict[tuple[str, str], list[str]] | None = None):
         self.symbols = list(symbols)
         self.fail = fail or set()
         self.candle_calls: list[str] = []
@@ -32,6 +33,10 @@ class FakeBroker:
         # market_symbols: 시장별 상장 종목을 세밀하게 제어하고 싶을 때만 지정.
         # 미지정 시 기존 동작(kospi만 self.symbols 반환, 그 외 시장은 빈 목록)을 유지.
         self._market_symbols = market_symbols
+        # members: (sector_code, market) → 소속 심볼 목록을 세밀하게 제어하고
+        # 싶을 때만 지정. 미지정 시 기존 동작(모든 업종이 self.symbols 전체를
+        # 반환)을 유지.
+        self._members = members
 
     async def list_instruments(self, market):
         if self._market_symbols is not None:
@@ -47,6 +52,8 @@ class FakeBroker:
         return self._sectors
 
     async def list_sector_members(self, sector_code, market):
+        if self._members is not None:
+            return list(self._members.get((sector_code, market), []))
         return list(self.symbols)
 
     async def get_daily_candles(self, symbol, count):
@@ -64,21 +71,21 @@ class FakeBroker:
 class MemoryStore:
     def __init__(self):
         self.instruments: dict[str, Instrument] = {}
-        self.sector_codes: dict[str, str] = {}
+        self.saved_memberships: dict[str, list[str]] = {}
+        self.saved_group_types: dict[str, str] = {}
         self.candles: dict[str, list[Candle]] = {}
         self.runs: dict[int, dict] = {}
         self._next = 1
 
-    def upsert_sectors(self, sectors): ...
+    def upsert_sectors(self, sectors, group_types=None):
+        self.saved_group_types = dict(group_types or {})
     def upsert_instruments(self, instruments):
         for i in instruments:
             self.instruments[i.symbol] = i
-    def set_sector_codes(self, mapping):
-        # 실제 CollectionStore 계약과 동일: DB(=self.instruments)에 존재하는
-        # 심볼만 반영하고, 반영된 개수를 반환한다.
-        known = {s: c for s, c in mapping.items() if s in self.instruments}
-        self.sector_codes.update(known)
-        return len(known)
+    def replace_sector_memberships(self, memberships):
+        self.saved_memberships = {code: list(members)
+                                  for code, members in memberships.items()}
+        return sum(len(members) for members in memberships.values())
     def upsert_candles(self, candles):
         for c in candles:
             self.candles.setdefault(c.symbol, []).append(c)
@@ -113,7 +120,7 @@ async def test_정상_수집은_전_단계를_완료한다():
     p = svc.progress()
     assert p.status == "done" and p.total == 2 and p.failed == 0
     assert store.runs[p.run_id]["succeeded"] == 2
-    assert store.sector_codes == {"005930": "013", "000660": "013"}
+    assert store.saved_memberships == {"013": ["005930", "000660"]}
 
 
 @pytest.mark.anyio
@@ -223,15 +230,32 @@ async def test_인증_오류는_즉시_run_failed():
 
 
 @pytest.mark.anyio
-async def test_집계성_업종은_매핑에서_제외된다():
-    sectors = [
-        Sector(code="001", market="kospi", name="종합(KOSPI)"),
-        Sector(code="013", market="kospi", name="전기전자"),
-    ]
-    broker, store = FakeBroker(sectors=sectors), MemoryStore()
+async def test_전_그룹_멤버십_저장():
+    """집계 업종 포함 모든 그룹의 소속이 그대로 저장된다 (필터 없음)."""
+    sectors = [Sector("001", "kospi", "종합(KOSPI)"),
+              Sector("005", "kospi", "음식료/담배")]
+    members = {("001", "kospi"): ["A0001", "A0002"],
+              ("005", "kospi"): ["A0001"]}
+    broker = FakeBroker(sectors=sectors, members=members)
+    store = MemoryStore()
     svc = CollectionService(broker, store, markets=("kospi",))
     await svc.run()
-    assert store.sector_codes == {"005930": "013", "000660": "013"}
+    assert store.saved_memberships == {"001": ["A0001", "A0002"],
+                                       "005": ["A0001"]}
+    assert store.saved_group_types == {"001": "aggregate", "005": "industry"}
+
+
+@pytest.mark.anyio
+async def test_미지_업종코드_경고(caplog):
+    """분류 맵에 없는 코드는 unclassified로 저장되고 경고 로그를 남긴다."""
+    broker = FakeBroker(sectors=[Sector("777", "kospi", "신설업종")],
+                        members={("777", "kospi"): ["A0001"]})
+    store = MemoryStore()
+    svc = CollectionService(broker, store, markets=("kospi",))
+    with caplog.at_level(logging.WARNING):
+        await svc.run()
+    assert store.saved_group_types == {"777": "unclassified"}
+    assert any("unclassified sector" in r.message for r in caplog.records)
 
 
 @pytest.mark.anyio
@@ -284,7 +308,7 @@ async def test_부분_시장만_요청하면_비활성화를_건너뛴다(caplog
 @pytest.mark.anyio
 async def test_예상치_못한_예외도_run을_failed로_마감한다():
     class ExplodingStore(MemoryStore):
-        def upsert_sectors(self, sectors):
+        def upsert_sectors(self, sectors, group_types=None):
             raise RuntimeError("db exploded")
 
     broker, store = FakeBroker(), ExplodingStore()
@@ -295,26 +319,6 @@ async def test_예상치_못한_예외도_run을_failed로_마감한다():
     assert p.status == "failed"
     assert store.runs[p.run_id]["status"] == "failed"
     assert store.runs[p.run_id]["error"] == "unexpected: RuntimeError"
-
-
-@pytest.mark.anyio
-async def test_섹터_매핑_편중시_캐너리_경고를_남긴다(caplog):
-    # 단일 업종(013)에 두 심볼이 모두 매핑 — 100% 편중이므로 캐너리 발동
-    broker = FakeBroker(sectors=[Sector(code="013", market="kospi", name="전기전자")])
-    store = MemoryStore()
-    svc = CollectionService(broker, store, markets=("kospi",))
-    with caplog.at_level(logging.WARNING):
-        await svc.run()
-    assert any("sector mapping canary" in r.message for r in caplog.records)
-
-
-def test_MemoryStore_set_sector_codes는_미존재_심볼을_건너뛴다():
-    store = MemoryStore()
-    store.instruments["005930"] = Instrument(symbol="005930", name="삼성전자",
-                                             market="kospi", instrument_type="보통주")
-    result = store.set_sector_codes({"005930": "001", "999999": "001"})
-    assert result == 1
-    assert store.sector_codes == {"005930": "001"}
 
 
 @pytest.mark.anyio
@@ -349,7 +353,7 @@ async def test_start는_완료_후_재시작을_허용한다():
 @pytest.mark.anyio
 async def test_start된_태스크의_미처리_예외는_done_callback이_로깅한다(caplog):
     class ExplodingStore(MemoryStore):
-        def upsert_sectors(self, sectors):
+        def upsert_sectors(self, sectors, group_types=None):
             raise RuntimeError("db exploded")
 
     broker, store = FakeBroker(), ExplodingStore()

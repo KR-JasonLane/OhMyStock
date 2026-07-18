@@ -3,7 +3,6 @@ Store 호출은 동기이므로 asyncio.to_thread로 이벤트 루프를 막지 
 
 import asyncio
 import logging
-from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date
@@ -11,6 +10,7 @@ from datetime import date
 from app.core.market_calendar import previous_weekday
 from app.domain.broker import BrokerPort
 from app.domain.errors import AuthError, BrokerError, RateLimitError
+from app.domain.sector_classification import UNCLASSIFIED, classify_sector
 
 logger = logging.getLogger(__name__)
 
@@ -30,22 +30,9 @@ def _log_task_exception(task: asyncio.Task) -> None:
         logger.error("collection task failed: %s", exc)
 
 
-# 집계성 업종명 마커 — 실측 근거: 종합(001)이 시장 전체 2,477종목을 포함해 개별
-# 업종과 성격이 다름 (docs/STATUS.md Phase 3 PRE-GATE 참고). 이름 문자열 매칭은
-# 휴리스틱이며 코드값 기반 확정은 Phase 3 PRE-GATE에서 다룬다.
-_AGGREGATE_SECTOR_NAME_MARKERS = ("종합", "대형주", "중형주", "소형주")
-
-# 실측으로 확정된 집계 업종 코드 — 001(종합 KOSPI), 101(종합 KOSDAQ). 이름 마커보다
-# 신뢰도가 높은 1차 필터.
-_AGGREGATE_SECTOR_CODES = frozenset({"001", "101"})
-
 # 상장폐지 반영(deactivate_missing) 실행 전제 — 이 전체 시장 집합과 markets가
 # 정확히 일치할 때만 반영한다 (아래 __init__ docstring 참고).
 _ALL_MARKETS = frozenset({"kospi", "kosdaq", "etf"})
-
-# 매핑 캐너리 임계값 — 단일 업종코드가 매핑의 이 비율을 넘으면 집계 업종 누출
-# 의심으로 경고만 남긴다 (중단하지 않음, 휴리스틱).
-_CANARY_SHARE_THRESHOLD = 0.5
 
 
 @dataclass(frozen=True)
@@ -160,21 +147,24 @@ class CollectionService:
 
             self._set(run_id, "running", "sectors", 0, 0, 0)
             sectors = await self._broker.list_sectors()
-            await asyncio.to_thread(self._store.upsert_sectors, sectors)
-            mapping: dict[str, str] = {}
-            skipped_sectors = 0
+            group_types = {s.code: classify_sector(s.code) for s in sectors}
+            for s in sectors:
+                if group_types[s.code] == UNCLASSIFIED:
+                    # 분류 맵(2026-07-18 실측 65개)에 없는 신설 코드 — 소비
+                    # 제외되므로 동작은 안전하나 맵 갱신이 필요하다는 신호.
+                    logger.warning("unclassified sector code %s (%s) - "
+                                   "update sector_classification map",
+                                   s.code, s.name)
+            await asyncio.to_thread(self._store.upsert_sectors, sectors,
+                                    group_types)
+            memberships: dict[str, list[str]] = {}
             for sector in sectors:
-                if (sector.code in _AGGREGATE_SECTOR_CODES
-                        or any(m in sector.name for m in _AGGREGATE_SECTOR_NAME_MARKERS)):
-                    skipped_sectors += 1
-                    continue
-                for symbol in await self._broker.list_sector_members(
-                        sector.code, sector.market):
-                    mapping[symbol] = sector.code
-            logger.info("skipped %d aggregate sectors during mapping", skipped_sectors)
-            self._warn_if_sector_mapping_skewed(mapping)
-            n = await asyncio.to_thread(self._store.set_sector_codes, mapping)
-            logger.info("sector mapping applied to %d symbols", n)
+                memberships[sector.code] = await self._broker.list_sector_members(
+                    sector.code, sector.market)
+            n = await asyncio.to_thread(
+                self._store.replace_sector_memberships, memberships)
+            logger.info("stored %d sector membership rows across %d groups",
+                        n, len(sectors))
 
             symbols = await asyncio.to_thread(self._store.list_symbols)
             total = len(symbols)
@@ -227,21 +217,6 @@ class CollectionService:
             raise
         finally:
             self._running = False
-
-    def _warn_if_sector_mapping_skewed(self, mapping: dict[str, str]) -> None:
-        """단일 업종코드가 매핑의 과반을 차지하면 집계 업종 누출 의심 경고.
-
-        중단하지 않는다 — 코드/이름 필터가 놓친 케이스를 조기 발견하기 위한
-        캐너리일 뿐, 휴리스틱 확정은 Phase 3 PRE-GATE에서 다룬다.
-        """
-        if not mapping:
-            return
-        code, count = Counter(mapping.values()).most_common(1)[0]
-        share = count / len(mapping)
-        if share > _CANARY_SHARE_THRESHOLD:
-            logger.warning(
-                "sector mapping canary: %s covers %.0f%% - possible aggregate leak",
-                code, share * 100)
 
     def _set(self, run_id: int, status: str, stage: str,
              done: int, total: int, failed: int) -> None:
