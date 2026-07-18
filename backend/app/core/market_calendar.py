@@ -19,8 +19,10 @@ def is_market_hours(now: datetime | None = None) -> bool:
 
 def previous_weekday(now: datetime | None = None) -> date:
     """가장 최근의 평일 날짜 (오늘이 평일이면 오늘). 휴장일 캘린더 없는 근사 —
-    공휴일에는 실제 최신 거래일보다 늦은 날짜를 반환할 수 있고, 그 경우 스킵이
-    풀려 전 종목을 재수집한다(멱등이라 안전, 비용만 증가)."""
+    실제 최신 거래일보다 늦은 날짜를 반환할 수 있는 경우(공휴일, 그리고 평일
+    당일 봉이 아직 없는 시간대의 실행 등)에는 스킵이 풀려 전 종목을 재수집한다
+    (멱등이라 안전, 비용만 증가). Phase 6 스케줄러가 거래일 캘린더와 야간 실행을
+    강제하면 이 과잉 재수집 클래스는 소멸한다."""
     t = (now or datetime.now(KST)).date()
     while t.weekday() >= 5:
         t -= timedelta(days=1)

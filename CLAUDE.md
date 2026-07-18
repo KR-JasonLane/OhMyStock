@@ -217,11 +217,16 @@ evidence trail.
   instruments (post `marketCode`-filter, deduplicated across kospi/kosdaq/etf);
   full daily-candle collection took **~67 minutes** at the ~1 req/s per-TR rate
   limit (22:18–23:25 KST); **2,120,535 candle rows** written; 3,886 succeeded / 1
-  failed (`012510` above). Idempotent rerun (resume-skip via a single bulk
-  `CollectionStore.latest_candle_dates` query, compared per symbol against a
-  calendar-derived reference date — `market_calendar.previous_weekday`, not a
-  running cursor anchored on the first symbol's response) completed in
-  **~2 minutes** with an unchanged candle count and the same single failure.
+  failed (`012510` above). Idempotent rerun completed in **~2 minutes** with an
+  unchanged candle count and the same single failure. (Attribution note: the
+  ~2-minute rerun was measured on the original resume-skip implementation, whose
+  reference date was anchored on the first symbol's response; that mechanism was
+  later replaced — commit `10dfa8b` — by a calendar-derived reference
+  (`market_calendar.previous_weekday` compared per symbol against a single bulk
+  `CollectionStore.latest_candle_dates` query) after review found the anchor
+  defective. The replacement is covered by regression tests; the measured rerun
+  time is expected to carry over since the skip decision per symbol is
+  unchanged in the all-fresh case, but has not been re-measured.)
 
 Sources: https://openapi.kiwoom.com/guide/index , https://github.com/younghwan91/kiwoom-rest-api,
 live verification against `mockapi.kiwoom.com` (2026-07-17, Phase 1 implementation;
