@@ -1,5 +1,13 @@
-"""네이버 뉴스 검색(`/v1/search/news.json`) 클라이언트 — 도메인의 `NewsPort`의
+"""네이버 뉴스 검색 클라이언트 — 도메인의 `NewsPort`의
 구조적 구현(명시적 상속 없음 — kiwoom 어댑터 관례).
+
+**NAVER API HUB**(`naverapihub.apigw.ntruss.com`)를 호출한다 — 구
+오픈 API(`openapi.naver.com/v1/search/news.json`, `X-Naver-Client-*`
+헤더)가 아니다. 두 체계는 키가 호환되지 않는다: API HUB에서 발급한 키
+(secret 40자)로 구 엔드포인트를 호출하면 401(errorCode 024)이 난다 —
+Phase 4 수용 검증(2026-07-18)에서 실측. 응답 본문 형식(items/title/
+originallink/link/description/pubDate, `<b>` 태그·HTML 엔티티 포함)은
+두 체계가 동일하고, format 미지정 시 기본이 JSON임도 실측으로 확인.
 
 kiwoom `client.py`와 동일한 소유권 계약을 따른다: 이 클래스가 생성한
 `httpx.AsyncClient`는 이 클래스가 `aclose()`로 닫는다. 외부에서 주입된
@@ -17,8 +25,8 @@ from pydantic import SecretStr
 
 from app.domain.analysis.ports import Headline, NewsError
 
-_BASE_URL = "https://openapi.naver.com"
-_SEARCH_PATH = "/v1/search/news.json"
+_BASE_URL = "https://naverapihub.apigw.ntruss.com"
+_SEARCH_PATH = "/search/v1/news"
 _TAG_RE = re.compile(r"</?b>")
 
 
@@ -44,8 +52,8 @@ class NaverNewsClient:
 
     async def search_headlines(self, query: str, limit: int) -> list[Headline]:
         headers = {
-            "X-Naver-Client-Id": self._client_id.get_secret_value(),
-            "X-Naver-Client-Secret": self._client_secret.get_secret_value(),
+            "X-NCP-APIGW-API-KEY-ID": self._client_id.get_secret_value(),
+            "X-NCP-APIGW-API-KEY": self._client_secret.get_secret_value(),
         }
         params = {"query": query, "display": limit, "sort": "date"}
         try:

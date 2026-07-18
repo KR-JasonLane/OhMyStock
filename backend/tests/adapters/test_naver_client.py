@@ -5,7 +5,8 @@ from pydantic import SecretStr
 from app.adapters.naver.client import NaverNewsClient
 from app.domain.analysis.ports import NewsError, NewsPort
 
-URL = "https://openapi.naver.com/v1/search/news.json"
+# NAVER API HUB — 구 openapi.naver.com이 아니다 (어댑터 docstring 참고).
+URL = "https://naverapihub.apigw.ntruss.com/search/v1/news"
 
 
 def make_client():
@@ -29,7 +30,8 @@ async def test_헤드라인_매핑과_태그제거():
     assert out[0].url == "https://news.example/1"
     assert out[1].url == "https://naver/2"        # originallink 없으면 link
     req = route.calls[0].request
-    assert req.headers["X-Naver-Client-Id"] == "cid"
+    assert req.headers["X-NCP-APIGW-API-KEY-ID"] == "cid"
+    assert req.headers["X-NCP-APIGW-API-KEY"] == "csec"
     assert "display=5" in str(req.url) and "sort=date" in str(req.url)
     await client.aclose()
 
