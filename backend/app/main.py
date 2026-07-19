@@ -30,12 +30,21 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
 
+logger = logging.getLogger(__name__)
+
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        if settings.api_write_token is None:
+            # 쓰기 엔드포인트(/collect,/score,/analyze)가 인증 없이 열려 있음을
+            # 기동 시 1회 경고 — 모의투자 로컬 개발 편의이며, 실전 전환
+            # 게이트에서는 api_write_token 설정을 필수로 승격한다.
+            logger.warning(
+                "api_write_token 미설정 - 쓰기 엔드포인트(/collect,/score,/analyze)가 "
+                "인증 없이 열려 있음 (실전 전환 전 필수 설정)")
         app.state.engine = create_db_engine(settings)
         try:
             app.state.broker = KiwoomBroker(KiwoomHttpClient(settings))
@@ -91,10 +100,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(title="OhMyStock Backend", lifespan=lifespan)
     app.state.settings = settings
-    # 호스트 네이티브 Electron 렌더러(dev 서버 포함)의 localhost 접근 허용
+    # 호스트 네이티브 Electron 렌더러(dev 서버 포함)의 localhost 접근만 허용
+    # (P3/P4 보안 패널 지적: allow_origins=["*"]는 브라우저發 drive-by 트리거를
+    # 이론상 허용 — 사용자 결정 2026-07-18 #24). allow_headers=["*"]는
+    # X-API-Key를 포함한 모든 헤더를 허용하며 오리진 제한과 독립적이다.
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=[o.strip() for o in settings.cors_origins.split(",") if o.strip()],
         allow_methods=["*"],
         allow_headers=["*"],
     )

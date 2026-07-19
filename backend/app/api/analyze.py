@@ -1,11 +1,13 @@
 import asyncio
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
+
+from app.api.security import require_write_token
 
 router = APIRouter()
 
 
-@router.post("/analyze", status_code=202)
+@router.post("/analyze", status_code=202, dependencies=[Depends(require_write_token)])
 async def start_analysis(request: Request) -> dict:
     task = request.app.state.analysis.start()
     if task is None:

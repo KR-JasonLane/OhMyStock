@@ -1,12 +1,14 @@
 import asyncio
 import json
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
+
+from app.api.security import require_write_token
 
 router = APIRouter()
 
 
-@router.post("/score", status_code=202)
+@router.post("/score", status_code=202, dependencies=[Depends(require_write_token)])
 async def start_scoring(request: Request) -> dict:
     if request.app.state.collection.is_running():
         # 수집이 소속/상태/봉을 갱신하는 도중의 반쪽 데이터 읽기 방지 (스펙 §6)

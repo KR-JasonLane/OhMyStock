@@ -5,6 +5,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.api.analyze import router
+from app.core.config import Settings
 from app.domain.analysis.service import AnalysisProgress
 
 
@@ -31,6 +32,12 @@ def make_client(analysis=None) -> TestClient:
     app = FastAPI()
     app.include_router(router)
     app.state.analysis = analysis or FakeAnalysis()
+    # require_write_token 의존성이 app.state.settings를 읽는다 — 토큰
+    # 미설정이면 차단하지 않으므로 이 미니 앱의 기존 기대 동작은 그대로다
+    # (보호 자체의 동작 검증은 test_api_security.py).
+    app.state.settings = Settings(_env_file=None, kiwoom_app_key="AK",
+                                  kiwoom_secret_key="SK",
+                                  database_url="sqlite+pysqlite:///:memory:")
     return TestClient(app)
 
 

@@ -1,7 +1,8 @@
 import logging
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 
+from app.api.security import require_write_token
 from app.core.market_calendar import is_market_hours
 
 logger = logging.getLogger(__name__)
@@ -11,7 +12,7 @@ router = APIRouter()
 _MARKET_HOURS_WARNING = "market-hours run may store unconfirmed candles"
 
 
-@router.post("/collect", status_code=202)
+@router.post("/collect", status_code=202, dependencies=[Depends(require_write_token)])
 async def start_collection(request: Request) -> dict:
     if request.app.state.scoring.is_running():
         # score.py의 대칭 가드 — 스코어링이 store를 읽는 도중 수집이 소속/상태/
