@@ -18,6 +18,11 @@ class AnalysisConfig:
     llm_timeout_s: float = 120.0
     score_max_age_days: int = 3
     ollama_base_url: str = "http://host.docker.internal:11434"
+    # 트레이더 프롬프트의 거래비용 문구가 참조하는 SSOT(왕복 수수료·거래세,
+    # %p 단위) — 하드코딩 프로즈로 따로 적으면 Phase 5 실비용 설정과
+    # 소리 없이 어긋날 수 있어 여기 한 곳만 값을 갖는다. 값 변경은 스펙
+    # §5-5 갱신과 함께(P5pre-T2, 트레이더 패널).
+    round_trip_cost_pct: float = 0.25
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), sort_keys=True, ensure_ascii=False)

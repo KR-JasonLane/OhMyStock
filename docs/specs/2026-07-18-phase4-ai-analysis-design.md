@@ -117,7 +117,7 @@ warnings)`. 노드 3개 선형 연결. LLM 호출은 economist/trader만.
 | max_picks | 5 | news_per_symbol | 5 |
 | market_keywords | ("코스피","코스닥","증시") | parse_retries | 2 |
 | llm_timeout_s | 120 (호출당) | score_max_age_days | 3 |
-| ollama_base_url | `http://host.docker.internal:11434` | — | — |
+| ollama_base_url | `http://host.docker.internal:11434` | round_trip_cost_pct | 0.25 (%p, 트레이더 프롬프트 비용 문구 SSOT) |
 
 ## 6. 저장 스키마 (마이그레이션 0005, insert-only, run_id FK는 CASCADE)
 

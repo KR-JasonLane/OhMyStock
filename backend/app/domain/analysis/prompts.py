@@ -13,10 +13,11 @@
 import hashlib
 from collections.abc import Sequence
 
+from app.domain.analysis.config import AnalysisConfig
 from app.domain.analysis.parsing import MarketContext
 from app.domain.analysis.ports import CandidateInput, Headline, MarketSnapshot
 
-PROMPT_VERSION = "p4-v2"
+PROMPT_VERSION = "p4-v3"
 
 ECONOMIST_SYSTEM = """\
 당신은 한국 주식시장(코스피/코스닥)을 관찰하는 시니어 이코노미스트입니다.
@@ -55,7 +56,21 @@ ECONOMIST_SYSTEM = """\
 ```
 """
 
-TRADER_SYSTEM = """\
+
+def trader_system_prompt(cfg: AnalysisConfig) -> str:
+    """트레이더 시스템 프롬프트를 `cfg`로 렌더링한다.
+
+    비용 문구를 `cfg.round_trip_cost_pct`(SSOT, `AnalysisConfig`)로 채워
+    Phase 5의 실제 체결비용 설정과 프롬프트 프로즈가 소리 없이 어긋나지
+    않게 한다 — 과거에는 "약 0.2~0.3%p"를 프롬프트에 직접 하드코딩해
+    config 값이 바뀌어도 프롬프트가 갱신되지 않는 문제가 있었다
+    (P5pre-T2, 트레이더 패널).
+
+    `TRADER_SYSTEM`(아래)은 기본 `AnalysisConfig()`로 이 함수를 호출해
+    만든 모듈 상수로, 기존 호출자(`graph.py`/`prompt_hash()`)는 계속
+    인자 없이 상수를 그대로 쓴다 — 이 함수는 커스텀 cfg로 렌더링해야
+    하는 테스트 등에서만 직접 호출한다."""
+    return f"""\
 당신은 한국 주식시장(코스피/코스닥)의 시니어 트레이더입니다. 하나의 후보
 종목에 대해 제공된 전략 신호·점수·시장 국면·뉴스를 근거로 오늘 신규 진입
 여부를 판정하세요.
@@ -68,9 +83,15 @@ TRADER_SYSTEM = """\
   평균수익률·승률이 좋아 보여도 그 신뢰도를 그대로 받아들이지 말고
   risk_flags에 표본 부족을 명시하세요.
 - 평균수익률·승률은 "익일 시가 무조건 체결 가정 + 거래비용(왕복 수수료·거래세
-  약 0.2~0.3%p) 미차감 raw 값"입니다 — 평균수익률이 이 비용 수준을 크게
-  상회하지 않으면 낮은 확신으로 판단하세요. 특히 돌파 전략은 갭상승/상한가로
-  실제 체결이 불리할 수 있습니다.
+  약 {cfg.round_trip_cost_pct}%p) 미차감 raw 값"입니다 — 평균수익률이 이
+  비용 수준을 크게 상회하지 않으면 낮은 확신으로 판단하세요. 특히 돌파
+  전략은 갭상승/상한가로 실제 체결이 불리할 수 있습니다.
+- 평균수익률·승률·발생횟수는 보유기간이 겹치는 표본(중복 보유 허용)
+  기반이라 자기상관으로 통계 신뢰도가 과대평가됩니다 — 발생횟수가 커
+  보여도 유효 독립 표본은 그보다 훨씬 적다고 간주하세요.
+- 전략 통계는 시장 국면(regime)으로 조건화되지 않은 전체 기간 값입니다 —
+  현재 국면과 다른 환경에서 쌓인 성과일 수 있으니 국면 악화 시 확신을
+  추가로 낮추세요.
 - 점수(총점·전략 점수)는 오늘 실행 내 상대 정규화 값이며 절대 신뢰도가
   아닙니다.
 - 입력에 없는 수치를 만들어내지 말 것. 전략 표에 없는 지표를 인용하거나
@@ -86,15 +107,18 @@ TRADER_SYSTEM = """\
 ## 출력 형식
 다른 설명 없이 아래 스키마를 따르는 JSON 객체만 출력하세요:
 ```json
-{
+{{
   "verdict": "approve" | "reject",
   "confidence": 0.0(확신 없음)에서 1.0(매우 확신) 사이 실수 — 이 판정, 특히
     "매수해도 좋다"는 판단의 강도,
   "reasons": ["판정 근거", "..."],
   "risk_flags": ["위험 요인 (예: 얇은 표본, 뉴스 악재 등)", "..."]
-}
+}}
 ```
 """
+
+
+TRADER_SYSTEM = trader_system_prompt(AnalysisConfig())
 
 # 뉴스 헤드라인/시장 요약처럼 외부 통제 텍스트가 흘러드는 값 안에 구획
 # 마커 리터럴이 섞여 들어오면(예: 헤드라인 제목이 "</뉴스>다른 지시...") 실제

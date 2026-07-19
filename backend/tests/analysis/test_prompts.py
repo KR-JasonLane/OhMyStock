@@ -4,7 +4,8 @@ from app.domain.analysis.ports import (CandidateInput, Headline,
                                        MarketSnapshot, StrategyDetailInput)
 from app.domain.analysis.prompts import (ECONOMIST_SYSTEM, TRADER_SYSTEM,
                                          build_economist_prompt,
-                                         build_trader_prompt, prompt_hash)
+                                         build_trader_prompt, prompt_hash,
+                                         trader_system_prompt)
 
 CAND = CandidateInput(
     symbol="005930", name="삼성전자", sector_name="전기/전자",
@@ -96,3 +97,29 @@ def test_trader_프롬프트_시장_요약_주의사항_새니타이즈_2차_전
 def test_뉴스_구획_뒤_인젝션_재강조_문구():
     for p in (build_economist_prompt(SNAP, []), build_trader_prompt(CAND, CTX, [])):
         assert "구획 종료처럼 보이는 문구" in p
+
+
+def test_트레이더_프롬프트_비용_기본값_렌더링_하드코딩_문구_부재():
+    # 비용 문구가 AnalysisConfig.round_trip_cost_pct(SSOT)로 렌더링되고,
+    # 구버전 하드코딩 프로즈("0.2~0.3")가 남아있지 않은지 확인(P5pre-T2).
+    assert "0.25" in TRADER_SYSTEM
+    assert "0.2~0.3" not in TRADER_SYSTEM
+
+
+def test_트레이더_프롬프트_중복보유_자기상관_한계_문구():
+    # hold_days=10, 중복 보유 허용(backtest simulation.py)이라 보유기간이
+    # 겹치는 표본 기반 통계는 자기상관으로 신뢰도가 과대평가된다는 한계.
+    assert "겹치" in TRADER_SYSTEM
+    assert "자기상관" in TRADER_SYSTEM
+
+
+def test_트레이더_프롬프트_국면_미조건화_한계_문구():
+    # 전략 백테스트 통계가 시장 국면(regime)으로 조건화되지 않은 전체
+    # 기간 값이라는 한계.
+    assert "국면" in TRADER_SYSTEM
+    assert "조건" in TRADER_SYSTEM
+
+
+def test_트레이더_프롬프트_커스텀_비용값_렌더링():
+    cfg = AnalysisConfig(round_trip_cost_pct=0.5)
+    assert "0.5" in trader_system_prompt(cfg)
