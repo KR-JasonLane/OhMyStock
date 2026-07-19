@@ -120,3 +120,18 @@ def test_synthesize_advice_0이면_빈_리스트():
     market = MarketContext("risk_off", "s", 0, ())
     verdicts = {"AAA111": TraderVerdict("approve", 1.0, (), ())}
     assert synthesize(market, verdicts, [cand("AAA111", 0.9)], AnalysisConfig()) == ()
+
+
+@pytest.mark.anyio
+async def test_주입된_cfg의_round_trip_cost_pct가_trader_프롬프트에_반영된다():
+    """T2 패널 4인 공통 지적 회귀 테스트 — 과거에는 traders 노드가 모듈 상수
+    TRADER_SYSTEM(기본 AnalysisConfig()로 import 시점에 한 번 렌더링됨)을
+    그대로 썼기 때문에, 주입된 cfg.round_trip_cost_pct가 실제 LLM 프롬프트에
+    반영되지 않았다 — analysis_runs.config에는 주입값이 스냅샷되는데 실제
+    LLM 입력은 기본값(0.25%p)인 채로 어긋나 감사(audit) 짝이 깨졌다."""
+    cfg = AnalysisConfig(parse_retries=1, round_trip_cost_pct=0.5)
+    llm = ScriptedLlm([ECON_OK, approve(0.9)])
+    await AnalysisPipeline(llm, cfg).run(SNAP, [cand("AAA111", 0.9)], [], {})
+    trader_system, _ = llm.calls[1]  # economist가 첫 호출, trader가 두 번째
+    assert "0.5" in trader_system
+    assert "0.25" not in trader_system

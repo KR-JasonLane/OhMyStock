@@ -215,7 +215,11 @@ def build_trader_prompt(candidate: CandidateInput, market: MarketContext,
 
 def prompt_hash() -> str:
     """프롬프트 버전 식별자(12자리) — analysis_runs.prompt_hash에 기록해
-    어떤 프롬프트 버전으로 생성된 결과인지 재현 가능하게 한다."""
+    어떤 프롬프트 버전으로 생성된 결과인지 재현 가능하게 한다.
+
+    prompt_hash는 프롬프트 템플릿 버전 지문이다(기본 cfg로 렌더된 텍스트
+    기준) — 런별 실제 프롬프트는 (prompt_hash, analysis_runs.config) 쌍으로
+    재현된다."""
     digest = hashlib.sha256(
         (PROMPT_VERSION + ECONOMIST_SYSTEM + TRADER_SYSTEM).encode()
     ).hexdigest()

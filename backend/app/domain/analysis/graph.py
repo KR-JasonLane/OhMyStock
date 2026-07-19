@@ -21,9 +21,10 @@ from app.domain.analysis.parsing import (MarketContext, ParseError,
                                          parse_trader_verdict)
 from app.domain.analysis.ports import (CandidateInput, Headline, LlmPort,
                                        MarketSnapshot)
-from app.domain.analysis.prompts import (ECONOMIST_SYSTEM, TRADER_SYSTEM,
+from app.domain.analysis.prompts import (ECONOMIST_SYSTEM,
                                          build_economist_prompt,
-                                         build_trader_prompt)
+                                         build_trader_prompt,
+                                         trader_system_prompt)
 
 _T = TypeVar("_T")
 
@@ -105,6 +106,11 @@ class AnalysisPipeline:
 
         self._llm = llm
         self._cfg = cfg
+        # 왜: 주입된 cfg가 프롬프트를 구동해야 config 스냅샷(audit)과 실제
+        # LLM 입력이 일치한다(T2 패널 4인 공통 지적) — 모듈 상수
+        # TRADER_SYSTEM은 기본 AnalysisConfig()로 고정 렌더링되어 있어,
+        # non-default round_trip_cost_pct가 프롬프트에 반영되지 않았다.
+        self._trader_system = trader_system_prompt(cfg)
 
         graph = StateGraph(_State)
         graph.add_node("economist", self._economist_node)
@@ -150,7 +156,7 @@ class AnalysisPipeline:
             headlines = state["symbol_headlines"].get(candidate.symbol, [])
             prompt = build_trader_prompt(candidate, market, headlines)
             verdict = await self._generate_with_retry(
-                TRADER_SYSTEM, prompt, parse_trader_verdict)
+                self._trader_system, prompt, parse_trader_verdict)
             if verdict is None:
                 verdict = parse_failure_reject()
                 warnings.append(f"trader-parse-failure:{candidate.symbol}")
