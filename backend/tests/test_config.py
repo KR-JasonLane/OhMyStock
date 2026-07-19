@@ -43,7 +43,35 @@ def test_필수_환경변수_누락시_즉시_실패한다(monkeypatch):
 def test_mock_false면_mode는_real(monkeypatch):
     _set_env(monkeypatch)
     monkeypatch.setenv("KIWOOM_MOCK", "false")
+    # 실전 모드는 API_WRITE_TOKEN 필수(아래 검증기 테스트 참고) — 이 테스트는
+    # mode 프로퍼티만 확인하므로 더미 토큰을 채워 검증기를 통과시킨다.
+    monkeypatch.setenv("API_WRITE_TOKEN", "dummy-token")
     assert Settings(_env_file=None).mode == "real"
+
+
+def test_실전_모드에서_쓰기_토큰_없으면_즉시_실패한다(monkeypatch):
+    _set_env(monkeypatch)
+    monkeypatch.setenv("KIWOOM_MOCK", "false")
+    monkeypatch.delenv("API_WRITE_TOKEN", raising=False)
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)
+
+
+def test_실전_모드에서_쓰기_토큰_있으면_통과한다(monkeypatch):
+    _set_env(monkeypatch)
+    monkeypatch.setenv("KIWOOM_MOCK", "false")
+    monkeypatch.setenv("API_WRITE_TOKEN", "real-token")
+    s = Settings(_env_file=None)
+    assert s.mode == "real"
+    assert s.api_write_token.get_secret_value() == "real-token"
+
+
+def test_모의_모드에서는_쓰기_토큰_없어도_통과한다(monkeypatch):
+    _set_env(monkeypatch)
+    monkeypatch.delenv("API_WRITE_TOKEN", raising=False)
+    s = Settings(_env_file=None)
+    assert s.mode == "mock"
+    assert s.api_write_token is None
 
 
 def test_naver_키는_옵셔널(monkeypatch):

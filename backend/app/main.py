@@ -104,6 +104,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # (P3/P4 보안 패널 지적: allow_origins=["*"]는 브라우저發 drive-by 트리거를
     # 이론상 허용 — 사용자 결정 2026-07-18 #24). allow_headers=["*"]는
     # X-API-Key를 포함한 모든 헤더를 허용하며 오리진 제한과 독립적이다.
+    # ⚠️ CORS ≠ CSRF 방어: 이 오리진 allowlist는 브라우저의 "응답 읽기"만
+    # 차단한다 — 커스텀 헤더 없는 단순 요청(폼 POST 등)은 오리진이
+    # allowlist 밖이어도 서버까지 도달하므로, 토큰(API_WRITE_TOKEN) 미설정
+    # 상태에서는 CSRF성 쓰기 트리거가 여전히 가능하다. 실질적인 쓰기 실행
+    # 차단은 security.py의 X-API-Key 검증이 전담한다(실전 전환 시 Settings
+    # validator가 토큰 설정을 필수로 강제).
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[o.strip() for o in settings.cors_origins.split(",") if o.strip()],
