@@ -139,7 +139,13 @@ class AnalysisStore:
     def finish_run(self, run_id: int, status: str, regime: str | None = None,
                    market_summary: str | None = None,
                    warnings: str | None = None,
-                   failure_reason: str | None = None) -> None:
+                   failure_reason: str | None = None,
+                   max_picks_advice: int | None = None) -> None:
+        """max_picks_advice는 맨 뒤에 기본값을 둔 채로 추가한다 — `_fail`이
+        기존처럼 6개 위치 인자(run_id, status, regime, market_summary,
+        warnings, failure_reason)만 넘기는 호출을 그대로 유지해도 깨지지
+        않아야 한다(호출부가 실패 런에는 advice를 채우지 않는 것이 의도이기도
+        함 — models.py의 nullable 사유 참고)."""
         with self._sessions.begin() as session:
             run = session.get(AnalysisRunRow, run_id)
             if run is None:
@@ -150,6 +156,7 @@ class AnalysisStore:
             run.market_summary = market_summary
             run.warnings = warnings
             run.failure_reason = failure_reason
+            run.max_picks_advice = max_picks_advice
 
     def save_results(self, run_id: int, result: AnalysisResult,
                      news: dict[str, list[Headline]]) -> None:
@@ -215,13 +222,23 @@ class AnalysisStore:
     def latest_results(self) -> dict | None:
         """최근 succeeded 실행의 결과 (API 응답 본문). 뉴스 스냅샷 자체는
         (헤드라인 원문 다수라) 크고 API 응답에 부적합하므로 개수만 포함한다
-        — 상세 복기가 필요하면 analysis_news 테이블을 직접 조회한다."""
+        — 상세 복기가 필요하면 analysis_news 테이블을 직접 조회한다.
+
+        score_reference_date: 이 분석 런이 근거한 스코어링 런(score_runs.
+        reference_date)을 JOIN으로 함께 가져와 노출한다 — 소비자(Phase 5
+        트레이딩 엔진/Phase 7 대시보드)가 "이 픽이 어느 시장일자 데이터
+        기준인지"를 score_runs를 별도 조회하지 않고도 알 수 있게 하는 것이
+        목적이다 (P4-T6 트레이더 패널 지적: 기준일 없이는 며칠 지난 픽을
+        오늘 것으로 오인할 수 있음)."""
         with self._sessions() as session:
-            run = session.scalars(
-                select(AnalysisRunRow).where(AnalysisRunRow.status == "succeeded")
+            row = session.execute(
+                select(AnalysisRunRow, ScoreRunRow.reference_date)
+                .join(ScoreRunRow, AnalysisRunRow.score_run_id == ScoreRunRow.id)
+                .where(AnalysisRunRow.status == "succeeded")
                 .order_by(AnalysisRunRow.id.desc()).limit(1)).first()
-            if run is None:
+            if row is None:
                 return None
+            run, score_reference_date = row
             verdicts = session.scalars(
                 select(AnalysisVerdictRow).where(AnalysisVerdictRow.run_id == run.id)
                 .order_by(AnalysisVerdictRow.symbol)).all()
@@ -263,6 +280,8 @@ class AnalysisStore:
                 "market_summary": run.market_summary,
                 "warnings": run.warnings,
                 "failure_reason": run.failure_reason,
+                "max_picks_advice": run.max_picks_advice,
+                "score_reference_date": score_reference_date.isoformat(),
                 "picks": [{"symbol": v.symbol, "rank": v.pick_rank} for v in picks],
                 "verdicts": verdicts_out,
                 "news_count": news_count,

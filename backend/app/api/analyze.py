@@ -25,9 +25,14 @@ async def analysis_status(request: Request) -> dict:
     # stage="economist"는 LLM 파이프라인 구간(이코노미스트+트레이더 노드)
     # 전체를 가리킨다(스펙 §7 addendum) — 소비자는 stage를 세밀한 진행률이
     # 아니라 거친 단계 표시로만 다뤄야 한다.
+    # started_at/finished_at은 None 허용으로 항상 포함한다(failure_reason과
+    # 달리 조건부 생략하지 않음) — 소비자가 "며칠 지난 succeeded 런"을
+    # "방금 끝난 것"으로 오인하지 않게 신선도를 판별할 수 있어야 한다
+    # (T1, P4 트레이더 패널 지적).
     body = {"run_id": progress.run_id, "status": progress.status,
             "stage": progress.stage, "done": progress.done,
-            "total": progress.total}
+            "total": progress.total, "started_at": progress.started_at,
+            "finished_at": progress.finished_at}
     if progress.failure_reason is not None:
         body["failure_reason"] = progress.failure_reason
     return body

@@ -193,7 +193,7 @@ def test_run_라이프사이클과_결과_왕복(engine):
     }
     store.save_results(run_id, result, news)
     store.finish_run(run_id, "succeeded", regime="neutral", market_summary="관망 우세",
-                     warnings="w1; w2")
+                     warnings="w1; w2", max_picks_advice=3)
 
     latest = store.latest_results()
     assert latest["run_id"] == run_id
@@ -203,6 +203,12 @@ def test_run_라이프사이클과_결과_왕복(engine):
     assert latest["regime"] == "neutral"
     assert latest["market_summary"] == "관망 우세"
     assert latest["warnings"] == "w1; w2"
+    # T1: economist의 max_picks_advice가 저장·왕복된다 (P4 트레이더 패널 —
+    # "approve는 있는데 picks가 비어도 DB만으로 감사 불가" 지적).
+    assert latest["max_picks_advice"] == 3
+    # T1: 스코어링 기준일이 별도 조회 없이 노출된다 — _seed_score_run 기본
+    # reference_date(date(2026, 7, 17))와 실제 일치하는지 단언.
+    assert latest["score_reference_date"] == date(2026, 7, 17).isoformat()
     # SECURITY 게이트 (T6): create_run에 넘긴 config_json('{"k": 1}')이
     # latest_results() 응답에 그대로 노출되면 안 된다 — 여기서 실제로
     # config_json이 저장된 run에 대해 확인해야 회귀를 잡을 수 있다

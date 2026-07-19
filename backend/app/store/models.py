@@ -153,6 +153,13 @@ class AnalysisRunRow(Base):
     market_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     warnings: Mapped[str | None] = mapped_column(Text, nullable=True)
     failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # nullable인 이유: 성공 런은 economist가 항상 advice를 내므로 값 자체는
+    # 늘 존재하지만(폴백이어도 max_picks로 채워짐, parsing.neutral_fallback),
+    # 실패 런은 economist 단계에 도달조차 못 하고 끝나는 경우가 있어(gate
+    # 단계 실패 등) 그런 런에는 값이 없다 — None은 "0건 권고"와 구분되는
+    # "파이프라인 미도달"을 뜻한다 (T1, P4 트레이더 패널: advice가 저장되지
+    # 않아 "approve는 있는데 picks가 비어도" DB만으로 감사 불가했던 문제).
+    max_picks_advice: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class AnalysisVerdictRow(Base):

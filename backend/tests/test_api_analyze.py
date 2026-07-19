@@ -77,6 +77,21 @@ def test_status_run_id_None이면_null로_노출한다():
     assert body["status"] == "failed"
 
 
+def test_status_타임스탬프_노출():
+    # T1 — /analyze/status에 started_at/finished_at이 노출돼야 며칠 지난
+    # succeeded 런이 "방금 끝난 것"처럼 보이는 문제를 소비자가 판별할 수
+    # 있다 (트레이더 패널 지적).
+    progress = AnalysisProgress(run_id=5, status="succeeded", stage="finished",
+                                done=3, total=3,
+                                started_at="2026-07-18T09:00:00+00:00",
+                                finished_at="2026-07-18T09:05:00+00:00")
+    resp = make_client(analysis=FakeAnalysis(progress=progress)).get(
+        "/analyze/status")
+    body = resp.json()
+    assert body["started_at"] == "2026-07-18T09:00:00+00:00"
+    assert body["finished_at"] == "2026-07-18T09:05:00+00:00"
+
+
 def test_latest_없으면_404():
     resp = make_client().get("/analyze/latest")
     assert resp.status_code == 404

@@ -14,7 +14,7 @@ P4-T5 패널 픽스(변경 근거): stale 게이트가 create_run **이후**로 
 추가했다."""
 
 import json
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
@@ -84,7 +84,8 @@ class FakeStore:
         self._snapshot = snapshot if snapshot is not None else MarketSnapshot(
             sector_table="음식료 0.0100 0.0200 0.0300", breadth=0.6)
         self.created = None
-        self.finished = None  # (run_id, status, regime, market_summary, warnings, failure_reason)
+        self.finished = None  # (run_id, status, regime, market_summary, warnings,
+                              # failure_reason, max_picks_advice)
         self.saved = None     # (run_id, result, news)
 
     def latest_succeeded_score_run(self):
@@ -101,9 +102,9 @@ class FakeStore:
         return 42
 
     def finish_run(self, run_id, status, regime=None, market_summary=None,
-                   warnings=None, failure_reason=None):
+                   warnings=None, failure_reason=None, max_picks_advice=None):
         self.finished = (run_id, status, regime, market_summary, warnings,
-                         failure_reason)
+                         failure_reason, max_picks_advice)
 
     def save_results(self, run_id, result, news):
         self.saved = (run_id, result, news)
@@ -139,6 +140,34 @@ async def test_성공_경로_결과_저장과_뉴스_스냅샷():
 
 
 @pytest.mark.anyio
+async def test_성공_런_시작종료_시각과_advice가_기록된다():
+    """P5pre T1 — (a) `now` 시계 주입으로 진행 상황에 started_at/finished_at이
+    ISO 문자열로 남고 started_at <= finished_at인지 검증한다(트레이더 패널
+    지적: /analyze/status에 타임스탬프가 없어 며칠 지난 succeeded 런이
+    신선해 보이는 문제). (b) economist의 max_picks_advice(ECON_OK==5)가
+    finish_run에 그대로 전달되는지 검증한다(트레이더 패널 지적: "approve는
+    있는데 picks가 비어도" DB만으로 감사할 수 없던 문제)."""
+    candidates = [cand("AAA111", "가전", 0.9)]
+    store = FakeStore(candidates=candidates)
+    llm = ScriptedLlm([ECON_OK, approve(0.9)])
+    news = FakeNews({"코스피": []})
+    clock = iter([
+        datetime(2026, 7, 17, 9, 0, 0, tzinfo=timezone.utc),
+        datetime(2026, 7, 17, 9, 5, 0, tzinfo=timezone.utc),
+    ])
+    service = AnalysisService(store, llm, news, config=CFG, today=lambda: REF,
+                              now=lambda: next(clock))
+
+    await service.run()
+
+    progress = service.progress()
+    assert progress.started_at is not None
+    assert progress.finished_at is not None
+    assert progress.started_at <= progress.finished_at  # ISO 문자열 비교
+    assert store.finished[6] == 5  # max_picks_advice
+
+
+@pytest.mark.anyio
 async def test_게이트_스코어링_런_없음():
     store = FakeStore(score_run=None)
     llm = ScriptedLlm([])
@@ -156,6 +185,12 @@ async def test_게이트_스코어링_런_없음():
     assert progress.stage == "gate"
     assert "run scoring first" in progress.failure_reason
     assert llm.calls == []
+    # run 자체는 생성되지 않았지만 progress는 종결 상태이므로 타임스탬프는
+    # 여전히 기록된다 (T1) — finish_run이 없다고 finished_at도 없어지면
+    # 안 된다(감사 목적상 "언제 거부됐는지"가 중요).
+    assert progress.started_at is not None
+    assert progress.finished_at is not None
+    assert progress.started_at <= progress.finished_at
 
 
 @pytest.mark.anyio
@@ -181,6 +216,10 @@ async def test_게이트_낡은_스코어링():
     assert progress.stage == "gate"
     assert "stale" in progress.failure_reason
     assert stale_ref.isoformat() in progress.failure_reason
+    # T1 — _fail 경로도 finished_at을 스탬프한다.
+    assert progress.started_at is not None
+    assert progress.finished_at is not None
+    assert progress.started_at <= progress.finished_at
 
 
 @pytest.mark.anyio
