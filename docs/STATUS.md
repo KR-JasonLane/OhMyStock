@@ -11,8 +11,29 @@
 
 ## ▶ 여기서 재개 (다음 액션)
 
-**Phase 5(트레이딩 엔진) 스펙·계획서 확정(2026-07-22) — 다음은 Task 0
-PRE-GATE 장중 실측(영업일 09:00~15:30).** 스펙
+**Phase 5 진행 중(2026-07-22) — Task 0 PRE-GATE G1~G3 실측 완료 + Task 1B
+완료 + Task 1 부분 완료. 다음: (a) Task 1 대칭 이관 완성, (b) G4 실측.**
+
+> **▶ 다음 세션 재개 (우선순위 순):**
+> 1. **Task 1 대칭 이관 완성** — 베이스(BackgroundRunService)에 정지 계약+
+>    타임스탬프는 추가됨(커밋 7a6b94b). 남은 것: `AnalysisProgress`의
+>    started_at/finished_at 필드를 제거하고 베이스 `started_at()/finished_at()`
+>    으로 일원화 → `_set`/`_run`/`_fail`의 타임스탬프 전파 로직 제거 →
+>    `api/analyze.py`·`collect.py`·`score.py` status가 `service.started_at()/
+>    finished_at()` ISO 노출(collect/score 신규). **P4 T1 로직 재작업이라
+>    깨끗한 컨텍스트에서 신중히.** 완성 후 4-에이전트 패널 일괄.
+> 2. **Task 0 G4** — 모의키로 실전 base URL(api.kiwoom.com) 조회 1건 → [8030]
+>    대칭성 확인. **독립 스크립트+독립 httpx+즉시 revoke**(공유 TokenManager
+>    오염 금지). 장 무관. broker-api+security 검증 필수(실전 서버).
+> 3. 이후 Task 2(순수: config·models·costs) → 3 → 4 → 5 → 6a/6b/6c → 7 → 8.
+>
+> **환경:** DB 컨테이너 `127.0.0.1:15432` 가동 중(docker 그룹은 재접속 필요,
+> 아니면 sudo docker). 테스트는 DB 불필요(sqlite). 실측 스크립트는
+> `backend/scripts/pregate_g{1,2,3}_*.py`(evidence는 .superpowers/, gitignore).
+> 키움 모의 키는 `.env`(backend/.env 심볼릭). **오늘 커밋: 신원 재작성
+> (전 커밋 vway→KR-JasonLane), 스펙/계획서/PRE-GATE/Task1B/Task1부분.**
+
+원 스펙·계획서 확정 요약: 스펙
 `docs/specs/2026-07-21-phase5-trading-engine-design.md`(v3.1), 계획서
 `docs/plans/2026-07-22-phase5-trading-engine-plan.md`(v1.2, Task 0~8).
 스펙은 4-에이전트 **3라운드**로 v1 Critical 5건 소진→신규 Critical 0 수렴,
@@ -235,9 +256,19 @@ G2 주문TR 3종+레이트리밋 버킷, G3 kt00018 행단위(기존 #1), G4 모
     CLAUDE.md §5 반영. 증거 .superpowers/sdd/p5-pregate-G{1,2,3}.txt
 [x] broker-api-expert 에이전트 추가 (CLAUDE.md 규칙 8-b) — 키움 명세 검증,
     G1 파이프·G2 필드명 실측으로 문서 오류 2건 조기 차단
-[ ] Phase 5: Task 0 G4(모의키→실전엔드포인트 대칭성) 실측         <-- 다음
-    (장 무관·조회 1건, 독립 스크립트+즉시 revoke). 이후 문서 반영 커밋 →
-    Task 1B(캘린더)/Task 1(베이스확장) 코드 착수
+[x] Phase 5: Task 1B market_calendar 확장 — 2026 공휴일 테이블(트레이더
+    패널이 6/3 지방선거·7/17 제헌절 부활 누락 교차검증 포착) + is_trading_day/
+    held_business_days, 폴백 경고. 커밋 5872149, 332 passed
+[~] Phase 5: Task 1 BackgroundRunService — **부분 완료**(커밋 7a6b94b, 337
+    passed). 정지 계약(StopMode/request_stop/stop_requested) + 타임스탬프
+    (started_at/finished_at/now 주입) 베이스 추가 완료. AnalysisService는
+    self._clock으로 분리(회귀 0). **후속(다음 세션): AnalysisProgress→베이스
+    타임스탬프 이관 + collection/scoring/API 4서비스 완전 대칭**(P4 T1 로직
+    재작업), 그 후 4-에이전트 패널 일괄
+[ ] Phase 5: Task 0 G4(모의키→실전엔드포인트 대칭성) 실측         <-- 남음
+    (장 무관·조회 1건, 독립 스크립트+즉시 revoke, 실전 base URL이라 신중)
+... 이후: Task 1 대칭 완성 → Task 2(config·models·costs) → 3(exit_rules·
+    selection·ticks) → 4(OrderPort 어댑터) → 5(저장소) → 6a/6b/6c → 7 → 8
 ... Task 1B(캘린더)·1(베이스확장) → 순수 → 어댑터/저장 → 부수효과 → 통합 → 라이브
 ... Phase 6~8 (CLAUDE.md 로드맵 참고)
 ```
