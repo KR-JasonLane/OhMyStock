@@ -20,6 +20,11 @@ services:
       context: ./backend
       target: app   # 다중 스테이지(리플레이 분리 — §4-2): 프로덕션 대상 명시
     env_file: .env
+    extra_hosts:
+      # 리눅스 네이티브 도커는 host.docker.internal을 기본 제공하지 않는다
+      # (Phase 4 노트는 Windows Docker Desktop 기준 — 서버 이전으로 환경
+      # 차이 실측 2026-07-22). 분석 파이프라인의 호스트 Ollama 연결에 필수.
+      - "host.docker.internal:host-gateway"
     environment:
       DATABASE_URL: postgresql+psycopg://ohmystock:${POSTGRES_PASSWORD:-ohmystock}@db:5432/ohmystock
       # LangSmith 텔레메트리 차단 — 활성화 시 프롬프트/응답(전략 기밀)이 외부 SaaS로 전송된다
