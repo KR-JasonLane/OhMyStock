@@ -19,9 +19,10 @@
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from replay.account import commission, sell_tax
-from replay.api.common import (kiwoom_error, kiwoom_json, pad_dec, pad_int,
-                               prev_day_close, require_token, signed)
+from replay.account import Holding, commission, eval_holdings, sell_tax
+from replay.api.common import (apply_api_fault, kiwoom_error, kiwoom_json,
+                               pad_dec, pad_int, prev_day_close,
+                               require_token, signed)
 from replay.ticks import tick_size
 
 router = APIRouter()
@@ -124,23 +125,37 @@ def _holding_row(holding, price: int, prev_close: int,
 def _kt00018(request: Request) -> JSONResponse:
     account = request.app.state.account
     price_now = request.app.state.engine.price_now
+    snapshot = request.app.state.faults.balance_snapshot()
+    if snapshot is not None:
+        # §9 잔고 반영 지연 — 동결 창 동안 활성화 시점 스냅샷을 렌더링
+        # (창 내 체결이 잔고에 안 보임 → 유령 판정 2회 확인 방어선 검증)
+        holdings = {s: Holding(s, m, q, c)
+                    for s, (m, q, c) in snapshot["holdings"].items()}
+    else:
+        holdings = account.holdings
     prices = {}
-    for symbol in account.holdings:
+    for symbol in holdings:
         price = price_now(symbol)
         if price is not None:
             prices[symbol] = price
-    total_eval, total_profit = account.eval_total(prices)
-    total_purchase = sum(h.total_cost for h in account.holdings.values())
+    if snapshot is None:
+        # 실계좌 뷰 — Account.eval_total(결측 카운터 표면화 포함)
+        total_eval, total_profit = account.eval_total(prices)
+    else:
+        # 동결 뷰 — 같은 수식(eval_holdings 공유), 카운터는 실시간 뷰 전용
+        total_eval, total_profit, _ = eval_holdings(holdings, prices)
+    total_purchase = sum(h.total_cost for h in holdings.values())
     pending_sells = _pending_sell_qty(account)
     now = request.app.state.clock.now()
     store = request.app.state.store
     rows = []
-    for holding in account.holdings.values():
+    for holding in holdings.values():
         price = prices.get(holding.symbol, holding.avg_price)
         rows.append(_holding_row(
             holding, price,
             prev_day_close(store, holding.symbol, now) or price,
             holding.quantity - pending_sells.get(holding.symbol, 0)))
+    cash = snapshot["cash"] if snapshot is not None else account.cash
     return kiwoom_json({
         # 최상위 필수(실측 — 포지션 0건이어도 존재해야 어댑터가 살아남는다)
         "tot_evlt_amt": pad_int(total_eval, _W15),
@@ -149,7 +164,7 @@ def _kt00018(request: Request) -> JSONResponse:
         "tot_prft_rt": pad_dec(
             (total_profit / total_purchase * 100) if total_purchase else 0.0,
             _W12),
-        "prsm_dpst_aset_amt": pad_int(account.cash + total_eval, _W15),
+        "prsm_dpst_aset_amt": pad_int(cash + total_eval, _W15),
         "tot_crd_loan_amt": pad_int(0, _W15),
         "tot_crd_ls_amt": pad_int(0, _W15),
         "tot_loan_amt": pad_int(0, _W15),
@@ -160,10 +175,13 @@ def _kt00018(request: Request) -> JSONResponse:
 
 @router.post("/api/dostk/acnt")
 async def acnt(request: Request) -> JSONResponse:
+    api_id = request.headers.get("api-id", "")
+    fault = await apply_api_fault(request, api_id)
+    if fault is not None:
+        return fault
     denied = require_token(request)
     if denied is not None:
         return denied
-    api_id = request.headers.get("api-id", "")
     handlers = {"ka10075": _ka10075, "kt00001": _kt00001,
                 "kt00018": _kt00018}
     handler = handlers.get(api_id)

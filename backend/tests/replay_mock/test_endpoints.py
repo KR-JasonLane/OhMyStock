@@ -9,37 +9,11 @@ from datetime import timedelta
 
 from fastapi.testclient import TestClient
 
-from replay.config import ReplaySettings
 from replay.faults import FaultPolicy
-from replay.main import create_replay_app
 
-from .conftest import DEFAULT_ROWS, T0, TimeCtl, make_minutes_sqlite
+from .conftest import TimeCtl, issue_token, make_app, tr
 
 SECRET = "SK-SENSITIVE-1234567890"
-
-
-def make_app(tmp_path, ctl, cash=10_000_000, faults=None, speed=1.0):
-    db = make_minutes_sqlite(tmp_path / "m.sqlite",
-                             {"005930": DEFAULT_ROWS,
-                              "069500": DEFAULT_ROWS})  # 069500=ETF 설정
-    settings = ReplaySettings(anchor=T0, speed=speed, data_path=db,
-                              cash=cash, etf_symbols=("069500",))
-    return create_replay_app(settings, faults=faults,
-                             monotonic=ctl.monotonic, wall_now=ctl.wall_now)
-
-
-def issue_token(client) -> dict:
-    body = client.post("/oauth2/token",
-                       json={"grant_type": "client_credentials",
-                             "appkey": "AK-TEST",
-                             "secretkey": SECRET}).json()
-    return {"authorization": f"Bearer {body['token']}", "api-id": ""}
-
-
-def tr(client, headers, api_id, path, body) -> tuple[dict, object]:
-    response = client.post(path, json=body,
-                           headers={**headers, "api-id": api_id})
-    return response.json(), response
 
 
 # ── 토큰 수명(단일 활성·8005) ──────────────────────────────────────────

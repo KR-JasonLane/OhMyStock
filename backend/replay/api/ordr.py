@@ -18,7 +18,8 @@
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from replay.api.common import kiwoom_error, kiwoom_json, require_token
+from replay.api.common import (apply_api_fault, kiwoom_error, kiwoom_json,
+                               require_token)
 
 router = APIRouter()
 
@@ -103,6 +104,10 @@ def _cancel(request: Request, body: dict) -> JSONResponse:
 
 @router.post("/api/dostk/ordr")
 async def ordr(request: Request) -> JSONResponse:
+    api_id = request.headers.get("api-id", "")
+    fault = await apply_api_fault(request, api_id)
+    if fault is not None:
+        return fault
     denied = require_token(request)
     if denied is not None:
         return denied
@@ -111,7 +116,6 @@ async def ordr(request: Request) -> JSONResponse:
     # 스냅샷으로 남아 실서버라면 통과할 주문을 오거부한다. 예: 체결됐어야
     # 할 매수 후 즉시 매도 → "insufficient holdings" 오거부).
     request.app.state.engine.check_fills()
-    api_id = request.headers.get("api-id", "")
     body = await request.json()
     # if-체인 디스패치: acnt의 dict 디스패치와 달리 kt10000/kt10001이 같은
     # 핸들러에 side 인자 바인딩을 요구해 균일 시그니처가 안 나온다(의도)

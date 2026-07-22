@@ -31,6 +31,24 @@ def sell_tax(amount: int, market: str) -> int:
     return 0 if market == "etf" else _pct(amount, TAX_SELL_PCT)
 
 
+def eval_holdings(holdings: dict, prices: dict[str, int]) -> tuple[int, int, int]:
+    """(총평가금액, 총평가손익, 시세 결측 수) — 시세 결측 심볼은 평단가
+    폴백. Account.eval_total(실계좌)과 kt00018의 동결 스냅샷 뷰(§9
+    balance_freeze)가 **같은 수식을 공유**한다(개발자 R5 — 금융 계산이
+    두 곳으로 갈라지면 반올림/결측 정책 변경 시 한쪽만 고치는 사고)."""
+    total_eval = 0
+    total_profit = 0
+    missing = 0
+    for holding in holdings.values():
+        price = prices.get(holding.symbol)
+        if price is None:
+            price = holding.avg_price
+            missing += 1
+        total_eval += price * holding.quantity
+        total_profit += (price - holding.avg_price) * holding.quantity
+    return total_eval, total_profit, missing
+
+
 @dataclass
 class Holding:
     symbol: str
@@ -70,6 +88,17 @@ class Account:
     cost_drift_total: int = 0    # 평단 절삭 누적 드리프트(원 — 가시화 계약)
     negative_cash_events: int = 0  # 음수 예수금(§2 — 예약 근사 한계의 최후 방어선)
     _seq: int = 0
+
+    def reset(self, cash: int) -> None:
+        """/_replay/reset 소관(§9): 예수금/보유/미체결/관측 카운터 초기화.
+        `_seq`(주문번호 시퀀스)는 **유지** — 리셋 전후 주문번호가 재사용되면
+        검증 스크립트의 주문 추적이 오염된다(단조성 보존)."""
+        self.cash = cash
+        self.holdings.clear()
+        self.open_orders.clear()
+        self.last_eval_missing = 0
+        self.cost_drift_total = 0
+        self.negative_cash_events = 0
 
     def next_order_no(self) -> str:
         # 실측 형태: ka10075 ord_no='0034447' — 7자리 제로패딩 숫자 문자열
@@ -154,15 +183,15 @@ class Account:
     def eval_total(self, prices: dict[str, int]) -> tuple[int, int]:
         """(총평가금액, 총평가손익) — kt00018 최상위 필수 필드(broker-api #6).
         시세 결측 심볼은 평단가로 평가하되 **카운트로 표면화**(침묵 금지 —
-        개발자 R2 Minor. 재생 경로는 직전가 유지 정책상 결측이 없어야 정상)."""
-        total_eval = 0
-        total_profit = 0
-        self.last_eval_missing = 0
-        for holding in self.holdings.values():
-            price = prices.get(holding.symbol)
-            if price is None:
-                price = holding.avg_price
-                self.last_eval_missing += 1
-            total_eval += price * holding.quantity
-            total_profit += (price - holding.avg_price) * holding.quantity
+        개발자 R2 Minor. 재생 경로는 직전가 유지 정책상 결측이 없어야 정상).
+        수식은 eval_holdings 공유(개발자 R5)."""
+        total_eval, total_profit, missing = eval_holdings(self.holdings,
+                                                          prices)
+        self.last_eval_missing = missing
         return total_eval, total_profit
+
+    def snapshot_holdings(self) -> dict[str, tuple[str, int, int]]:
+        """§9 balance_freeze용 원시 값 복사 — 정책(FaultPolicy)이 Account
+        내부 표현을 알 필요 없도록 여기서 캡슐화(개발자 R5 Minor)."""
+        return {s: (h.market, h.quantity, h.total_cost)
+                for s, h in self.holdings.items()}

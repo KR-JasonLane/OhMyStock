@@ -168,7 +168,7 @@ class MatchingEngine:
         for order_no, order in list(self._account.open_orders.items()):
             if order.unfilled <= 0:
                 continue
-            if self._faults.suppress_fill(order_no):
+            if self._faults.suppress_fill_order(order):
                 continue
             # 미등록 watch는 fail-loud(개발자 R3 #2 — 침묵 기본값은 스캔
             # 구간 유실+market 오분류를 조용히 만든다. submit이 항상 등록)
@@ -204,6 +204,13 @@ class MatchingEngine:
             if order.unfilled > 0:
                 self._watch[order_no] = (now, market)
 
+    def reset_pending(self) -> None:
+        """/_replay/reset 소관(§9 — faults+account+pending, clock 유지):
+        미체결 감시 상태와 관측 카운터를 초기화한다. account 초기화와 함께
+        호출돼야 정합(watch만 남으면 fail-loud 인덱싱이 유령을 잡는다)."""
+        self._watch.clear()
+        self.price_missing_skips = 0
+
     # ── 취소 ────────────────────────────────────────────────────────────
 
     def cancel(self, order_no: str) -> OrderResult:
@@ -231,7 +238,7 @@ class MatchingEngine:
     def _fill(self, order: OpenOrder, price: int, market: str) -> None:
         # suppress 검사: submit 즉시체결 경로에서는 이 지점이 **유일한**
         # 방어선(check_fills 경로에서는 상위 검사와 의도적 이중 — 개발자 Minor)
-        if self._faults.suppress_fill(order.order_no):
+        if self._faults.suppress_fill_order(order):
             return
         quantity = self._faults.fill_quantity(order.order_no, order.unfilled)
         if quantity <= 0:

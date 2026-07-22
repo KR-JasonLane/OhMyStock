@@ -12,6 +12,8 @@ from pathlib import Path
 import pytest
 
 from replay.clock import KST
+from replay.config import ReplaySettings
+from replay.main import create_replay_app
 
 T0 = datetime(2026, 7, 10, 9, 0, tzinfo=KST)
 WALL0 = datetime(2026, 7, 22, 20, 0, tzinfo=KST)
@@ -73,3 +75,32 @@ def fixture_json():
     def _load(name: str) -> dict:
         return json.loads((FIXTURES / name).read_text(encoding="utf-8"))
     return _load
+
+
+# ── 엔드포인트 테스트 공용(test_endpoints/test_faults 공유 — 개발자 R4
+#    Minor: 앱+토큰 조합 반복의 공용 승격) ──────────────────────────────
+
+def make_app(tmp_path, ctl: TimeCtl, cash=10_000_000, faults=None,
+             speed=1.0):
+    db = make_minutes_sqlite(tmp_path / "m.sqlite",
+                             {"005930": DEFAULT_ROWS,
+                              "069500": DEFAULT_ROWS})  # 069500=ETF 설정
+    settings = ReplaySettings(anchor=T0, speed=speed, data_path=db,
+                              cash=cash, etf_symbols=("069500",))
+    return create_replay_app(settings, faults=faults,
+                             monotonic=ctl.monotonic, wall_now=ctl.wall_now)
+
+
+def issue_token(client) -> dict:
+    body = client.post("/oauth2/token",
+                       json={"grant_type": "client_credentials",
+                             "appkey": "AK-TEST",
+                             "secretkey": "SK-TEST"}).json()
+    return {"authorization": f"Bearer {body['token']}"}
+
+
+def tr(client, headers, api_id, path, body):
+    """(json_body, response) — TR 호출 공통."""
+    response = client.post(path, json=body,
+                           headers={**headers, "api-id": api_id})
+    return response.json(), response

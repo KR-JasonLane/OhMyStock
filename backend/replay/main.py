@@ -26,7 +26,7 @@ from replay.account import Account
 from replay.api import acnt, admin, auth, ordr, stkinfo
 from replay.clock import KST, ReplayClock
 from replay.config import ReplaySettings
-from replay.faults import FaultPolicy
+from replay.faults import FaultPolicy, ScenarioFaultPolicy
 from replay.matching import MatchingEngine
 from replay.minute_store import MinuteStore
 from replay.tokens import TokenRegistry
@@ -47,7 +47,10 @@ def create_replay_app(settings: ReplaySettings, *,
                              symbols=list(settings.symbols) or None,
                              since=settings.load_since)
     account = Account(cash=settings.cash)
-    faults = faults or FaultPolicy()
+    # 기본은 ScenarioFaultPolicy(무결함 상태로 시작) — /_replay/faults 관리
+    # API가 기본 조립에서 동작해야 한다(§9). 테스트는 커스텀 정책 주입 가능
+    # (그 경우 관리 API는 400으로 fail-loud).
+    faults = faults or ScenarioFaultPolicy(wall_now=wall)
     engine = MatchingEngine(account, store, replay_now=clock.now,
                             wall_now=wall, faults=faults,
                             default_market=settings.default_market)

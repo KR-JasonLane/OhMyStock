@@ -4,6 +4,8 @@
 동일해야 한다 — 프로덕션 파서가 abs/strip을 수행하는지가 검증 대상이므로,
 목이 "깨끗한" 값을 주면 파서 결함이 통과해버린다."""
 
+import asyncio
+
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
@@ -33,6 +35,24 @@ def bearer_token(request: Request) -> str | None:
     if auth.lower().startswith("bearer "):
         return auth[7:].strip()
     return None
+
+
+async def apply_api_fault(request: Request, api_id: str) -> JSONResponse | None:
+    """§9 API 계층 결함(간헐 500/429/지연) — TR 핸들러 진입 최우선 적용.
+    토큰 검증보다 **먼저**: 레이트리밋/게이트웨이 장애는 인증 이전 계층의
+    현상이므로 무효 토큰 요청에도 동일하게 발생해야 실서버와 같다."""
+    fault = request.app.state.faults.api_response_fault(api_id)
+    if fault is None:
+        return None
+    if fault["delay_sec"] > 0:
+        await asyncio.sleep(fault["delay_sec"])   # 타임아웃 재현(벽시계)
+    if fault["mode"] == "http500":
+        return JSONResponse({"error": "replay injected fault"},
+                            status_code=500)
+    if fault["mode"] == "http429":
+        return JSONResponse({"error": "replay injected rate limit"},
+                            status_code=429)
+    return None   # "delay" — 지연만 주고 정상 진행
 
 
 def require_token(request: Request) -> JSONResponse | None:

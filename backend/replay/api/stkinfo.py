@@ -17,8 +17,8 @@ import re
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from replay.api.common import (kiwoom_error, kiwoom_json, prev_day_close,
-                               require_token, signed)
+from replay.api.common import (apply_api_fault, kiwoom_error, kiwoom_json,
+                               prev_day_close, require_token, signed)
 from replay.ticks import tick_size
 
 router = APIRouter()
@@ -56,7 +56,9 @@ def _market_of(request: Request, code: str) -> str:
 
 
 def _row(request: Request, code: str) -> dict:
-    engine = request.app.state.engine
+    if request.app.state.faults.is_halted(code):
+        # §9 거래정지 — 모니터가 "시세 결측 지속"을 관측하도록 빈 행
+        return _empty_row()
     candle = request.app.state.store.last_at_or_before(
         code, request.app.state.clock.now())
     if candle is None:
@@ -110,10 +112,13 @@ def _row(request: Request, code: str) -> dict:
 
 @router.post("/api/dostk/stkinfo")
 async def stkinfo(request: Request) -> JSONResponse:
+    api_id = request.headers.get("api-id", "")
+    fault = await apply_api_fault(request, api_id)
+    if fault is not None:
+        return fault
     denied = require_token(request)
     if denied is not None:
         return denied
-    api_id = request.headers.get("api-id", "")
     if api_id != "ka10095":
         return kiwoom_error(1, f"[REPLAY] unsupported TR {api_id!r} "
                                "(stkinfo category: ka10095 only — spec §7)")

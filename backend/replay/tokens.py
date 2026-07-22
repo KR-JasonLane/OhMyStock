@@ -47,6 +47,15 @@ class TokenRegistry:
             return False
         return self._wall_now().astimezone(KST) < self._expires_at
 
+    def force_invalidate(self) -> None:
+        """§9 "토큰 8005 무효화" 시나리오(관리 API 소비) — 활성 토큰을 즉시
+        무효화해 다음 TR부터 8005를 유발한다(Phase 2의 '두 번째 프로세스가
+        토큰을 뺏은' 사고를 임의 시점에 재현). 재발급으로 복구."""
+        if self._active is not None:
+            self.superseded_count += 1
+        self._active = None
+        self._expires_at = None
+
     def revoke(self, token: str) -> bool:
         """실측: /oauth2/revoke는 return_code 0(성공). 미지 토큰 revoke의
         실서버 rc는 미실측 — 성공으로 관용 처리하되 False 반환으로 관측만."""

@@ -41,17 +41,26 @@
 >    ord_alow_amt), kt00018(A프리픽스·패딩 폭 15/12), **모든 TR 진입
 >    check_fills 계약**+MatchingEngine.cancel() 진입 체결 확정, 정제
 >    픽스처 3종(tests/replay_mock/fixtures). §9에 "진입 지정가 fill 억제"
->    시나리오 신설(진입 폴백 미검증 은폐 방지 — 트레이더 R4). 5자 패널
->    (4+broker-api) 전원 승인. **다음: R5(결함 시나리오+관리 API —
->    admin.py/faults.py 확장, in-place 리셋).** R1 잔여: 저유동 대체 심볼
->    수집+ka10095 프로브, 페이지 경계 표본(R7 전). **부산물:
->    market_calendar KST 정규화 프로덕션 버그 수정 완료**(회귀 테스트).
+>    시나리오 신설(진입 폴백 미검증 은폐 방지 — 트레이더 R4). **R5(결함
+>    주입) 완료**: ScenarioFaultPolicy(§9 13종 ↔ 프리미티브 매핑 — 전파
+>    지연/500·429·delay/부분체결 벽시계 래칫(폴링 횟수와 체결 진행 분리)/
+>    취소·신규 거부(횟수)/fill 억제(side·style·symbol 창)/거래정지 빈 행/
+>    잔고 동결(kt00018 스냅샷)/토큰 강제 무효화), 관리 API /_replay/
+>    faults·reset(in-place clear — 엔진 참조 유지, clock 보존), 시간
+>    파라미터 300s 상한·count≥1 가드, 결함 발동 debug 로그, §9 "fill
+>    억제/지연 사용 규율"(유한 창<엔진 타임아웃이면 폴백 미검증 오판 —
+>    R7 체크리스트). 4패널 전원 승인. **다음: R6(프로필 배선 — app 변경:
+>    kiwoom_base_url_override 루프백 allowlist validator, trade_runs.
+>    run_environment 마이그레이션 0009, compose replay 서비스 스텁,
+>    프로덕션 /_replay 부재·역방향 임포트 회귀 — 별도 패널).** R1 잔여:
+>    저유동 대체 심볼 수집+ka10095 프로브, 페이지 경계 표본(R7 전).
+>    **부산물: market_calendar KST 정규화 프로덕션 버그 수정 완료**(회귀).
 > 3. **Task 0 G4**(모의키→실전 엔드포인트 대칭성 — 독립 스크립트+즉시 revoke,
 >    장 무관) — "준비되면" 사용자 지시 대기 상태.
 > 4. Phase 5 회고록 → Phase 6(스케줄러) 착수 준비.
 >
 > **환경:** DB 컨테이너 `127.0.0.1:15432` 가동 중. 테스트는 DB 불필요(sqlite,
-> 643 passed / live 11 deselected). 키움 모의 키는 `.env`(backend/.env 심볼릭).
+> 661 passed / live 11 deselected). 키움 모의 키는 `.env`(backend/.env 심볼릭).
 > 실측 evidence는 `.superpowers/sdd/`(gitignore). **Task 7 이월 게이트:
 > /trade/status·positions 무인증은 Phase 7 착수 전 읽기 스코프 확정(§8-2),
 > 실전 전환 시 수수료 기본값 실측 재설정 + API_TRADE_TOKEN 별도 발급.**
