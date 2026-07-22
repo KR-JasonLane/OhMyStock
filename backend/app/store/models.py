@@ -203,6 +203,10 @@ class TradeRunRow(Base):
         DateTime(timezone=True), nullable=True)
     status: Mapped[str] = mapped_column(String(16))
     config: Mapped[str] = mapped_column(Text, default="{}", server_default="{}")
+    # 실행 환경 감사(§4-1 리플레이 프로필, Alembic 0009) — mock/real/replay.
+    # 리플레이 런의 가짜 체결이 P&L 집계에 섞이지 않도록 구조적 필터.
+    run_environment: Mapped[str] = mapped_column(
+        String(16), default="mock", server_default="mock")
     # 킬 스위치 감사(§9, 보안 패널) — 사고 시 "언제/어떤 모드로 멈췄나"가
     # 첫 질문이다. _run() 종료 시 request_stop 여부·모드로부터 기록(Task 7).
     stopped_by_kill_switch: Mapped[bool] = mapped_column(

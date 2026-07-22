@@ -14,6 +14,32 @@
 **Phase 5 진행 중(2026-07-22) — Task 0(G1~G3)·1B·1~7 완료(각 태스크
 4-에이전트 패널 통과 후 커밋). 다음: Task 8(장중 라이브 스모크).**
 
+> **▶▶ 내일(목 2026-07-23) 실행 계획 — 사용자 확정(2026-07-22):**
+> "R7은 내일 장중 실측이랑 같이" — 장중 순서(재부팅 후 이 절만 따라가면 됨):
+> 1. **(장중 09:00~) R1 잔여 실측**: ① 저유동 대체 심볼 1종 ka10080 분봉
+>    수집(`uv run python scripts/replay_collect_minutes.py` — 대상 심볼
+>    추가 후. 012510 degenerate 대체 — 게이트의 "저유동 카테고리 실종"
+>    경고 해소) + 그 심볼 무거래 분 ka10095 프로브(직전가 유지 브리지
+>    가정 검증), ② 페이지 경계 중복/누락 표본 점검. ⚠️ 백엔드 컨테이너
+>    가동 중이면 호스트 토큰 발급 금지(8005 — CLAUDE.md §5).
+> 2. **(09:05~09:30 진입 창) Task 8 라이브 스모크** — 아래 1번 절차.
+> 3. **(장중/장후) R7 — 엔진 통합 예행**: 계획서 R7 절. 기동 절차:
+>    ⓐ 리플레이 서버(호스트): `cd backend && REPLAY_ANCHOR=2026-06-25T09:00:00
+>    uv run uvicorn --factory replay.main:create_app --port 9095`
+>    (앵커 후보 2026-06-25 — coverage.txt 실측. REPLAY_SPEED는 1.0 유지 —
+>    §5 ③ speed≠1.0 런은 근거 금지, 앱이 기동 거부함).
+>    ⓑ 백엔드: `.env`에 `KIWOOM_BASE_URL_OVERRIDE=http://127.0.0.1:9095` +
+>    TRADE_* 4종 + **리플레이 전용 DATABASE_URL**(타 환경 미종결 포지션
+>    있으면 기동 거부됨 — §4-1). 앵커는 프로브가 서버에서 자동 취득.
+>    ⓒ 검증: 커버리지 표 전 분기 + §9 시나리오별 방어선 발동
+>    (`POST /_replay/faults`, 익절/진입 fill 억제는 seconds=None 표준 —
+>    §9 사용 규율) + 감사 행(run_environment='replay') 확인. 증거
+>    `.superpowers/sdd/replay-r7-*.txt`(speed 스탬프 포함). 끝나면 `.env`
+>    override 제거(잊으면 다음 기동이 fail-loud로 거부됨 — 의도된 동작).
+>    ⓓ R7 완료 후: 리플레이 회고록(규칙 4 — R1~R7 태스크별, 플랜 R6 절의
+>    "계획 대비 설계 변경" 기록 포함) + Phase 5 회고록.
+> 4. Task 0 G4(모의키→실전 대칭성)는 별도 사용자 지시 대기 유지.
+>
 > **▶ 다음 세션 재개 (우선순위 순):**
 > 1. **Task 8 — 라이브 스모크(장중, 코디네이터 직접).** 계획서 Task 8 절:
 >    사전 준비 — `.env`에 TRADE_* 한도 4종 추가(§8-1 all-or-nothing —
@@ -49,18 +75,30 @@
 >    faults·reset(in-place clear — 엔진 참조 유지, clock 보존), 시간
 >    파라미터 300s 상한·count≥1 가드, 결함 발동 debug 로그, §9 "fill
 >    억제/지연 사용 규율"(유한 창<엔진 타임아웃이면 폴백 미검증 오판 —
->    R7 체크리스트). 4패널 전원 승인. **다음: R6(프로필 배선 — app 변경:
->    kiwoom_base_url_override 루프백 allowlist validator, trade_runs.
->    run_environment 마이그레이션 0009, compose replay 서비스 스텁,
->    프로덕션 /_replay 부재·역방향 임포트 회귀 — 별도 패널).** R1 잔여:
->    저유동 대체 심볼 수집+ka10095 프로브, 페이지 경계 표본(R7 전).
+>    R7 체크리스트). **R6(프로필 배선 — app 변경) 완료**: Settings
+>    kiwoom_base_url_override(루프백/replay 서비스명 allowlist·실전 조합
+>    차단·오류에 URL 원문 미노출), 키움 클라이언트 override+실효 URL
+>    WARNING, **기동 프로브 _verify_replay_server**(미도달·speed≠1.0 기동
+>    거부 + 서버 replay_now를 앵커로 취득 — REPLAY_TIME_ANCHOR env 폐기,
+>    서버가 재생 시각 SSOT), app/core/replay_clock(speed=1.0 고정 전제
+>    유닛), trade_runs.run_environment(0009, String(16)) **실소비**:
+>    open_positions 조인 필터(서비스 4개 호출+/trade/positions)+리플레이
+>    기동 시 타 환경 미종결 포지션 DB 거부(트레이더 Critical — 교차 오염
+>    CLOSED 오판 차단), 진입 신선도 가드 양방향 일치(미래 신호 look-ahead
+>    거부), Dockerfile 3스테이지(base/app/replay)+compose --profile
+>    replay(127.0.0.1:9095·ro 볼륨·healthcheck), 격리 회귀(/_replay·
+>    /api/dostk·/oauth2 라우트 부재+app→replay AST 동적 임포트 포함),
+>    기동 게이트 lifespan 통합 테스트 3종. .dockerignore .env,
+>    .env.example 경고 블록. 4패널 전원 승인. **다음: R7(엔진 통합 예행 —
+>    speed=1.0, 윈도우 게이트 근거. 선행: 저유동 대체 심볼 수집+ka10095
+>    프로브, 페이지 경계 표본 — R1 잔여).**
 >    **부산물: market_calendar KST 정규화 프로덕션 버그 수정 완료**(회귀).
 > 3. **Task 0 G4**(모의키→실전 엔드포인트 대칭성 — 독립 스크립트+즉시 revoke,
 >    장 무관) — "준비되면" 사용자 지시 대기 상태.
 > 4. Phase 5 회고록 → Phase 6(스케줄러) 착수 준비.
 >
 > **환경:** DB 컨테이너 `127.0.0.1:15432` 가동 중. 테스트는 DB 불필요(sqlite,
-> 661 passed / live 11 deselected). 키움 모의 키는 `.env`(backend/.env 심볼릭).
+> 679 passed / live 11 deselected). 키움 모의 키는 `.env`(backend/.env 심볼릭).
 > 실측 evidence는 `.superpowers/sdd/`(gitignore). **Task 7 이월 게이트:
 > /trade/status·positions 무인증은 Phase 7 착수 전 읽기 스코프 확정(§8-2),
 > 실전 전환 시 수수료 기본값 실측 재설정 + API_TRADE_TOKEN 별도 발급.**

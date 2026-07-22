@@ -112,13 +112,22 @@
   회귀 테스트("프로덕션 라우트 /_replay 부재" + app→replay 역방향 임포트
   부재)로 못박는다(현재는 "아무도 연결 안 함"이라는 우연에 의존).
 - Files: `app/core/config.py`(kiwoom_base_url_override — **루프백/replay
-  서비스명 exact-match allowlist**, 실전+override 차단, anchor 단독 차단,
-  replay_time_anchor), `app/adapters/kiwoom/client.py`(override 적용+실효
-  URL WARNING), `app/store/models.py`+`alembic 0009`(trade_runs.
-  run_environment NOT NULL — §4-1), `app/main.py`(오프셋 시계 주입·
-  run_environment 전달), `docker-compose.yml`(replay 서비스 스텁 —
-  127.0.0.1 바인딩·별도 스테이지·healthcheck), `tests/`(validator 조합·
-  프로덕션 라우트 /_replay 부재 회귀).
+  서비스명 exact-match allowlist**, 실전+override 차단), `app/adapters/
+  kiwoom/client.py`(override 적용+실효 URL WARNING), `app/core/
+  replay_clock.py`(오프셋 시계 유닛 — speed=1.0 고정 전제),
+  `app/store/models.py`+`alembic 0009`(trade_runs.run_environment NOT
+  NULL — §4-1), `app/main.py`(기동 프로브 `_verify_replay_server` +
+  오프셋 시계 주입·run_environment 전달), `docker-compose.yml`(replay
+  서비스 스텁 — 127.0.0.1 바인딩·별도 스테이지·healthcheck), `tests/`
+  (validator 조합·프로브·교차 오염 필터·프로덕션 라우트 /_replay 부재
+  회귀).
+- **계획 대비 설계 변경(구현 중 패널 합의 — 회고록에 기록할 것):** 초안의
+  `replay_time_anchor` env는 **폐기** — 앵커는 기동 시 `/_replay/status`
+  프로브가 서버에서 취득(SSOT: env 이중화 값 드리프트·기동 시차 드리프트
+  제거). 프로브는 미도달·speed≠1.0을 기동 거부로 승격. run_environment는
+  write-only가 아니라 open_positions 조인 필터+리플레이 기동 시 타 환경
+  미종결 포지션 DB 거부로 **실소비**(트레이더 R6 Critical). 진입 신선도
+  가드는 양방향 정확 일치(미래 신호=look-ahead 거부).
 - TradingService.create_run에 run_environment 전달(§4-1 — store.create_run
   시그니처 확장).
 

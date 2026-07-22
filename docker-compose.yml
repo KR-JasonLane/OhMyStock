@@ -16,7 +16,9 @@ services:
       - "127.0.0.1:15432:5432"  # DB 도구(DBeaver 등) 접속용 — localhost 한정
 
   backend:
-    build: ./backend
+    build:
+      context: ./backend
+      target: app   # 다중 스테이지(리플레이 분리 — §4-2): 프로덕션 대상 명시
     env_file: .env
     environment:
       DATABASE_URL: postgresql+psycopg://ohmystock:${POSTGRES_PASSWORD:-ohmystock}@db:5432/ohmystock
@@ -31,6 +33,35 @@ services:
     depends_on:
       db:
         condition: service_healthy
+
+  # 리플레이 목 서버(스펙 §4-2) — `docker compose --profile replay up` 로만
+  # 기동. 프로덕션 backend 이미지와 분리된 스테이지·진입점(uvicorn
+  # replay.main). ⚠️ 무인증 관리 API(/_replay)가 있으므로 포트는 반드시
+  # 루프백 바인딩(보안 패널 #3). 단일 워커 전제(계좌 상태 인메모리 —
+  # replay/main.py 독스트링): 워커 옵션을 추가하지 말 것.
+  replay:
+    profiles: ["replay"]
+    build:
+      context: ./backend
+      target: replay
+    environment:
+      # 필수값 — 미설정 시 컨테이너가 기동 즉시 fail-loud(ReplaySettings:
+      # "REPLAY_ANCHOR is required"). compose 보간의 :?는 프로필 비활성
+      # 상태의 기본 `docker compose up`까지 깨뜨려서 쓰지 않는다.
+      REPLAY_ANCHOR: ${REPLAY_ANCHOR:-}
+      REPLAY_SPEED: ${REPLAY_SPEED:-1.0}
+      REPLAY_SYMBOLS: ${REPLAY_SYMBOLS:-}
+      REPLAY_ETF_SYMBOLS: ${REPLAY_ETF_SYMBOLS:-}
+    volumes:
+      # 분봉 sqlite(281MB — dockerignore라 이미지에 미포함)는 읽기 전용 마운트
+      - ./backend/replay/data:/app/replay/data:ro
+    ports:
+      - "127.0.0.1:9095:9095"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:9095/_replay/status', timeout=3)\""]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
 volumes:
   pgdata:

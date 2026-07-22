@@ -231,7 +231,24 @@ async def test_낡은_신호는_진입_스킵(store):
                        latest=stale)
     await service.run()
     assert broker.placed == []
-    assert any("stale" in w for w in service.progress().warnings)
+    assert any("signal date mismatch" in w
+               for w in service.progress().warnings)
+
+
+@pytest.mark.anyio
+async def test_미래_신호도_진입_스킵(store):
+    """트레이더 R6 — look-ahead 차단: 재생 시점(과거 앵커)보다 미래의
+    분석 픽(실시계 파이프라인 산출)이 통과하면 재생 세계에 존재하지 않던
+    정보로 진입한다. 프로덕션에서도 미래 신호는 데이터 손상 신호."""
+    future = {"picks": [{"symbol": "005930", "rank": 1}],
+              "score_reference_date": "2027-01-04"}
+    broker = FakeBroker(open_orders=[None])
+    service = _service(broker, store, calendar=Cal([True, False]),
+                       latest=future)
+    await service.run()
+    assert broker.placed == []
+    assert any("signal date mismatch" in w
+               for w in service.progress().warnings)
 
 
 @pytest.mark.anyio

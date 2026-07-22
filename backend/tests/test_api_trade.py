@@ -52,7 +52,7 @@ class FakeRunning:
 
 
 class FakeTradingStore:
-    def open_positions(self):
+    def open_positions(self, run_environment=None):
         pos = TradePosition(symbol="005930", name="삼성전자", market="kospi",
                             state=PositionState.ENTERED, entry_price=100_000,
                             quantity=9, peak_price=101_000,

@@ -2,7 +2,9 @@ import asyncio
 import contextlib
 import logging
 from contextlib import asynccontextmanager
+from datetime import datetime
 
+import httpx
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -18,6 +20,7 @@ from app.api.trade import router as trade_router
 from app.api.ws import router as ws_router
 from app.core import market_calendar
 from app.core.config import Settings, get_settings
+from app.core.replay_clock import make_replay_clock
 from app.domain.analysis.config import AnalysisConfig
 from app.domain.analysis.service import AnalysisService
 from app.domain.collection import CollectionService
@@ -36,6 +39,41 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)
+
+
+async def _verify_replay_server(base_url: str) -> datetime:
+    """override 기동 게이트(트레이더/아키텍트 R6 — §4-1 확장). 반환: 서버의
+    현재 재생 시각(앵커로 사용 — 서버가 재생 시각의 SSOT).
+
+    ① 미도달 → 기동 거부: `.env`에 잊힌 override로 mock 검증인 줄 알고
+       로컬 스텁(미기동)을 두들기는 상태를 1줄 WARNING이 아니라 fail-loud로.
+    ② speed≠1.0 → 기동 거부: 앱 오프셋 시계는 speed=1.0 전제
+       (app.core.replay_clock — §5 ③ speed≠1.0 런은 검증 근거 금지).
+    ③ 앵커를 서버에서 취득: 앵커 env 이중화(REPLAY_ANCHOR↔앱 별도 변수)의
+       값 드리프트와 서버·앱 기동 시차 드리프트를 동시에 제거."""
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as http:
+            response = await http.get(f"{base_url}/_replay/status")
+            data = response.json()
+    except Exception as exc:
+        raise RuntimeError(
+            f"KIWOOM_BASE_URL_OVERRIDE({base_url})가 설정됐지만 리플레이 "
+            f"서버에 도달할 수 없습니다({type(exc).__name__}) — .env에 잊힌 "
+            "override이거나 서버 미기동(--profile replay 선기동 필요)."
+        ) from exc
+    speed = data.get("speed")
+    if speed != 1.0:
+        raise RuntimeError(
+            f"리플레이 서버 speed={speed} — 앱 오프셋 시계는 speed=1.0 "
+            "전제입니다(§5 ③: speed≠1.0 런은 검증 근거 사용 금지). 기동 거부.")
+    raw_now = data.get("replay_now")
+    if not isinstance(raw_now, str):
+        # 형태 드리프트도 RuntimeError로 일관(fail-closed는 동일하되
+        # KeyError 스택 대신 원인 명시 — 보안 R6 델타 견고성 노트)
+        raise RuntimeError(
+            "리플레이 서버 /_replay/status 응답에 replay_now가 없습니다 — "
+            "형태 드리프트(서버/앱 버전 불일치?). 기동 거부.")
+    return datetime.fromisoformat(raw_now)
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -98,10 +136,32 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 analysis_store, app.state.llm, app.state.news,
                 config=analysis_cfg)
 
+            # 리플레이 프로필 기동 게이트(§4-1 확장) — 서버 프로브(미도달·
+            # speed≠1.0 거부) + 서버 재생 시각을 앵커로 취득(SSOT)
+            replay_anchor = None
+            if settings.kiwoom_base_url_override is not None:
+                replay_anchor = await _verify_replay_server(
+                    settings.kiwoom_base_url_override)
+
             # 트레이딩 엔진(P5 Task 7) — §8-1 버그 봉쇄 한도 4종이 전부
             # 설정된 경우에만 조립(하드 게이트: 상한 없이 실주문 엔진이
             # 켜지지 않는다). 미설정이면 /trade/*는 503.
             app.state.trading_store = TradingStore(app.state.engine)
+            if settings.run_environment == "replay":
+                # 교차 오염 fail-fast(트레이더 R6 Critical): 같은 DB에 다른
+                # 환경(mock/real)의 미종결 포지션이 있으면 리플레이 reconcile
+                # 이 그것을 '브로커 미보유→CLOSED'로 오판해 TP/SL 감시에서
+                # 이탈시킨다 — 별도 DATABASE_URL 권장(§4-1), 공유는 기동 거부.
+                foreign = await asyncio.to_thread(
+                    app.state.trading_store.foreign_open_position_count,
+                    "replay")
+                if foreign:
+                    raise RuntimeError(
+                        f"리플레이 프로필이 다른 환경의 미종결 포지션 "
+                        f"{foreign}건이 있는 DB에 연결됐습니다 — 실전/모의 "
+                        "포지션이 리플레이 reconcile로 감시 이탈(CLOSED 오판)"
+                        "될 수 있어 기동을 거부합니다. 리플레이는 별도 "
+                        "DATABASE_URL을 사용하세요(§4-1).")
             trade_limits = (settings.trade_max_single_order_krw,
                             settings.trade_max_daily_orders,
                             settings.trade_max_daily_order_krw,
@@ -113,13 +173,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     max_daily_order_krw=settings.trade_max_daily_order_krw,
                     min_avg_trading_value_krw=(
                         settings.trade_min_avg_trading_value_krw))
+                # 리플레이 프로필(§4-1): 프로브가 취득한 서버 재생 시각을
+                # 앵커로 **트레이딩 서비스에만** 오프셋 시계 주입(speed=1.0
+                # 고정 전제 — app.core.replay_clock 독스트링).
+                trading_now = None
+                if replay_anchor is not None:
+                    trading_now = make_replay_clock(replay_anchor)
+                    logger.warning(
+                        "trading clock OVERRIDDEN (replay anchor %s — "
+                        "server-sourced)", trading_now().isoformat())
                 app.state.trading = TradingService(
                     app.state.broker, app.state.broker,
                     app.state.trading_store, trading_cfg, market_calendar,
                     analysis_store.latest_results,
                     conflict_check=lambda: (
                         app.state.collection.is_running()
-                        or app.state.scoring.is_running()))
+                        or app.state.scoring.is_running()),
+                    now=trading_now,
+                    run_environment=settings.run_environment)
             else:
                 app.state.trading = None
                 logger.warning(

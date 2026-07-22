@@ -3,3 +3,7 @@ __pycache__
 .pytest_cache
 tests
 replay/data/
+
+# 로컬 시크릿/데이터 — 이미지 레이어에 굽지 않는다(보안 R6: backend/.env가
+# 심볼릭 링크가 아닌 실파일로 바뀌어도 COPY . . 이 시크릿을 담지 못하게)
+.env

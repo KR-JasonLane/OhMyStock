@@ -90,7 +90,10 @@ async def trading_status(request: Request) -> dict:
 async def trading_positions(request: Request) -> dict:
     """미종결 포지션 목록(§6-7) — 감사/대시보드용 읽기 전용."""
     store = request.app.state.trading_store
-    rows, corrupted = store.open_positions()
+    # 현재 프로필 환경의 포지션만(트레이더 R6 Critical — 리플레이 런의
+    # 가짜 포지션과 실전/모의 포지션이 한 화면에 섞이지 않게)
+    rows, corrupted = store.open_positions(
+        request.app.state.settings.run_environment)
     return {
         "positions": [{
             "symbol": pos.symbol, "name": pos.name, "market": pos.market,

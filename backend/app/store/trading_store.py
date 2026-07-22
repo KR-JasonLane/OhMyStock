@@ -84,13 +84,32 @@ class TradingStore:
 
     # ---------- 런 ----------
 
-    def create_run(self, config_json: str) -> int:
+    def create_run(self, config_json: str,
+                   run_environment: str = "mock") -> int:
+        # run_environment: §4-1 감사 분리(mock/real/replay) — 리플레이 런의
+        # 가짜 체결이 집계에 섞이지 않게 하는 구조적 필터(Alembic 0009)
         with self._sessions.begin() as session:
             run = TradeRunRow(started_at=self._now(), status="running",
-                              config=config_json)
+                              config=config_json,
+                              run_environment=run_environment)
             session.add(run)
             session.flush()
             return run.id
+
+    def foreign_open_position_count(self, run_environment: str) -> int:
+        """지정 환경 **밖**의 런에 속한 미종결 포지션 수(트레이더 R6
+        Critical) — 리플레이 프로필 기동 fail-fast 입력: 같은 DB에 실전/
+        모의 미종결 포지션이 남아 있으면 리플레이 reconcile이 그것을
+        '브로커 미보유 → CLOSED'로 오판해 TP/SL 감시에서 이탈시킨다."""
+        with self._sessions() as session:
+            rows = session.execute(
+                select(TradePositionRow.id)
+                .join(TradeRunRow,
+                      TradePositionRow.trade_run_id == TradeRunRow.id)
+                .where(TradePositionRow.state.in_(_OPEN_STATES))
+                .where(TradeRunRow.run_environment != run_environment)
+            ).scalars().all()
+        return len(rows)
 
     def finish_run(self, run_id: int, status: str,
                    stopped_by_kill_switch: bool = False,
@@ -278,9 +297,15 @@ class TradingStore:
             row.entered_at = pos.entered_at
             row.closed_at = pos.closed_at
 
-    def open_positions(self) -> tuple[list[tuple[int, TradePosition]], list[int]]:
+    def open_positions(self, run_environment: str | None = None,
+                       ) -> tuple[list[tuple[int, TradePosition]], list[int]]:
         """미종결 포지션(reconcile §6-6 입력, EXIT_FAILED 포함 — 스펙 분기 ⑦).
         반환: (정상 [(position_id, TradePosition)], 오염 position_id 목록).
+
+        run_environment(트레이더 R6 Critical): 지정 시 해당 환경의 런에
+        속한 포지션만 반환 — 리플레이 프로세스가 같은 DB의 실전/모의
+        포지션을 읽어 reconcile로 CLOSED 처리(감시 이탈)하는 교차 오염을
+        구조적으로 차단한다(§4-1 감사 컬럼의 실소비 지점).
 
         enum 역직렬화 실패(손상 행)를 행 단위로 격리한다(아키텍트 T5) — 오염
         1건이 전체 목록 조회를 죽이면 정상 N−1개까지 감시 밖으로 밀려나
@@ -289,10 +314,15 @@ class TradingStore:
         good: list[tuple[int, TradePosition]] = []
         corrupted: list[int] = []
         with self._sessions() as session:
-            rows = session.execute(
-                select(TradePositionRow)
-                .where(TradePositionRow.state.in_(_OPEN_STATES))
-                .order_by(TradePositionRow.id)).scalars().all()
+            query = (select(TradePositionRow)
+                     .where(TradePositionRow.state.in_(_OPEN_STATES))
+                     .order_by(TradePositionRow.id))
+            if run_environment is not None:
+                query = query.join(
+                    TradeRunRow,
+                    TradePositionRow.trade_run_id == TradeRunRow.id,
+                ).where(TradeRunRow.run_environment == run_environment)
+            rows = session.execute(query).scalars().all()
             for row in rows:
                 try:
                     good.append((row.id, _row_to_position(row)))

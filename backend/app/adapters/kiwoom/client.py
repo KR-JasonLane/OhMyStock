@@ -29,7 +29,17 @@ class KiwoomHttpClient:
         http: httpx.AsyncClient | None = None,
         sleep: Callable[[float], Awaitable[None]] | None = None,
     ) -> None:
-        base = MOCK_BASE if settings.kiwoom_mock else REAL_BASE
+        # 리플레이 프로필(§4-1): override가 있으면 mock/real 대신 사용.
+        # 유효성(루프백 allowlist·실전 조합 차단)은 Settings validator가
+        # 기동 시점에 이미 보증 — 여기서는 실효 URL을 WARNING으로 명시
+        # (이중 방어: 어느 서버로 나가는지 로그에 항상 남는다). httpx TLS
+        # 검증(verify)은 기본값 유지 — override 경로도 전역 비활성화 금지.
+        if settings.kiwoom_base_url_override is not None:
+            base = settings.kiwoom_base_url_override
+            logger.warning(
+                "kiwoom base URL OVERRIDDEN (replay profile): %s", base)
+        else:
+            base = MOCK_BASE if settings.kiwoom_mock else REAL_BASE
         self._owns_http = http is None
         self._owns_tokens = token_manager is None
         self._http = http or httpx.AsyncClient(base_url=base, timeout=10.0)

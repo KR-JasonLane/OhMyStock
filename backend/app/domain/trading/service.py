@@ -49,7 +49,8 @@ logger = logging.getLogger(__name__)
 class _StoreLike(Protocol):
     """서비스가 소비하는 TradingStore 표면(테스트 fake 계약)."""
 
-    def create_run(self, config_json: str) -> int: ...
+    def create_run(self, config_json: str,
+                   run_environment: str = "mock") -> int: ...
     def finish_run(self, run_id: int, status: str,
                    stopped_by_kill_switch: bool = False,
                    kill_switch_mode: str | None = None,
@@ -58,7 +59,7 @@ class _StoreLike(Protocol):
     def update_position(self, position_id: int, **kwargs) -> None: ...
     def save_position_snapshot(self, position_id: int,
                                pos: TradePosition) -> None: ...
-    def open_positions(self): ...
+    def open_positions(self, run_environment: str | None = None): ...
     def submitted_order_nos(self, position_id: int) -> tuple[str, ...]: ...
     def record_order(self, run_id, position_id, order_no, symbol, side,
                      order_style, req_price, req_qty, status, resp_body): ...
@@ -135,16 +136,20 @@ class TradingService(BackgroundRunService):
     def __init__(self, orders: OrderPort, account: BrokerPort,
                  store: _StoreLike, config: TradingConfig, calendar,
                  analysis_latest, conflict_check=None,
-                 sleep=None, now=None) -> None:
+                 sleep=None, now=None,
+                 run_environment: str = "mock") -> None:
         """calendar: core.market_calendar 모듈(주입 — 6b와 동일 이유).
         analysis_latest: () -> dict | None (AnalysisStore.latest_results —
-        동기, to_thread 경유 호출)."""
+        동기, to_thread 경유 호출).
+        run_environment: mock/real/replay — trade_runs 감사 컬럼(§4-1,
+        조립부가 Settings.run_environment에서 유도해 전달)."""
         super().__init__("trading", conflict_check=conflict_check,
                          logger=logger, now=now)  # 4서비스 타임스탬프 대칭
         self._orders = orders
         self._account = account
         self._store = store
         self._config = config
+        self._run_environment = run_environment
         self._calendar = calendar
         self._analysis_latest = analysis_latest
         self._sleep = sleep or asyncio.sleep
@@ -195,7 +200,8 @@ class TradingService(BackgroundRunService):
 
     async def _run(self) -> None:
         self._run_id = await asyncio.to_thread(
-            self._store.create_run, self._config.to_json())
+            self._store.create_run, self._config.to_json(),
+            self._run_environment)
         status, failure = "succeeded", None
         try:
             await self._reconcile_startup()
@@ -248,7 +254,8 @@ class TradingService(BackgroundRunService):
     # ── 재기동 reconcile (§6-6) ─────────────────────────────────────────
 
     async def _reconcile_startup(self) -> None:
-        rows, corrupted = await asyncio.to_thread(self._store.open_positions)
+        rows, corrupted = await asyncio.to_thread(
+            self._store.open_positions, self._run_environment)
         for pid in corrupted:
             self._warnings.append(
                 f"position row {pid} corrupted (enum) — excluded from "
@@ -326,11 +333,14 @@ class TradingService(BackgroundRunService):
             return
         signal_date = date.fromisoformat(latest["score_reference_date"])
         expected = self._last_trading_day_before(now)
-        if signal_date < expected:
-            # 신호 낡음(§6-3 신호 전제) — 낡은 픽으로 진입하지 않는다
+        if signal_date != expected:
+            # 신호 낡음(§6-3) 또는 **미래 신호**(트레이더 R6 #3 — 리플레이
+            # 앵커가 과거일 때 실시계 분석 픽이 통과하면 재생 시점에 존재
+            # 하지 않던 정보로 진입하는 look-ahead. 프로덕션에서도 미래
+            # 신호는 데이터 손상 신호다). 양방향 정확 일치만 통과.
             self._warnings.append(
-                f"analysis signal stale ({signal_date} < {expected}) — "
-                "entries skipped")
+                f"analysis signal date mismatch (signal {signal_date}, "
+                f"expected {expected}) — entries skipped")
             return
         symbols = [p["symbol"] for p in latest["picks"]]
         context = await asyncio.to_thread(self._store.entry_context, symbols,
@@ -621,7 +631,8 @@ class TradingService(BackgroundRunService):
     async def _mini_reconcile(self, symbol: str) -> None:
         """단일 심볼 즉시 대조(P5-T6a 트레이더 I2) — 재기동 reconcile과 같은
         골격(_run_reconcile)을 그 심볼의 DB 상태에만 적용한다."""
-        rows, _corrupted = await asyncio.to_thread(self._store.open_positions)
+        rows, _corrupted = await asyncio.to_thread(
+            self._store.open_positions, self._run_environment)
         target = [(pid, pos) for pid, pos in rows if pos.symbol == symbol]
         if not target:
             return
@@ -636,7 +647,8 @@ class TradingService(BackgroundRunService):
         경합한 심볼의 수량을 잔고 ground truth로 갱신."""
         balance = await self._account.get_balance()
         held = {p.symbol: p.quantity for p in balance.positions}
-        rows, _ = await asyncio.to_thread(self._store.open_positions)
+        rows, _ = await asyncio.to_thread(
+            self._store.open_positions, self._run_environment)
         for pid, pos in rows:
             if pos.state is not PositionState.ENTERED:
                 continue
@@ -652,7 +664,7 @@ class TradingService(BackgroundRunService):
     # ── 조회/시간 유틸 ──────────────────────────────────────────────────
 
     def _load_entered(self) -> list[TradePosition]:
-        rows, _corrupted = self._store.open_positions()
+        rows, _corrupted = self._store.open_positions(self._run_environment)
         self._pos_ids.update({pos.symbol: pid for pid, pos in rows})
         return [pos for _pid, pos in rows
                 if pos.state is PositionState.ENTERED]
