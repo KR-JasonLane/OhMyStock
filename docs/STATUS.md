@@ -4,34 +4,35 @@
 > 새 세션에서 재개할 때 이 문서를 가장 먼저 읽으세요. 매 작업 세션이 끝날 때마다
 > 이 문서를 갱신합니다(핸드오프 문서).
 
-- **최종 수정:** 2026-07-18
+- **최종 수정:** 2026-07-22
 - **프로젝트:** OhMyStock — 한국 주식 자동매매 시스템
 
 ---
 
 ## ▶ 여기서 재개 (다음 액션)
 
-**Phase 5 진행 중(2026-07-22) — Task 0 PRE-GATE G1~G3 실측 완료 + Task 1B
-완료 + Task 1 부분 완료. 다음: (a) Task 1 대칭 이관 완성, (b) G4 실측.**
+**Phase 5 진행 중(2026-07-22) — Task 0(G1~G3)·1B·1~5·6a 완료(각 태스크
+4-에이전트 패널 통과 후 커밋). 다음: Task 6b(PositionMonitor).**
 
 > **▶ 다음 세션 재개 (우선순위 순):**
-> 1. **Task 1 대칭 이관 완성** — 베이스(BackgroundRunService)에 정지 계약+
->    타임스탬프는 추가됨(커밋 7a6b94b). 남은 것: `AnalysisProgress`의
->    started_at/finished_at 필드를 제거하고 베이스 `started_at()/finished_at()`
->    으로 일원화 → `_set`/`_run`/`_fail`의 타임스탬프 전파 로직 제거 →
->    `api/analyze.py`·`collect.py`·`score.py` status가 `service.started_at()/
->    finished_at()` ISO 노출(collect/score 신규). **P4 T1 로직 재작업이라
->    깨끗한 컨텍스트에서 신중히.** 완성 후 4-에이전트 패널 일괄.
-> 2. **Task 0 G4** — 모의키로 실전 base URL(api.kiwoom.com) 조회 1건 → [8030]
->    대칭성 확인. **독립 스크립트+독립 httpx+즉시 revoke**(공유 TokenManager
->    오염 금지). 장 무관. broker-api+security 검증 필수(실전 서버).
-> 3. 이후 Task 2(순수: config·models·costs) → 3 → 4 → 5 → 6a/6b/6c → 7 → 8.
+> 1. **Task 6b — 감시 루프(monitor.py).** 계획서 Task 6b 절 준수: get_quotes
+>    1회 → evaluate_exit(held_business_days는 calendar 주입) → §6-2-b 청산
+>    집행(손절/트레일링 즉시 시장가, 익절 5초 지정가) → costs로 realized_pnl.
+>    필수 캐리: **trailing_active DB 영속값 그대로 전달(fake-store 왕복 통합
+>    테스트)**, get_open_orders BrokerError 경고+재시도 흡수, store 통짜 주입
+>    금지(6a 콜백 패턴 — persist fail-closed/on_order 격리, 아키텍트 P5-T6a),
+>    6a `_submit`/`_audit` 공용 헬퍼(execution.py) 추출 검토, 조회 실패≠가격
+>    불변, 동시호가·VI 백오프, 15:30 정상 반환.
+> 2. **Task 6c(reconcile ①~⑦) → Task 7(TradingService/API — requires_reconcile
+>    즉시 미니 reconcile+ENTRY_FAILED 영속 금지 캐비어트, 진입 직후 잔고 대사,
+>    to_thread 콜백) → Task 8(라이브 스모크).**
+> 3. **Task 0 G4**(모의키→실전 엔드포인트 대칭성 — 독립 스크립트+즉시 revoke,
+>    장 무관) — "준비되면" 사용자 지시 대기 상태.
 >
-> **환경:** DB 컨테이너 `127.0.0.1:15432` 가동 중(docker 그룹은 재접속 필요,
-> 아니면 sudo docker). 테스트는 DB 불필요(sqlite). 실측 스크립트는
-> `backend/scripts/pregate_g{1,2,3}_*.py`(evidence는 .superpowers/, gitignore).
-> 키움 모의 키는 `.env`(backend/.env 심볼릭). **오늘 커밋: 신원 재작성
-> (전 커밋 vway→KR-JasonLane), 스펙/계획서/PRE-GATE/Task1B/Task1부분.**
+> **환경:** DB 컨테이너 `127.0.0.1:15432` 가동 중. 테스트는 DB 불필요(sqlite,
+> 481 passed / live 11 deselected). 키움 모의 키는 `.env`(backend/.env 심볼릭).
+> 실측 evidence는 `.superpowers/sdd/`(gitignore). **주문 폴링 체결 판정 계약
+> (전파 유예+연속 2회 부재 확인)은 스펙 §6-3.8 — 6b/7에서 반드시 준수.**
 
 원 스펙·계획서 확정 요약: 스펙
 `docs/specs/2026-07-21-phase5-trading-engine-design.md`(v3.1), 계획서

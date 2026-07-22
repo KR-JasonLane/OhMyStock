@@ -269,6 +269,7 @@ def evaluate_exit(entry_price, current_price, peak_price, trailing_active,
 | `signal_gap_guard_pct` | 3.0 | 신호 기준가 대비 현재가 괴리 상한(§6-3 0단계, 트레이더 #8) |
 | `min_avg_trading_value_krw` | (설정 필수) | 유동성 필터 임계 — 최근 평균 거래대금(§6-3.2, 트레이더 #10) |
 | `entry_window` | 09:05–09:30 | 결정 #28 |
+| `entry_tick_offset` | 0 | 진입 지정가 = ask − offset틱(0=ask 그대로 — 즉시 체결 지향, T6a) |
 | `limit_order_timeout_sec` | 60 | 진입 미체결 → 시장가 |
 | `exit_limit_timeout_sec` | 5 | **청산 전용, 짧음**(§6-2-b, 트레이더 #1) |
 | `poll_interval_sec` | 1.0 | G1 실측에 따라 조정 |
@@ -357,6 +358,32 @@ fail-fast 검증: `0 < stop_loss_pct < 100`, `0 < take_profit_pct`,
    내내 동작**(진입 창이 닫혀도 손절은 멈추지 않는다)
 8. 발주 → `limit_order_timeout_sec`(60초) 미체결 → 취소(`CANCEL_REQUESTED`) →
    시장가 재발주(`MARKET_SUBMITTED`)
+   - **체결 판정 계약(6a 트레이더 패널 C1):** 주문 부재(ka10075에 없음)는
+     '체결'과 '미체결 시스템 미전파'를 구분하지 못한다(접수 TR과 조회 TR은
+     다른 백엔드 계층). 오판 방어 3중 — ⓐ 발주 직후 첫 폴 전 1 interval
+     전파 유예, ⓑ 한 번도 관측 못 한 주문의 부재는 성공 조회 **연속 2회**
+     확인 후에만 체결 판정(관측된 주문의 부재는 즉시 체결 — 우리가 취소하지
+     않았으므로), ⓒ 잔여 리스크는 Task 7이 진입 직후 잔고 대사(kt00018)로
+     수량·평단 확정(유령 포지션 즉시 해소)
+   - **지정가 취소 실패 = 폴백 중단**(이중 매수 가드): 취소 실패는 주문 상태
+     불명(마지막 폴 이후 체결 가능) — 시장가 재발주를 강행하면 이중 포지션.
+     `requires_reconcile` 실패로 표면화하고 잔고 대조로 위임
+   - **시장가 재발주 직전 시세 재조회**(트레이더 I1): 관측 ask는 타임아웃
+     동안 낡았고 미체결 자체가 급변 신호 — caps 재검증·평단 추정 모두
+     `get_quotes` 재조회 값 사용(실패 시 stale 폴백+경고, 발주는 막지 않음)
+   - **시장가 부분체결도 잔여 취소**(§6-1 동일 원칙) — 감시 밖 지연 체결 =
+     미추적 수량. 취소 실패는 별도 사유 + `requires_reconcile` 표식(I3)
+   - **`EntryOutcome.requires_reconcile`(구조화 필드)**: 체결 여부 불명·취소
+     실패 케이스의 표식. Task 7은 이 필드로 **즉시 미니 reconcile**(잔고
+     대사)을 트리거한다 — 재기동 시점까지 대기 금지(트레이더 I2). 사유
+     문자열 매칭 분기는 금지(개발자 패널)
+   - **⚠️ requires_reconcile=True는 확정 ENTRY_FAILED가 아니다**(아키텍트
+     #1): ENTRY_FAILED는 §6-6 재기동 스캔 집합(PENDING_ENTRY/ENTERED/EXITING/
+     EXIT_FAILED) **밖**이므로, 미니 reconcile 완료 전에 ENTRY_FAILED로
+     영속하면 미니 reconcile이 크래시/누락될 경우 실보유 종목이 어떤 재기동
+     스윕에도 다시 걸리지 않는다. 마지막 persist된 EntryPhase(CANCEL_REQUESTED
+     /MARKET_SUBMITTED)를 유지한 채 미니 reconcile이 최종 상태(ENTERED/
+     ENTRY_FAILED)를 결정한다
 
 ### 6-4. 감시 루프 (`monitor.py`)
 

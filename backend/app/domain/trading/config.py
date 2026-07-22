@@ -44,6 +44,10 @@ class TradingConfig:
     signal_gap_guard_pct: float = 3.0     # 신호 기준가 대비 현재가 괴리 상한
     entry_window_start: time = time(9, 5)   # 진입 창 (시가 안정화 후)
     entry_window_end: time = time(9, 30)
+    # 진입 지정가 = 최우선 매도호가(ask) − offset틱 (§6-3.6). 0 = ask 그대로
+    # (즉시 체결 지향 + 가격 상한 통제 — 결정 #25 취지: 슬리피지 통제하되
+    # 미체결 방치 방지). 양수면 더 유리한(낮은) 가격 — 체결 지연 트레이드오프.
+    entry_tick_offset: int = 0
     limit_order_timeout_sec: float = 60.0  # 진입 지정가 미체결 → 시장가 폴백
     reentry_cooldown_min: int = 30        # 동일 종목 재진입 쿨다운
 
@@ -108,6 +112,8 @@ class TradingConfig:
             errors.append(f"quote_failure_threshold는 1 이상: {self.quote_failure_threshold}")
         if self.reentry_cooldown_min < 0:
             errors.append(f"reentry_cooldown_min은 0 이상: {self.reentry_cooldown_min}")
+        if self.entry_tick_offset < 0:
+            errors.append(f"entry_tick_offset은 0 이상: {self.entry_tick_offset}")
         if self.max_single_order_krw <= 0:
             errors.append(f"max_single_order_krw는 양수: {self.max_single_order_krw}")
         if self.max_daily_orders < 1:

@@ -303,9 +303,16 @@ API 응답에 타임스탬프가 노출되지 않으므로(현재 AnalysisServic
 ```python
 class EntryExecutor:
     def __init__(self, orders: OrderPort, config: TradingConfig,
-                 check_order_caps: Callable[[int], None]): ...
-    async def execute(self, plan: EntryPlan) -> TradePosition: ...
+                 check_order_caps: Callable[[int], None],
+                 persist_phase: PersistPhase | None = None,  # fail-closed(발주 전)
+                 on_order: OnOrder | None = None,            # 격리(발주 후 감사)
+                 sleep=..., now=...): ...
+    async def execute(self, plan: EntryPlan, ask: int) -> EntryOutcome: ...
+    # EntryOutcome: position | None + failure_reason + requires_reconcile(구조화)
 ```
+(구현 반영 동기화 — 아키텍트 Minor. ask는 호출자가 get_quotes로 확보해 전달,
+시장가 폴백 직전에만 내부 재조회. store는 콜백 2개 뒤로 격리 — Global
+Constraints "domain/trading은 store 임포트 금지".)
 - `check_order_caps(amount_krw)`는 **주문 발행 직전** 호출(초과 시 예외로 거부) —
   단건 주문 상한을 `place_order` 바로 앞에서 검증(보안 Important, §8-1 "발주 직전").
   구현체(누적 카운터+상한)는 Task 7이 주입.
@@ -332,10 +339,18 @@ class EntryExecutor:
 **Interfaces:**
 ```python
 class PositionMonitor:
-    def __init__(self, orders: OrderPort, store, config: TradingConfig,
-                 calendar, check_order_caps: Callable[[int], None]): ...
+    def __init__(self, orders: OrderPort, config: TradingConfig,
+                 calendar, check_order_caps: Callable[[int], None],
+                 persist_position: Callable[..., None],  # fail-closed — Task 7이 store 연결
+                 on_order: OnOrder | None = None): ...   # 격리 — 발주 후 감사
     async def poll_once(self, positions: list[TradePosition], now) -> list[ExitAction]: ...
 ```
+- **store 통짜 주입 금지**(아키텍트 P5-T6a #2): 6a와 동일한 콜백 주입 패턴 —
+  Global Constraints("domain/trading은 store 임포트 금지")를 코드 레벨로 강제하고
+  ISP(필요한 좁은 계약만 노출)를 유지한다. persist(fail-closed, 주문 전)/
+  on_order(격리, 주문 후) 비대칭 계약도 6a와 동일. **6b 착수 시 6a의
+  `_submit`/`_audit`(persist→발주→감사 3단 쌍)를 공용 헬퍼(예: `execution.py`)로
+  추출해 재사용 검토** — 두 모듈이 같은 트리오를 손으로 중복 구현하지 않도록.
 - `get_quotes` 1회 → 각 포지션 `evaluate_exit`(held_business_days는 `calendar`로
   계산해 주입) → 청산(§6-2-b: 손절/트레일링 즉시 시장가, 익절 5초 지정가).
 - **청산 체결 후 `costs.round_trip_cost`로 `realized_pnl` 계산해 저장**(트레이더
@@ -377,7 +392,9 @@ class PositionMonitor:
 ```python
 def reconcile_decide(db_positions, broker_open_orders, broker_balance,
                      in_entry_window: bool) -> list[ReconcileAction]: ...  # 순수
-async def apply_reconcile(actions, orders: OrderPort, store): ...          # 오케스트레이션
+async def apply_reconcile(actions, orders: OrderPort,
+                          persist_position, on_order): ...  # 오케스트레이션 —
+# store 통짜 주입 금지, 6a 콜백 패턴 동일(아키텍트 P5-T6a #2)
 ```
 - 6분기(§6-6): ①체결완료→ENTERED ②미체결생존→감시재개(`orders.trade_position_id`
   ↔`get_open_orders` order_no로 **명시적 연결** 판단, symbol 매칭 아님 — 개발자
@@ -426,6 +443,25 @@ async def apply_reconcile(actions, orders: OrderPort, store): ...          # 오
       보안 forward-pointer). entry_price는 체결 확정 시 1회만 기록하는 불변식도
       호출부가 준수(감사 재구성 전제 — P5-T5 보안 Minor).
 - [ ] API 4종 + 인증. 버그 봉쇄 한도는 Task 6의 `check_order_caps`로 발주 직전 재검증.
+      **일일 누적 상한 카운터는 추정 금액(ask×qty)으로 선누적하되, 시장가 상방
+      슬리피지가 체계적이면 실측 체결액(잔고 pur_pric) 사후 보정 검토**(P5-T6a
+      보안 forward-pointer — 추정치 누적만으로 max_daily_order_krw 실질 초과 가능).
+      **콜백 계약: on_order/persist는 sync — 블로킹 DB I/O가 이벤트 루프를 멈춰
+      다른 종목 손절 감시를 지연시키지 않도록 asyncio.to_thread 경유로 연결.
+      `check_order_caps`도 동일**(아키텍트 Minor — 누적 카운터가 DB 기반이 되면
+      같은 블로킹 위험).
+- [ ] **`EntryOutcome.requires_reconcile=True` 시 즉시 미니 reconcile**(잔고
+      대사) 트리거 — 재기동 대기 금지(P5-T6a 트레이더 I2: 조회 히컵 하나가
+      온종일 무감시 노출을 만들면 안 됨). 문자열 사유 매칭 분기 금지(개발자 #2
+      — 구조화 필드가 계약). **미니 reconcile 완료 전에는 ENTRY_FAILED로
+      persist 금지**(아키텍트 #1): ENTRY_FAILED는 §6-6 재기동 스캔 집합 밖 —
+      마지막 EntryPhase(CANCEL_REQUESTED/MARKET_SUBMITTED)를 유지한 채 미니
+      reconcile이 최종 상태를 결정해야, 미니 reconcile 크래시 시에도 다음
+      재기동 스윕이 해당 포지션을 다시 잡는다.
+- [ ] **진입 직후 잔고 대사(kt00018)로 수량·평단 확정** — entry_price 추정치
+      (지정가=발주가/시장가=fresh ask)와 부분체결 확정 수량(취소 직전 폴
+      스냅샷, 최대 1 interval 낡음 — 트레이더 I4)을 실측값으로 교정하고,
+      잔고 0이면 유령 포지션 즉시 해소(C1 잔여 리스크 봉쇄 — ⓒ 방어선).
 - [ ] 3자 배타 양방향 배선(collect/score API 가드 포함) + 실전 스코프 검증자.
 - [ ] **패널:** (보안) 인증·스코프 강제·킬스위치 가용성·감사 기록, (아키텍트) 3자
       배선·수명주기, (트레이더) 진입 창·종료 조건, (개발자) 조립 명료성.
