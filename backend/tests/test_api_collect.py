@@ -54,7 +54,13 @@ class FakeScoring:
         return None
 
 
-def test_collect는_시작하면_202():
+def test_collect는_시작하면_202(monkeypatch):
+    # 장 운영시간 경고는 실시간 is_market_hours()에 의존하므로 결정성을 위해 장외로
+    # 고정(경고 없음). 장중/장외 경고 유무는 아래 test_장중이면.../test_장외면...이
+    # 이미 엄격히 검증하므로 여기선 기본 202 스모크만 본다. monkeypatch 대상 지정은
+    # 기존 관례(collect_mod)에 통일.
+    import app.api.collect as collect_mod
+    monkeypatch.setattr(collect_mod, "is_market_hours", lambda: False)
     app = create_app(_settings())
     with TestClient(app) as client:
         stub = StubService()
