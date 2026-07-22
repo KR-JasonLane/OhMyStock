@@ -11,28 +11,29 @@
 
 ## ▶ 여기서 재개 (다음 액션)
 
-**Phase 5 진행 중(2026-07-22) — Task 0(G1~G3)·1B·1~5·6a 완료(각 태스크
-4-에이전트 패널 통과 후 커밋). 다음: Task 6b(PositionMonitor).**
+**Phase 5 진행 중(2026-07-22) — Task 0(G1~G3)·1B·1~5·6a·6b 완료(각 태스크
+4-에이전트 패널 통과 후 커밋). 다음: Task 6c(reconcile).**
 
 > **▶ 다음 세션 재개 (우선순위 순):**
-> 1. **Task 6b — 감시 루프(monitor.py).** 계획서 Task 6b 절 준수: get_quotes
->    1회 → evaluate_exit(held_business_days는 calendar 주입) → §6-2-b 청산
->    집행(손절/트레일링 즉시 시장가, 익절 5초 지정가) → costs로 realized_pnl.
->    필수 캐리: **trailing_active DB 영속값 그대로 전달(fake-store 왕복 통합
->    테스트)**, get_open_orders BrokerError 경고+재시도 흡수, store 통짜 주입
->    금지(6a 콜백 패턴 — persist fail-closed/on_order 격리, 아키텍트 P5-T6a),
->    6a `_submit`/`_audit` 공용 헬퍼(execution.py) 추출 검토, 조회 실패≠가격
->    불변, 동시호가·VI 백오프, 15:30 정상 반환.
-> 2. **Task 6c(reconcile ①~⑦) → Task 7(TradingService/API — requires_reconcile
->    즉시 미니 reconcile+ENTRY_FAILED 영속 금지 캐비어트, 진입 직후 잔고 대사,
->    to_thread 콜백) → Task 8(라이브 스모크).**
+> 1. **Task 6c — 재기동 대조(reconcile.py).** 스펙 §6-6 분기 ①~⑦+⑤-b(신설:
+>    EXITING/CANCEL_REQUESTED) 전수. `reconcile_decide` 순수 판정 +
+>    `apply_reconcile`(콜백 주입 — store 통짜 금지). 필수 캐리: **재기동 시
+>    EXITING 최우선 복구**(monitor._pending 인메모리 소실 — reconcile ④⑤가
+>    유일한 안전망, 테스트 고정), **수량은 DB quantity가 아니라 잔고(kt00018)
+>    ground truth**(TP 부분체결 크래시 창), 진입 창 밖 미체결 지정가는 취소만
+>    (시장가 재발주 금지), orders.trade_position_id↔order_no 명시 연결(②).
+> 2. **Task 7(TradingService/API)** — requires_reconcile 즉시 미니 reconcile+
+>    ENTRY_FAILED 영속 금지, 진입 직후 잔고 대사(수량·평단 확정), caps 구현
+>    `(amount, side)` — **매도 차단 금지 계약**(패널 재검증 항목), monitor는
+>    run당 새 인스턴스, to_thread 콜백. → **Task 8(라이브 스모크)**.
 > 3. **Task 0 G4**(모의키→실전 엔드포인트 대칭성 — 독립 스크립트+즉시 revoke,
 >    장 무관) — "준비되면" 사용자 지시 대기 상태.
 >
 > **환경:** DB 컨테이너 `127.0.0.1:15432` 가동 중. 테스트는 DB 불필요(sqlite,
-> 481 passed / live 11 deselected). 키움 모의 키는 `.env`(backend/.env 심볼릭).
+> 507 passed / live 11 deselected). 키움 모의 키는 `.env`(backend/.env 심볼릭).
 > 실측 evidence는 `.superpowers/sdd/`(gitignore). **주문 폴링 체결 판정 계약
-> (전파 유예+연속 2회 부재 확인)은 스펙 §6-3.8 — 6b/7에서 반드시 준수.**
+> (전파 유예+연속 2회 부재 확인)은 스펙 §6-3.8·execution.poll_unfilled —
+> 6c/7에서 반드시 준수.**
 
 원 스펙·계획서 확정 요약: 스펙
 `docs/specs/2026-07-21-phase5-trading-engine-design.md`(v3.1), 계획서

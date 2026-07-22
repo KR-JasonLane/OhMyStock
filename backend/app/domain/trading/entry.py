@@ -24,20 +24,20 @@ from datetime import datetime, timezone
 from app.domain.broker import (OrderAck, OrderPort, OrderRequest, OrderSide,
                                OrderStyle)
 from app.domain.trading.config import TradingConfig
+# 발주 트리오·감사 격리·C1-안전 폴링은 execution.py 공용 헬퍼(6a/6b 공유 —
+# 아키텍트 P5-T6a #2). OnOrder 계약 정의도 그쪽이 소유(여기서 재수출).
+from app.domain.trading.execution import (OnOrder, audit_order,  # noqa: F401
+                                          poll_unfilled, submit_order)
 from app.domain.trading.models import EntryPhase, PositionState, TradePosition
 from app.domain.trading.selection import EntryPlan
 from app.domain.trading.ticks import round_to_tick, tick_size
 
 logger = logging.getLogger(__name__)
 
-# 주문 감사 콜백 — (ack, request, status) → Task 7이 store.record_order 연결.
-# **예외 격리**(보안 패널): 주문이 이미 브로커에 나간 뒤 호출되므로 기록 실패가
-# 하류(폴링·취소·포지션 추적)를 중단시키면 "주문은 나갔는데 추적이 끊기는"
-# 최악 상태가 된다 — _audit()이 예외를 삼키고 error 로그만 남긴다.
-OnOrder = Callable[[OrderAck, OrderRequest, str], None]
 # 상태 영속 콜백 — Task 7이 store.update_position(entry_phase=...) 연결.
 # **의도적 비격리(fail-closed)**: 항상 발주 *이전*에 호출되므로 영속 실패 시
 # 주문이 아예 나가지 않는 안전한 방향 — 예외를 그대로 전파한다.
+# (on_order 감사 콜백의 격리 계약은 execution.audit_order 참조.)
 PersistPhase = Callable[[EntryPhase], None]
 
 
@@ -64,7 +64,7 @@ class EntryOutcome:
 
 class EntryExecutor:
     def __init__(self, orders: OrderPort, config: TradingConfig,
-                 check_order_caps: Callable[[int], None],
+                 check_order_caps: Callable[[int, OrderSide], None],
                  persist_phase: PersistPhase | None = None,
                  on_order: OnOrder | None = None,
                  sleep: Callable[[float], Awaitable[None]] | None = None,
@@ -73,29 +73,19 @@ class EntryExecutor:
         self._config = config
         self._check_caps = check_order_caps
         self._persist = persist_phase or (lambda _phase: None)
-        self._on_order = on_order or (lambda *_args: None)
+        self._on_order = on_order
         self._sleep = sleep or asyncio.sleep
         self._now = now or (lambda: datetime.now(timezone.utc))
 
     def _audit(self, ack: OrderAck, req: OrderRequest, status: str) -> None:
-        """on_order 예외 격리 — 주문은 이미 나갔으므로 기록 실패가 흐름을
-        죽이면 안 된다(보안 패널 #3). 실패는 error 로그로 표면화(주문번호 포함
-        — 수동 감사 복구 가능)."""
-        try:
-            self._on_order(ack, req, status)
-        except Exception as exc:  # noqa: BLE001
-            logger.error("order audit callback failed for %s (order_no=%s, "
-                         "status=%s): %s — manual audit reconstruction needed",
-                         req.symbol, ack.order_no, status, exc)
+        """execution.audit_order 위임 — 격리 계약(보안 #3)은 그쪽 docstring."""
+        audit_order(self._on_order, ack, req, status)
 
     async def _submit(self, phase: EntryPhase, req: OrderRequest) -> OrderAck:
-        """영속(fail-closed, 발주 전) → 발주 → 감사 — 3단 쌍을 한 곳에(개발자
-        패널: 손 중복이 곧 감사 누락의 원인). 취소는 경로별 실패 의미가 달라
-        (지정가 취소 실패=폴백 중단, 잔여 취소 실패=사유 보존) 묶지 않는다."""
-        self._persist(phase)
-        ack = await self._orders.place_order(req)
-        self._audit(ack, req, "submitted")
-        return ack
+        """execution.submit_order 위임 — persist(fail-closed)→발주→감사 트리오."""
+        return await submit_order(self._orders, req,
+                                  persist=lambda: self._persist(phase),
+                                  on_order=self._on_order)
 
     async def _refresh_ask(self, symbol: str, stale_ask: int) -> int:
         """시장가 재발주 직전 시세 재조회(트레이더 패널 I1). stale_ask는
@@ -129,8 +119,10 @@ class EntryExecutor:
             return EntryOutcome(None, f"invalid ask for {plan.symbol}: {ask}")
         limit_price = self._limit_price(ask, plan.market)
 
-        # [1] 지정가 발주 — 단건 상한은 발주 직전 재검증(§8-1)
-        self._check_caps(limit_price * plan.quantity)
+        # [1] 지정가 발주 — 단건 상한은 발주 직전 재검증(§8-1). side 전달은
+        # P5-T6b 트레이더 C2: 상한은 매수 봉쇄용 — 구현체(Task 7)가 매도
+        # (청산·킬스위치)를 차단하지 않으려면 방향을 알아야 한다.
+        self._check_caps(limit_price * plan.quantity, OrderSide.BUY)
         limit_req = OrderRequest(symbol=plan.symbol, side=OrderSide.BUY,
                                  style=OrderStyle.LIMIT,
                                  quantity=plan.quantity,
@@ -178,7 +170,7 @@ class EntryExecutor:
         # [4] 0체결 — 시장가 재발주(§6-3.8). ask는 타임아웃 동안 낡았고
         # 미체결 자체가 급변 신호 — caps·평단 추정 모두 재조회 값으로(I1).
         fresh_ask = await self._refresh_ask(plan.symbol, ask)
-        self._check_caps(fresh_ask * plan.quantity)
+        self._check_caps(fresh_ask * plan.quantity, OrderSide.BUY)
         market_req = OrderRequest(symbol=plan.symbol, side=OrderSide.BUY,
                                   style=OrderStyle.MARKET,
                                   quantity=plan.quantity)
@@ -232,53 +224,11 @@ class EntryExecutor:
         return round_to_tick(max(price, 1), market, "down")
 
     async def _poll_unfilled(self, order_no: str, timeout_sec: float) -> int:
-        """타임아웃까지 미체결 잔량 폴링. 반환: 0=전량 체결 확정, 양수=미체결
-        잔량(마지막 관측), -1=관측 전무(체결 여부 미확정 — 호출자가 보수 처리).
-
-        주문 부재(get_open_orders에 없음)는 '체결'과 '미체결 시스템 미전파'를
-        구분하지 못한다(트레이더 C1 — 접수 TR(ordr)과 조회 TR(acnt)은 다른
-        백엔드 계층, 전파 지연 가능). 오판 방어 3중:
-        [a] 발주 직후 첫 폴 전 1 interval 전파 유예
-        [b] 존재를 한 번도 관측 못 한 주문의 부재는 **성공 조회 연속 2회**에서
-            확인된 뒤에만 체결로 판정. 한 번이라도 관측된 주문의 부재는 즉시
-            체결(우리가 취소하지 않았으므로 등록된 주문의 소멸 원인은 체결뿐)
-        [c] 잔여 리스크(전파 지연 > 유예+확인 창)는 Task 7이 진입 직후 잔고
-            대사(kt00018)로 수량·평단을 확정하며 봉쇄(유령 포지션 즉시 해소)
-        조회 실패(BrokerError)는 부재 관측이 아니다 — 연속 부재 카운트를
-        리셋하고 재시도. 데드라인은 근사치 — 마지막 반복이 최대 interval만큼
-        초과할 수 있다(보수 방향, 개발자 Minor)."""
-        deadline = timeout_sec
-        interval = min(self._config.poll_interval_sec, timeout_sec)
-        last_unfilled: int | None = None
-        seen = False          # 이 주문이 조회 시스템에 등록된 것을 관측했는가
-        absent_streak = 0     # 성공 조회 기준 연속 부재 횟수
-        elapsed = 0.0
-        await self._sleep(interval)  # [a] 전파 유예
-        elapsed += interval
-        while True:
-            try:
-                open_orders = await self._orders.get_open_orders()
-                mine = [o for o in open_orders if o.order_no == order_no]
-                if mine:
-                    seen = True
-                    absent_streak = 0
-                    last_unfilled = mine[0].unfilled_qty
-                    if last_unfilled == 0:
-                        return 0
-                else:
-                    absent_streak += 1
-                    if seen or absent_streak >= 2:  # [b]
-                        return 0
-            except Exception as exc:  # noqa: BLE001 — 조회 실패는 재시도
-                absent_streak = 0  # 실패는 부재 '관측'이 아니다
-                logger.warning("open-order poll failed for order_no=%s (%s) — "
-                               "retrying", order_no, exc)
-            if elapsed >= deadline:
-                # 타임아웃 — 마지막 관측 잔량(관측 전무면 -1: 호출자가 보수
-                # 처리 — 지정가는 취소 시도, 시장가는 reconcile 표식)
-                return last_unfilled if last_unfilled is not None else -1
-            await self._sleep(interval)
-            elapsed += interval
+        """execution.poll_unfilled 위임 — C1 3중 방어(전파 유예/연속 2회 부재
+        확인/Task 7 잔고 대사) 계약은 그쪽 docstring."""
+        return await poll_unfilled(
+            self._orders, order_no, timeout_sec=timeout_sec,
+            interval_sec=self._config.poll_interval_sec, sleep=self._sleep)
 
     def _position(self, plan: EntryPlan, entry_price: int,
                   quantity: int | None = None) -> TradePosition:

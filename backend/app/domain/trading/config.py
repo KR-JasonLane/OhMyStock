@@ -52,7 +52,11 @@ class TradingConfig:
     reentry_cooldown_min: int = 30        # 동일 종목 재진입 쿨다운
 
     # --- 감시/청산 집행 (스펙 §6-2-b/§6-4) ---
-    exit_limit_timeout_sec: float = 5.0   # 익절 지정가 전용 (짧음 — 트레이더 패널)
+    # 청산 체결 확인 창(공용): 익절 지정가 대기 + 시장가 청산 체결 확인 폴
+    # (monitor._fill_timeout — 동시호가 구간엔 15:30 매칭까지 자동 연장).
+    # "짧음"의 근거는 익절 지정가(트레이더 패널) — 시장가 확인에도 같은 창을
+    # 쓴다(P5-T6b 트레이더 I7: 문서-사용처 정합).
+    exit_limit_timeout_sec: float = 5.0
     poll_interval_sec: float = 1.0        # ka10095 폴링 주기 (G1 실측 ~1초 정합)
     quote_failure_threshold: int = 5      # 연속 조회 실패 시 경고 전환
 

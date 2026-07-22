@@ -44,8 +44,11 @@ class ExitPhase(enum.Enum):
     """EXITING의 서브상태 — **익절 지정가 경로에만 존재**(스펙 §6-2-b: 손절·
     트레일링·기간초과·킬스위치 청산은 시장가 단일이라 서브상태 없음).
     entry만 정교화하고 exit을 단일 화살표로 두면 이익 확정 경로에 같은 클래스
-    결함이 남는다(개발자 패널 — v3 대칭화)."""
+    결함이 남는다(개발자 패널 — v3 대칭화). CANCEL_REQUESTED는 지정가 취소
+    직전 영속(P5-T6b 아키텍트 #3 — EntryPhase와 대칭: "취소됐는데 시장가
+    재발주 전 사망"을 reconcile이 식별하는 유일한 근거)."""
     LIMIT_SUBMITTED = "limit_submitted"
+    CANCEL_REQUESTED = "cancel_requested"
     MARKET_SUBMITTED = "market_submitted"
 
 

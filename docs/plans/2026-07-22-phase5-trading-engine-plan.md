@@ -405,6 +405,12 @@ async def apply_reconcile(actions, orders: OrderPort,
 
 **Steps:**
 - [ ] `reconcile_decide` 6분기 순수 전수 테스트 + 진입 창 경계 + 시장가 미확정 흡수.
+- [ ] **재기동 시 EXITING 복구 최우선**(보안 P5-T6b #4): monitor의 _pending
+      (미확정 청산 주문 추적)은 인메모리라 재시작 시 소실 — DB의 EXITING
+      포지션은 poll_once의 ENTERED 필터에도 안 걸리므로 reconcile ④⑤(+시장가
+      미확정 흡수)가 잡지 못하면 **완전 고아**(추가 감시 전무)가 된다. Task 7
+      _run() 진입부 reconcile이 EXITING을 잔고 대사로 우선 처리하는 것이
+      이 갭의 유일한 안전망임을 테스트로 고정할 것.
 - [ ] **패널:** (아키텍트) 시작조건 통합, (트레이더/보안) 고아 주문 방지.
 
 ---
@@ -435,7 +441,9 @@ async def apply_reconcile(actions, orders: OrderPort,
 
 **Steps:**
 - [ ] `TradingService` 조립 — reconcile 선행, 킬 스위치 종료 조건, 유동성 조인·
-      `check_order_caps` 주입.
+      `check_order_caps` 주입. **PositionMonitor는 trade_run당 새 인스턴스 +
+      단일 루프 순차 호출**(P5-T6b 아키텍트 #5 — 인메모리 _pending/카운터가
+      거래일 경계를 넘으면 장전 오판 EXIT_FAILED 위험).
 - [ ] **`_run()` 종료(finally) 시 `trade_runs.stopped_by_kill_switch`/`kill_switch_mode`를
       `request_stop` 여부·모드로부터 기록**(보안 Important — 킬 스위치 감사, 요약과
       스텝 일치). **finish_run은 모든 종료 경로(정상/예외/킬스위치)에서 try/finally로
@@ -443,6 +451,12 @@ async def apply_reconcile(actions, orders: OrderPort,
       보안 forward-pointer). entry_price는 체결 확정 시 1회만 기록하는 불변식도
       호출부가 준수(감사 재구성 전제 — P5-T5 보안 Minor).
 - [ ] API 4종 + 인증. 버그 봉쇄 한도는 Task 6의 `check_order_caps`로 발주 직전 재검증.
+      **`check_order_caps(amount_krw, side)` 구현 계약(P5-T6b 트레이더 C2/
+      아키텍트 #4):** 단건·일일 **금액/건수 상한 차단은 매수(BUY)에만** 적용
+      — 매도(SELL: 청산·킬스위치)는 기록/카운트만 하고 **절대 차단하지
+      않는다**(리스크 축소 주문이 자기 안전장치에 막혀 EXIT_FAILED로 고정되는
+      역설 방지; 매도 폭주는 monitor의 재시도 상한 3회+pending 중복 가드가
+      구조적으로 봉쇄). 캡 소진 시 동작 = 신규 진입만 정지.
       **일일 누적 상한 카운터는 추정 금액(ask×qty)으로 선누적하되, 시장가 상방
       슬리피지가 체계적이면 실측 체결액(잔고 pur_pric) 사후 보정 검토**(P5-T6a
       보안 forward-pointer — 추정치 누적만으로 max_daily_order_krw 실질 초과 가능).
@@ -463,8 +477,11 @@ async def apply_reconcile(actions, orders: OrderPort,
       스냅샷, 최대 1 interval 낡음 — 트레이더 I4)을 실측값으로 교정하고,
       잔고 0이면 유령 포지션 즉시 해소(C1 잔여 리스크 봉쇄 — ⓒ 방어선).
 - [ ] 3자 배타 양방향 배선(collect/score API 가드 포함) + 실전 스코프 검증자.
-- [ ] **패널:** (보안) 인증·스코프 강제·킬스위치 가용성·감사 기록, (아키텍트) 3자
-      배선·수명주기, (트레이더) 진입 창·종료 조건, (개발자) 조립 명료성.
+- [ ] **패널:** (보안) 인증·스코프 강제·킬스위치 가용성·감사 기록 + **caps
+      구현체가 SELL을 실제로 차단하지 않는지 재검증**(P5-T6b 보안 델타
+      포워드 포인터 — 계약은 시그니처·문서·테스트로만 고정된 상태), (아키텍트)
+      3자 배선·수명주기, (트레이더) 진입 창·종료 조건 + caps 매도 비차단
+      실구현 확인(P5-T6b 트레이더 C2 동일 항목), (개발자) 조립 명료성.
 
 ---
 

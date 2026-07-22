@@ -15,9 +15,10 @@ def test_상태기계_enum이_스펙_6_1과_일치한다():
         "entry_failed", "exit_failed"}
     assert {p.value for p in EntryPhase} == {
         "limit_submitted", "cancel_requested", "market_submitted"}
-    # ExitPhase는 익절 지정가 경로만 — CANCEL_REQUESTED 없음(시장가 폴백은
-    # 취소 후 즉시 재발주가 아니라 §6-2-b 타임아웃 흐름)
-    assert {p.value for p in ExitPhase} == {"limit_submitted", "market_submitted"}
+    # ExitPhase는 익절 지정가 경로만 — CANCEL_REQUESTED는 P5-T6b 아키텍트
+    # #3으로 추가(취소 직전 영속 — EntryPhase와 대칭, reconcile ⑤-b 근거)
+    assert {p.value for p in ExitPhase} == {
+        "limit_submitted", "cancel_requested", "market_submitted"}
 
 
 def test_청산_사유가_우선순위_전체를_커버한다():
