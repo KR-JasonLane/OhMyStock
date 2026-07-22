@@ -343,6 +343,14 @@ class PositionMonitor:
 - 조회 실패 구분(`list_instruments` state로 거래정지 vs 네트워크), 동시호가
   (15:20~15:30)·VI 백오프, 장운영시간 밖 중지·15:30 정상 반환(`calendar` 사용).
 - EXIT_FAILED 침묵 금지 → 상태 노출.
+- **⚠️ 상/하한가 ka10095 응답 형태(P5-T4 broker-api 이월, PRE-GATE 후보):**
+  상한가는 매도호가(sel_bid), 하한가는 매수호가(buy_bid)가 legit하게 소진될 수
+  있다는 가정으로 어댑터가 편측 호가 0 행을 유지하는데(제외 안 함), 실제
+  상/하한가 종목의 ka10095 응답 형태는 미실측 — 기회가 되면 실측 확인.
+- **⚠️ get_open_orders 예외 경계(P5-T4 아키텍트 이월):** 어댑터는 ka10075
+  cont-yn=Y(미체결 다중 페이지 — 페이지당 행 수 미실측)에서 fail-loud
+  BrokerError를 던진다. monitor/reconcile은 이를 **감시 루프 전면 중단이
+  아니라 경고+재시도로 흡수**할 것(조회 실패 처리와 동일 계열).
 - **⚠️ trailing_active 계약(P5-T3 트레이더 이월):** `evaluate_exit`의 익절
   백스톱은 입력 `trailing_active`가 **DB 영속값 그대로(직전 관측 상태)**라는
   계약에 의존한다 — monitor가 매 폴링마다 재계산해 넘기면(new_active와 동치)

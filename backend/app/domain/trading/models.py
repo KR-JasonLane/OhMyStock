@@ -16,19 +16,9 @@ import enum
 from dataclasses import dataclass
 from datetime import datetime
 
-
-class OrderStyle(enum.Enum):
-    """주문 유형(도메인 중립). 키움 `trde_tp` 코드값("0"/"3" — G2 실측, 단일자리)
-    으로의 매핑은 어댑터 내부에만 존재한다(스펙 §5, 브로커 교체 가능성)."""
-    LIMIT = "limit"
-    MARKET = "market"
-
-
-class OrderSide(enum.Enum):
-    """매매 방향. 키움은 방향을 필드가 아니라 TR 선택(kt10000 매수/kt10001 매도)
-    으로 구분한다 — 그 매핑도 어댑터 소관."""
-    BUY = "buy"
-    SELL = "sell"
+# OrderSide/OrderStyle은 기초 모듈 domain/broker.py가 소유(P5-T4 아키텍트 —
+# 방향 역전 방지). 여기서 재수출해 기존 소비자(orders.py/테스트) 임포트 유지.
+from app.domain.broker import OrderSide, OrderStyle  # noqa: F401
 
 
 class PositionState(enum.Enum):

@@ -1,6 +1,15 @@
-"""BrokerPort의 키움 구현. TR id·필드명 등 키움 상세는 이 파일 밖으로 새지 않는다.
-응답 필드명은 비공식 자료 기반이며 라이브 스모크로 실측 검증한다 (spec §5)."""
+"""BrokerPort/OrderPort의 키움 구현. TR id·필드명 등 키움 상세는 이 파일 밖으로
+새지 않는다. 응답 필드명은 비공식 자료 기반이며 라이브 스모크로 실측 검증한다
+(spec §5).
 
+**페이지 초과 정책(P5-T4 아키텍트 패널 — 한 곳에 정리):**
+  - 카탈로그류(list_instruments 등): call_paged 상한 초과 시 **조용한 절단 +
+    경고 로그** — 대량 목록의 부분 수집은 멱등 재수집으로 복구 가능.
+  - 주문/계좌류(get_open_orders): cont-yn=Y면 **fail-loud** — 미체결 누락은
+    취소 실패·포지션 방치로 직결되므로 부분 결과를 돌려주지 않는다.
+  다음 기여자는 메서드 성격에 맞는 쪽을 따를 것(교차 복제 금지)."""
+
+import logging
 from collections.abc import Callable
 from contextlib import aclosing
 from datetime import date, datetime
@@ -8,8 +17,16 @@ from decimal import Decimal
 
 from app.adapters.kiwoom.auth import KST
 from app.adapters.kiwoom.client import KiwoomHttpClient
-from app.domain.broker import Balance, Candle, Deposit, Instrument, Position, Quote, Sector
+from app.adapters.kiwoom import orders as _orders
+from app.domain.broker import (Balance, Candle, Deposit, Instrument,
+                               MarketData, OpenOrder, OrderAck, OrderRequest,
+                               Position, Quote, Sector, validate_symbol)
 from app.domain.errors import BrokerError
+
+# ka10095(관심종목정보) — G1 실측 확정(2026-07-22): 다종목 구분자 파이프('|'),
+# 맨코드, 1회 최대 100종목(101→rc=5), 리스트 키 atn_stk_infr, 최우선 호가
+# sel_bid/buy_bid 포함. 더미/결측 종목은 빈 행(stk_cd="")으로 섞여 온다 — 필터.
+_QUOTES_BATCH_MAX = 100
 
 # ka10099(전체종목조회) 시장구분 — 실측 확정 (스파이크 2026-07-17).
 _MRKT_TP = {"kospi": "0", "kosdaq": "10", "etf": "8"}
@@ -18,6 +35,8 @@ _MRKT_TP = {"kospi": "0", "kosdaq": "10", "etf": "8"}
 # ka10099와 코스닥 값이 다르다(10 vs 1)는 점에 주의.
 _SECTOR_MARKETS = (("kospi", "0"), ("kosdaq", "1"))
 _SECTOR_MRKT_TP = dict(_SECTOR_MARKETS)
+
+logger = logging.getLogger(__name__)
 
 
 def _normalize_symbol(raw: str) -> str:
@@ -32,9 +51,10 @@ def _normalize_symbol(raw: str) -> str:
     유지한다. fail-loud: 그래도 형식이 맞지 않으면(무음 실패 대신) ValueError로
     표면화한다."""
     code = raw.removeprefix("A")
-    if not (len(code) == 6 and code.isascii() and code.isalnum()):
-        raise ValueError(f"unexpected symbol format: {raw!r}")
-    return code
+    try:
+        return validate_symbol(code)  # 형식 규칙은 도메인 소유(P5-T4 보안 패널)
+    except ValueError:
+        raise ValueError(f"unexpected symbol format: {raw!r}") from None
 
 
 def _to_int(s: str | None) -> int:
@@ -225,6 +245,108 @@ class KiwoomBroker:
             raise BrokerError(
                 f"unexpected response schema [ka20002]: {type(exc).__name__}") from exc
         return members
+
+    # --- OrderPort (P5 Task 4 — 전 필드 G1/G2/G3 실측 확정, CLAUDE.md §5) ---
+
+    async def get_quotes(self, symbols: list[str]) -> list[MarketData]:
+        """ka10095 다종목 시세+호가. 100종목 초과는 내부에서 청크 분할(호출자
+        무지 — 스펙 §5). 빈 행(결측/더미 종목)은 제외하고 반환한다."""
+        for s in symbols:
+            validate_symbol(s)  # 파이프 조인 전 형식 검증(스머글링 방어 — 보안 패널)
+        results: list[MarketData] = []
+        for i in range(0, len(symbols), _QUOTES_BATCH_MAX):
+            chunk = symbols[i:i + _QUOTES_BATCH_MAX]
+            data, _, _ = await self._client.call(
+                "stkinfo", "ka10095", {"stk_cd": "|".join(chunk)})
+            try:
+                for row in data.get("atn_stk_infr") or []:
+                    raw_symbol = row.get("stk_cd", "")
+                    if not str(raw_symbol).strip():
+                        continue  # 빈 행 — G1 실측: 더미 코드는 빈 행으로 옴
+                    price = _to_price(row.get("cur_prc"))
+                    bid = _to_price(row.get("buy_bid"))
+                    ask = _to_price(row.get("sel_bid"))
+                    if price <= 0:
+                        # 참 degenerate(stk_cd는 있으나 가격 공백 — ka10081
+                        # 012510과 동일 클래스) — price=0이 손절 판정으로 흐르면
+                        # 위험. OrderPort 계약(결측 제외)에 따라 제외+경고.
+                        logger.warning(
+                            "ka10095 degenerate row for %s (price=0) — excluded",
+                            raw_symbol)
+                        continue
+                    if bid <= 0 or ask <= 0:
+                        # 호가 한쪽 0은 제외하지 **않는다**(broker-api 델타):
+                        # 상한가는 매도호가(ask), 하한가는 매수호가(bid)가
+                        # legit하게 소진될 수 있고, 그 순간이야말로 감시(손절/
+                        # 트레일링 — price만 소비)가 가장 중요하다. 진입 지정가
+                        # (ask 소비)는 갭가드가 상한가 후보를 이미 배제. 실제
+                        # 상/하한가 ka10095 응답 형태는 PRE-GATE 실측 대상.
+                        logger.info(
+                            "ka10095 one-sided book for %s (bid=%d ask=%d) — kept",
+                            raw_symbol, bid, ask)
+                    results.append(MarketData(
+                        quote=Quote(
+                            symbol=_normalize_symbol(raw_symbol),
+                            name=row.get("stk_nm", ""),
+                            price=price,
+                            change_rate=_to_decimal(row.get("flu_rt")),
+                            volume=_to_int(row.get("trde_qty")),
+                        ),
+                        bid=bid,
+                        ask=ask,
+                    ))
+            except (KeyError, ValueError, ArithmeticError, TypeError,
+                    AttributeError) as exc:
+                raise BrokerError(
+                    f"unexpected response schema [ka10095]: {type(exc).__name__}"
+                ) from exc
+        return results
+
+    async def place_order(self, req: OrderRequest) -> OrderAck:
+        """kt10000(매수)/kt10001(매도). 응답 바디만 소비 — Authorization/토큰은
+        어느 계층에도 없음(§9 보안). rc!=0(RC4003 호가단위 오류 등)은 client가
+        ApiError로 표면화한다(fail-loud)."""
+        data, _, _ = await self._client.call(
+            _orders.CATEGORY_ORDER, _orders.order_api_id(req.side),
+            _orders.build_order_body(req))
+        try:
+            return OrderAck(order_no=data["ord_no"],
+                            message=data.get("return_msg", ""))
+        except (KeyError, TypeError) as exc:
+            raise BrokerError(
+                f"unexpected response schema [order]: {type(exc).__name__}") from exc
+
+    async def cancel_order(self, order_no: str, symbol: str) -> OrderAck:
+        """kt10003 전량 취소(cncl_qty="0" — G2 실측 계약)."""
+        validate_symbol(symbol)  # 실취소 경로 — 형식 오류는 호출 전 차단
+        data, _, _ = await self._client.call(
+            _orders.CATEGORY_ORDER, _orders.API_CANCEL,
+            _orders.build_cancel_body(order_no, symbol))
+        try:
+            return OrderAck(order_no=data["ord_no"],
+                            message=data.get("return_msg", ""))
+        except (KeyError, TypeError) as exc:
+            raise BrokerError(
+                f"unexpected response schema [kt10003]: {type(exc).__name__}") from exc
+
+    async def get_open_orders(self) -> list[OpenOrder]:
+        """ka10075 미체결 조회. 단일 페이지만 관측됨(G2) — cont-yn=Y가 오면
+        다중 페이지 미체결이 존재한다는 뜻이라 fail-loud(조용한 누락 방지;
+        P5 운용상 미체결은 소수라 실질 발생 확률 낮음)."""
+        data, cont, _ = await self._client.call(
+            _orders.CATEGORY_ACCOUNT, _orders.API_OPEN_ORDERS,
+            dict(_orders.OPEN_ORDERS_BODY))
+        if cont == "Y":
+            raise BrokerError(
+                "ka10075 paginated response (cont-yn=Y) — unfilled orders "
+                "exceed one page; refusing to silently truncate")
+        try:
+            return [_orders.parse_open_order(row, _normalize_symbol,
+                                             _to_int, _to_price)
+                    for row in data.get("oso") or []]
+        except (KeyError, ValueError, TypeError, AttributeError) as exc:
+            raise BrokerError(
+                f"unexpected response schema [ka10075]: {type(exc).__name__}") from exc
 
     async def aclose(self) -> None:
         await self._client.aclose()

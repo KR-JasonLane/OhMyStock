@@ -190,6 +190,11 @@ evidence trail.
     body `{all_stk_tp:"0", trde_tp:"0", stex_tp:"0"}`; list key **`oso`**; row fields
     include `ord_no`/`stk_cd`/`ord_qty`/`oso_qty`/`ord_pric`/`ord_stt`(="접수")/
     `orig_ord_no`/`stex_tp`/`tm`/`cntr_qty`. `stex_tp="0"` accepted (not "KRX" literal).
+  - **SELL+LIMIT verified live (2026-07-22, tests/live/test_live_orders.py):**
+    kt10001 with trde_tp="0"+ord_uv accepted (rc=0 "모의투자 매도주문완료") —
+    closes the one order-type combination G2/G3 did not cover. **ka10075
+    `io_tp_nm` raw value measured: `'-매도'`** (prefixed SUBSTRING, not exact
+    "매도") — parsers MUST use containment matching, never equality.
   - **⚠️ Order and quote TRs use SEPARATE rate-limit buckets — verified:** a quote
     (`ka10095`) call immediately after an order (`kt10000`) returned `rc=0` with no 429.
     This RESOLVES the §11-5 risk (손절 order delayed by quote polling) — no order-
