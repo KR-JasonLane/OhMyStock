@@ -27,22 +27,31 @@
 >    `docs/specs/2026-07-22-replay-mock-server-design.md`(5자 리뷰 승인) +
 >    계획서 `docs/plans/2026-07-22-replay-mock-server-plan.md`(R1~R7).
 >    **R1(수집 실측)·R2(clock/minute_store/account/ticks)·R3(매칭 엔진+
->    FaultPolicy seam) 완료** — ka10080 실측(`replay-ka10080-probe.txt`),
->    커버리지 게이트(윈도우 모드, 앵커 후보 2026-06-25 확보 —
->    `replay-ka10080-coverage.txt`), 데이터 `backend/replay/data/minutes.sqlite`
->    (281MB, gitignore). R3 핵심: §8 매칭 룰(시장가 현재가/마켓터블 재평가=
->    현재가 체결/과거 구간 크로스=limit가), 미체결 매수 예약 차감(실서버
->    ord_alow_amt 재현), 전파 지연, store.now_provider 자동 바인딩(미래
->    누출 클램프). **다음: R4(키움 엔드포인트 1세트 — check_fills 호출 계약
->    포함, broker-api 패널 추가).** R1 잔여: 저유동 대체 심볼 수집+ka10095
->    프로브, 페이지 경계 표본(R7 전). **부산물: market_calendar KST 정규화
->    프로덕션 버그 수정 완료**(UTC now로 진입 창 9시간 어긋남 — 회귀 테스트).
+>    FaultPolicy seam)·R4(키움 엔드포인트 1세트) 완료** — ka10080 실측
+>    (`replay-ka10080-probe.txt`), 커버리지 게이트(윈도우 모드, 앵커 후보
+>    2026-06-25 — `replay-ka10080-coverage.txt`), 데이터
+>    `backend/replay/data/minutes.sqlite`(281MB, gitignore). R3 핵심: §8
+>    매칭 룰(시장가 현재가/마켓터블 재평가=현재가/과거 크로스=limit가),
+>    미체결 매수 예약 차감(reserve_price 접수 고정 — ord_alow_amt 재현),
+>    전파 지연, now_provider 자동 바인딩. R4 핵심: replay.main(uvicorn
+>    --factory, 단일 워커 전제), oauth2 단일 활성 토큰+8005 재현+시크릿
+>    무로그(회귀), ka10095(파이프·100상한·63필드·합성 호가 ±틱·전일 종가
+>    기반 flu_rt 실값), kt10000/10001/10003(RC4003·전량취소),
+>    ka10075(전파 지연 창·io_tp_nm '-매도' 원문), kt00001(예약 차감
+>    ord_alow_amt), kt00018(A프리픽스·패딩 폭 15/12), **모든 TR 진입
+>    check_fills 계약**+MatchingEngine.cancel() 진입 체결 확정, 정제
+>    픽스처 3종(tests/replay_mock/fixtures). §9에 "진입 지정가 fill 억제"
+>    시나리오 신설(진입 폴백 미검증 은폐 방지 — 트레이더 R4). 5자 패널
+>    (4+broker-api) 전원 승인. **다음: R5(결함 시나리오+관리 API —
+>    admin.py/faults.py 확장, in-place 리셋).** R1 잔여: 저유동 대체 심볼
+>    수집+ka10095 프로브, 페이지 경계 표본(R7 전). **부산물:
+>    market_calendar KST 정규화 프로덕션 버그 수정 완료**(회귀 테스트).
 > 3. **Task 0 G4**(모의키→실전 엔드포인트 대칭성 — 독립 스크립트+즉시 revoke,
 >    장 무관) — "준비되면" 사용자 지시 대기 상태.
 > 4. Phase 5 회고록 → Phase 6(스케줄러) 착수 준비.
 >
 > **환경:** DB 컨테이너 `127.0.0.1:15432` 가동 중. 테스트는 DB 불필요(sqlite,
-> 620 passed / live 11 deselected). 키움 모의 키는 `.env`(backend/.env 심볼릭).
+> 643 passed / live 11 deselected). 키움 모의 키는 `.env`(backend/.env 심볼릭).
 > 실측 evidence는 `.superpowers/sdd/`(gitignore). **Task 7 이월 게이트:
 > /trade/status·positions 무인증은 Phase 7 착수 전 읽기 스코프 확정(§8-2),
 > 실전 전환 시 수수료 기본값 실측 재설정 + API_TRADE_TOKEN 별도 발급.**

@@ -124,11 +124,9 @@ class MatchingEngine:
             # 시점에 ord_alow_amt를 차감한다: 같은 자금으로 두 번째 매수를
             # 내면 거부. 예약 없이 통과시키면 중복 진입 버그가 리플레이에서
             # 정상처럼 보인다). 예약 단가는 접수 시점 고정(reserve_price —
-            # 이후 시세 결측이 예약액을 침묵 0원으로 만들 수 없다).
-            reserved = sum(
-                self._account.estimate_buy_cost(o.reserve_price, o.unfilled)
-                for o in self._account.open_orders.values()
-                if o.side == "buy" and o.unfilled > 0)
+            # 이후 시세 결측이 예약액을 침묵 0원으로 만들 수 없다). 합산
+            # 수식은 kt00001 ord_alow_amt와 공유(account.reserved_buy_total).
+            reserved = self._account.reserved_buy_total()
             cost = self._account.estimate_buy_cost(limit_price or price,
                                                    quantity)
             if self._account.cash - reserved < cost:
@@ -209,6 +207,12 @@ class MatchingEngine:
     # ── 취소 ────────────────────────────────────────────────────────────
 
     def cancel(self, order_no: str) -> OrderResult:
+        # 취소 전 체결 상태 확정(트레이더 R4 — 라우터 진입 호출에만 의존하면
+        # 엔진을 직접 쓰는 경로(R5 시나리오 테스트 등)에서 이미 크로스된
+        # 주문의 취소가 조용히 성공해 "취소했으니 안전" 오신호를 만든다.
+        # 이중매매 가드 검증 통로의 단일 방어선 — 중복 호출은 무해:
+        # 두 번째 check_fills는 빈 구간 스캔).
+        self.check_fills()
         order = self._account.open_orders.get(order_no)
         if order is None or order.unfilled <= 0:
             # 체결 완료/미지 주문 취소 — 거부(가정: 미실측, 스펙 §7 PRE-GATE).

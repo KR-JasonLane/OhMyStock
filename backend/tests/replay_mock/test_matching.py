@@ -162,7 +162,7 @@ def test_전파_지연_동안_ka10075_비노출(tmp_path):
 def test_fault_체결_억제와_부분체결_훅(tmp_path):
     class Partial(FaultPolicy):
         def __init__(self):
-            self.suppressed = {"R0000002"}
+            self.suppressed = {"0000002"}
 
         def suppress_fill(self, order_no):
             return order_no in self.suppressed
@@ -175,7 +175,7 @@ def test_fault_체결_억제와_부분체결_훅(tmp_path):
     first = env.engine.submit("005930", "buy", "market", 10)
     assert env.account.holdings["005930"].quantity == 4   # 부분체결(훅)
     assert env.account.open_orders[first.order_no].unfilled == 6
-    second = env.engine.submit("005930", "buy", "market", 3)  # R0000002 억제
+    second = env.engine.submit("005930", "buy", "market", 3)  # 0000002 억제
     assert second.ok
     assert env.account.open_orders[second.order_no].unfilled == 3  # 미체결 잔존
     faults.suppressed.clear()
@@ -199,6 +199,19 @@ def test_지정가_부분체결은_구간_내_이후_캔들로_잔량을_계속_
     # 한 번의 check_fills에서 두 크로스 캔들로 4+4=8 체결, 잔량 2
     assert env.account.holdings["005930"].quantity == 8
     assert env.account.open_orders[result.order_no].unfilled == 2
+
+
+def test_이미_크로스된_주문의_취소는_체결이_선행되어_거부된다(tmp_path):
+    """트레이더 R4 — 취소 전 check_fills 확정: 재생 시각상 이미 체결됐어야
+    할 스탠딩 주문의 취소가 성공하면 '취소했으니 안전' 오신호가 프로덕션
+    이중매매 가드 검증을 훼손한다."""
+    env = Env(tmp_path)
+    pending = env.engine.submit("005930", "buy", "limit", 10,
+                                limit_price=99_000)
+    env.replay_ts = T0 + timedelta(minutes=1, seconds=30)  # 체결됐어야 할 시각
+    result = env.engine.cancel(pending.order_no)
+    assert not result.ok and result.reason == "order not open"
+    assert env.account.holdings["005930"].quantity == 10   # 체결이 반영됨
 
 
 def test_취소_후_check_fills는_안전하고_재체결_없다(tmp_path):
@@ -296,7 +309,7 @@ def test_fault_신규_거부와_취소_거부(tmp_path):
     result = env.engine.cancel(pending.order_no)  # 실존 미체결 주문 취소 거부
     assert not result.ok and "취소 거부" in result.reason
     # 존재 확인이 결함 훅보다 먼저(트레이더 Minor — 시나리오 로그 구분)
-    ghost = env.engine.cancel("R9999999")
+    ghost = env.engine.cancel("9999999")
     assert not ghost.ok and ghost.reason == "order not open"
 
 

@@ -21,6 +21,16 @@ def _pct(amount: int, pct: float) -> int:
     return round(amount * pct / 100)
 
 
+def commission(amount: int) -> int:
+    """위탁수수료(모의 실측률) — api 계층의 kt00018 수수료 필드 산출 공용."""
+    return _pct(amount, COMMISSION_PCT)
+
+
+def sell_tax(amount: int, market: str) -> int:
+    """매도 거래세(ETF 면제 — 모의 실측률)."""
+    return 0 if market == "etf" else _pct(amount, TAX_SELL_PCT)
+
+
 @dataclass
 class Holding:
     symbol: str
@@ -62,8 +72,11 @@ class Account:
     _seq: int = 0
 
     def next_order_no(self) -> str:
+        # 실측 형태: ka10075 ord_no='0034447' — 7자리 제로패딩 숫자 문자열
+        # (R4 형태 재현: R-프리픽스 등 목 티가 나는 형식은 프로덕션 파서의
+        # 암묵 가정을 검증하지 못한다)
         self._seq += 1
-        return f"R{self._seq:07d}"
+        return f"{self._seq:07d}"
 
     def estimate_buy_cost(self, price: int, quantity: int) -> int:
         """매수 소요 추정(금액+수수료) — 접수 시점 예수금 검사용(§8).
@@ -72,12 +85,23 @@ class Account:
         amount = price * quantity
         return amount + _pct(amount, COMMISSION_PCT)
 
+    def reserved_buy_total(self) -> int:
+        """미체결 매수 예약 합계(접수 시점 고정 reserve_price 기준 — §2).
+        matching.submit의 가용현금 검사와 kt00001 ord_alow_amt 산출이
+        같은 수식을 공유한다(실서버: 접수 시점 주문가능금액 차감)."""
+        return sum(
+            self.estimate_buy_cost(o.reserve_price, o.unfilled)
+            for o in self.open_orders.values()
+            if o.side == "buy" and o.unfilled > 0)
+
     # ── 체결 반영(매칭 엔진이 호출) ─────────────────────────────────────
 
     def apply_buy_fill(self, symbol: str, market: str, quantity: int,
                        price: int) -> None:
         amount = price * quantity
-        fee = _pct(amount, COMMISSION_PCT)
+        # 수수료 수식은 commission/sell_tax 공개 함수로 단일화(개발자 R4 —
+        # _pct 직접 호출이 남으면 요율 변경 시 한쪽만 고치는 사고 가능)
+        fee = commission(amount)
         self.cash -= amount + fee
         if self.cash < 0:
             # 접수 시점 예약 차감(matching.submit — 실서버 ord_alow_amt 재현)
@@ -102,8 +126,8 @@ class Account:
                              f"{holding.quantity if holding else 0} "
                              f"sell={quantity}")
         amount = price * quantity
-        fee = _pct(amount, COMMISSION_PCT)
-        tax = 0 if holding.market == "etf" else _pct(amount, TAX_SELL_PCT)
+        fee = commission(amount)
+        tax = sell_tax(amount, holding.market)
         self.cash += amount - fee - tax
         # 평단 유지 매도(total_cost 비례 차감). ⚠️ 정수 절삭 평단(//)의 반복
         # 매매 누적 드리프트(트레이더 R2 #3 실측: 2000회 교차 시 최대 ~168원)

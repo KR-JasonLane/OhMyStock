@@ -1,0 +1,16 @@
+{
+  "_source": "p5-pregate-G2.txt (2026-07-22 실측) — 행 필드셋 30개와 표기가 실측된 값(ord_no 7자리 제로패딩, ord_pric 무패딩, ord_stt '접수')만 실값. io_tp_nm '-매도'는 tests/live/test_live_orders.py 실측(매수 값은 미실측 — 서버는 '+매수' 근사). 나머지 값 표기는 미실측 — 필드셋 대조 전용.",
+  "measured_values": {
+    "ord_no": "0034447", "stk_cd": "005930", "ord_qty": "1",
+    "oso_qty": "1", "ord_pric": "246000", "ord_stt": "접수",
+    "io_tp_nm": "-매도"
+  },
+  "row_fields": [
+    "acnt_no", "buy_bid", "cntr_no", "cntr_pric", "cntr_qty",
+    "cntr_tot_amt", "cur_prc", "ind_invsr", "io_tp_nm", "mang_empno",
+    "ord_no", "ord_pric", "ord_qty", "ord_stt", "orig_ord_no", "oso_qty",
+    "sel_bid", "sor_yn", "stex_tp", "stex_tp_txt", "stk_cd", "stk_nm",
+    "stop_pric", "tdy_trde_cmsn", "tdy_trde_tax", "tm", "trde_tp",
+    "tsk_tp", "unit_cntr_pric", "unit_cntr_qty"
+  ]
+}

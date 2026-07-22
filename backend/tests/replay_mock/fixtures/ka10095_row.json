@@ -1,0 +1,29 @@
+{
+  "_source": "p5-pregate-G1.txt (2026-07-22, mockapi.kiwoom.com 실측) — 계좌성 필드 마스킹된 원문 행. 필드셋(63)·±부호 표기·빈 문자열 관례의 1차 회귀 소스(스펙 §7 정제 픽스처).",
+  "row": {
+    "stk_cd": "005930", "stk_nm": "삼성전자", "cur_prc": "+273500",
+    "base_pric": "259000", "pred_pre": "+14500", "pred_pre_sig": "2",
+    "flu_rt": "+5.60", "trde_qty": "1392658", "trde_prica": "382605",
+    "cntr_qty": "+15", "cntr_str": "76.17", "pred_trde_qty_pre": "-6.83",
+    "sel_bid": "+273500", "buy_bid": "+273000",
+    "sel_1th_bid": "+273500", "sel_2th_bid": "+274000",
+    "sel_3th_bid": "+274500", "sel_4th_bid": "+275000",
+    "sel_5th_bid": "+275500",
+    "buy_1th_bid": "+273000", "buy_2th_bid": "+272500",
+    "buy_3th_bid": "+272000", "buy_4th_bid": "+271500",
+    "buy_5th_bid": "+271000",
+    "upl_pric": "+336500", "lst_pric": "-181500", "open_pric": "+276000",
+    "high_pric": "+276000", "low_pric": "+272000", "close_pric": "+273500",
+    "cntr_tm": "090231", "exp_cntr_pric": "+276000",
+    "exp_cntr_qty": "763088", "cap": "7780", "fav": "100",
+    "mac": "15989572", "stkcnt": "5846279", "bid_tm": "090231",
+    "dt": "20260722", "pri_sel_req": "1379", "pri_buy_req": "12917",
+    "pri_sel_cnt": "", "pri_buy_cnt": "", "tot_sel_req": "200461",
+    "tot_buy_req": "265231", "tot_sel_cnt": "0", "tot_buy_cnt": "",
+    "prty": "0.00", "gear": "0.00", "pl_qutr": "0.00",
+    "cap_support": "0.00", "elwexec_pric": "0", "cnvt_rt": "0.0000",
+    "elwexpr_dt": "00000000", "cntr_engg": "", "cntr_pred_pre": "",
+    "theory_pric": "", "innr_vltl": "", "delta": "", "gam": "",
+    "theta": "", "vega": "", "law": ""
+  }
+}

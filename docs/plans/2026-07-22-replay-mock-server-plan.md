@@ -70,16 +70,23 @@
   시각 미리 계산 안 함을 시계 전진으로 검증).
 
 ### R4 — 키움 엔드포인트 1세트 (+broker-api 패널)
-- **check_fills 호출 계약(트레이더 R3 #3 — 결함 재현의 재현성):** 모든
-  조회 TR 핸들러(ka10095/ka10075/kt00001/kt00018) 진입 시 `check_fills()`
-  1회 호출을 계약으로 명문화하고 통합 테스트로 고정한다(호출 시점이
-  암묵이면 동일 시나리오의 체결 시점·가격이 배선에 따라 달라진다).
+- **check_fills 호출 계약(트레이더 R3 #3 + 아키텍트 R4로 확대):** **모든
+  TR 핸들러**(조회 ka10095/ka10075/kt00001/kt00018 + 주문 kt10000/kt10001/
+  kt10003) 진입 시 `check_fills()` 1회 호출을 계약으로 명문화하고 통합
+  테스트로 고정한다(호출 시점이 암묵이면 동일 시나리오의 체결 시점·가격이
+  배선에 따라 달라진다. 주문 TR 제외 시 조회 없는 연속 제출에서 예약금·
+  보유량이 낡은 스냅샷으로 남아 실서버라면 통과할 주문을 오거부).
 - **MinuteStore 조립 계약:** 컴포지션 루트(main)가 store.now_provider에
   ReplayClock.now를 바인딩(§5 구조적 클램프)하고 store 참조를 보관
   (엔진 경유 이중 로드 금지 — 아키텍트 R3 Minor).
-- Files: `backend/replay/main.py`, `backend/replay/api/*.py`,
-  `backend/replay/tests/fixtures/*.json`(정제 픽스처 — §7),
-  `backend/replay/tests/test_endpoints.py`
+- Files: `backend/replay/main.py`, `backend/replay/{config,tokens}.py`,
+  `backend/replay/api/{common,auth,stkinfo,ordr,acnt,admin}.py`,
+  `backend/tests/replay_mock/fixtures/*.json`(정제 픽스처 — §7. ⚠️ 배치:
+  R2와 동일 사유로 replay/tests/가 아니라 tests/replay_mock/ — pyproject
+  testpaths 수집 경계), `backend/tests/replay_mock/test_endpoints.py`
+- admin.py는 R4가 `GET /_replay/status` 최소 구현(§4-2 healthcheck + §5
+  speed 스탬프)으로 선행 생성 — R5가 faults/reset을 확장(faults.py seam
+  선행 생성과 같은 소유권 패턴).
 - 대상 TR: oauth2/token·revoke(8005 계약, 시크릿 무로그+회귀 테스트),
   ka10095(파이프·100상한·합성 호가·빈 행), kt10000/10001(RC4003 틱 검증)/
   kt10003, ka10075(oso·io_tp_nm 접두 부분문자열·전파 지연), kt00001,

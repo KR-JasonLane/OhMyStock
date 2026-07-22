@@ -1,0 +1,22 @@
+{
+  "_source": "p5-pregate-G3.txt (2026-07-22 실측) — 모의 계좌 실포지션(가짜 자금) 원문. 최상위 11키 + 행 23필드, 제로패딩 폭(15/12)·A 프리픽스·음수 부호 포함 폭의 1차 회귀 소스.",
+  "top_level_keys": [
+    "acnt_evlt_remn_indv_tot", "prsm_dpst_aset_amt", "return_code",
+    "return_msg", "tot_crd_loan_amt", "tot_crd_ls_amt", "tot_evlt_amt",
+    "tot_evlt_pl", "tot_loan_amt", "tot_prft_rt", "tot_pur_amt"
+  ],
+  "row": {
+    "stk_cd": "A005930", "stk_nm": "삼성전자",
+    "evltv_prft": "-00000000002694", "prft_rt": "-00000000.99",
+    "pur_pric": "000000000272750", "pred_close_pric": "000000259000",
+    "rmnd_qty": "000000000000001", "trde_able_qty": "000000000000001",
+    "cur_prc": "000000272500",
+    "pred_buyq": "000000000000007", "pred_sellq": "000000000000007",
+    "tdy_buyq": "000000000000001", "tdy_sellq": "000000000000000",
+    "pur_amt": "000000000272750", "pur_cmsn": "000000000000950",
+    "evlt_amt": "000000000272500", "sell_cmsn": "000000000000950",
+    "tax": "000000000000544", "sum_cmsn": "000000000001900",
+    "poss_rt": "000000100.00", "crd_tp": "00", "crd_tp_nm": "",
+    "crd_loan_dt": ""
+  }
+}
