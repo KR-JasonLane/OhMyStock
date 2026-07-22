@@ -74,10 +74,24 @@ def is_trading_day(d: date) -> bool:
     return d not in holidays
 
 
+def _as_kst(now: datetime | None) -> datetime:
+    """인자 시각의 KST 정규화. ⚠️ tz-aware 입력은 반드시 KST로 변환한다 —
+    P5-T7까지 이 변환이 빠져 UTC-aware now(TradingService 기본 시계)가 그대로
+    .date()/.time()으로 읽혀 진입 창·장마감 판정이 9시간 어긋나는 실버그가
+    있었다(리플레이 스펙 아키텍트 패널 발견). naive 입력은 KST로 간주(기존
+    테스트 호환 — naive는 이미 KST 벽시계를 의도한 호출뿐)."""
+    if now is None:
+        return datetime.now(KST)
+    if now.tzinfo is None:
+        return now.replace(tzinfo=KST)
+    return now.astimezone(KST)
+
+
 def is_market_hours(now: datetime | None = None) -> bool:
     """거래일 09:00~15:30 KST 여부 (공휴일 테이블 반영). 트레이딩 엔진의 진입 창·
-    장 마감 판정에 쓴다. 테이블에 없는 연도는 평일 근사로 폴백."""
-    t = now or datetime.now(KST)
+    장 마감 판정에 쓴다. 테이블에 없는 연도는 평일 근사로 폴백.
+    now는 어떤 tz든 허용 — 내부에서 KST 정규화(_as_kst)."""
+    t = _as_kst(now)
     return is_trading_day(t.date()) and time(9, 0) <= t.time() < time(15, 30)
 
 
@@ -93,7 +107,7 @@ def held_business_days(entry_date: date, now: datetime | None = None) -> int:
     상한"이 진입일을 1일째로 세는지, 그리고 임계 비교를 `>=` 로 할지 `>`로 할지는
     **Task 3 `evaluate_exit`에서 트레이더 의미를 확정**하고 경계값 테스트를 둔다
     (이 계약이 검증 없이 하류로 굳지 않도록)."""
-    today = (now or datetime.now(KST)).date()
+    today = _as_kst(now).date()
     if today <= entry_date:
         return 0
     count = 0
@@ -111,7 +125,7 @@ def previous_weekday(now: datetime | None = None) -> date:
     당일 봉이 아직 없는 시간대의 실행 등)에는 스킵이 풀려 전 종목을 재수집한다
     (멱등이라 안전, 비용만 증가). Phase 6 스케줄러가 거래일 캘린더와 야간 실행을
     강제하면 이 과잉 재수집 클래스는 소멸한다."""
-    t = (now or datetime.now(KST)).date()
+    t = _as_kst(now).date()
     while t.weekday() >= 5:
         t -= timedelta(days=1)
     return t
@@ -126,7 +140,7 @@ def scoring_reference_date(now: datetime | None = None) -> date:
     Critical). 당일 저녁(수집 직후) 실행 시 하루 낡은 데이터가 게이트를 통과하는
     트레이드오프가 있으나 fail-safe 방향이고, Phase 6 스케줄러의 수집→스코어링
     순서 강제로 소멸한다. 휴장일 캘린더 없는 근사는 previous_weekday와 동일."""
-    t = (now or datetime.now(KST)).date() - timedelta(days=1)
+    t = _as_kst(now).date() - timedelta(days=1)
     while t.weekday() >= 5:
         t -= timedelta(days=1)
     return t

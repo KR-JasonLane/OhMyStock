@@ -11,7 +11,7 @@
 
 ## ▶ 여기서 재개 (다음 액션)
 
-**Phase 5 진행 중(2026-07-23) — Task 0(G1~G3)·1B·1~7 완료(각 태스크
+**Phase 5 진행 중(2026-07-22) — Task 0(G1~G3)·1B·1~7 완료(각 태스크
 4-에이전트 패널 통과 후 커밋). 다음: Task 8(장중 라이브 스모크).**
 
 > **▶ 다음 세션 재개 (우선순위 순):**
@@ -23,9 +23,16 @@
 >    (stop_loss_pct 타이트 설정) 시장가 청산 실증** → 킬스위치 2모드 실동작+
 >    감사 컬럼 → 재기동 reconcile 복구. 증거 `.superpowers/sdd/p5-task-8-*`.
 >    실측 팩트 CLAUDE.md §5 반영 + Phase 5 회고록(규칙 4).
-> 2. **Task 0 G4**(모의키→실전 엔드포인트 대칭성 — 독립 스크립트+즉시 revoke,
+> 2. **리플레이 목 서버(장외 검증 하네스 — 사용자 제안 2026-07-22):** 스펙
+>    `docs/specs/2026-07-22-replay-mock-server-design.md` — 5자 리뷰(4패널+
+>    broker-api) 전원 승인. ka10080 분봉 수집 실측 진행/완료(
+>    `.superpowers/sdd/replay-ka10080-probe.txt`, 데이터
+>    `backend/replay/data/minutes.sqlite` — gitignore). 다음: §11 R1~R7을
+>    계획서로 승격 → 태스크별 구현. **부산물: market_calendar KST 정규화
+>    프로덕션 버그 수정 완료**(UTC now로 진입 창 9시간 어긋남 — 회귀 테스트).
+> 3. **Task 0 G4**(모의키→실전 엔드포인트 대칭성 — 독립 스크립트+즉시 revoke,
 >    장 무관) — "준비되면" 사용자 지시 대기 상태.
-> 3. Phase 5 회고록 → Phase 6(스케줄러) 착수 준비.
+> 4. Phase 5 회고록 → Phase 6(스케줄러) 착수 준비.
 >
 > **환경:** DB 컨테이너 `127.0.0.1:15432` 가동 중. 테스트는 DB 불필요(sqlite,
 > 579 passed / live 11 deselected). 키움 모의 키는 `.env`(backend/.env 심볼릭).

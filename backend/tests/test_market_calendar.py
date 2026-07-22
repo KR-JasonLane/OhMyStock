@@ -143,3 +143,24 @@ def test_held_business_days_미래_진입일이면_0():
     entry = date(2026, 7, 25)
     now = datetime(2026, 7, 22, 10, 0, tzinfo=KST)
     assert held_business_days(entry, now) == 0
+
+
+def test_is_market_hours_UTC_aware_입력도_KST로_정규화():
+    """P5-T7 실버그 회귀(리플레이 스펙 아키텍트 발견) — TradingService 기본
+    시계는 UTC-aware인데 정규화 없이 .time()을 읽으면 진입 창·장마감 판정이
+    9시간 어긋난다. tz-aware 입력은 반드시 KST 변환."""
+    from datetime import timezone
+    # 2026-07-24(금) 00:30 UTC == KST 09:30 — 개장 직후
+    utc_now = datetime(2026, 7, 24, 0, 30, tzinfo=timezone.utc)
+    assert is_market_hours(utc_now) is True
+    # KST 06:30(장전) == UTC 21:30 전일 — 거짓이어야 함
+    utc_night = datetime(2026, 7, 23, 21, 30, tzinfo=timezone.utc)
+    assert is_market_hours(utc_night) is False
+
+
+def test_held_business_days_UTC_aware_입력_날짜_경계():
+    from datetime import timezone
+    entry = date(2026, 7, 22)
+    # UTC 7/22 23:00 == KST 7/23 08:00 — KST 기준 다음 거래일(1)
+    now = datetime(2026, 7, 22, 23, 0, tzinfo=timezone.utc)
+    assert held_business_days(entry, now) == 1
