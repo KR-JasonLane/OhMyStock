@@ -19,9 +19,11 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class ScoringProgress:
-    run_id: int
+    # run_id는 create_run 이전의 시작 placeholder에서만 None (재실행 시 tear
+    # 방지 — 아키텍트 패널 P5-T1). 그 외엔 항상 실제 정수 run_id.
+    run_id: int | None
     status: str  # running | succeeded | failed
-    stage: str   # loading | gate | computing | saving | finished
+    stage: str   # starting | loading | gate | computing | saving | finished
     done: int
     total: int
     failure_reason: str | None = None
@@ -69,6 +71,9 @@ class ScoringService(BackgroundRunService):
         별도 처리가 필요 없다."""
         cfg = self._config
         reference = self._reference_provider()
+        # create_run await 이전에 progress를 running으로 세팅 — 재실행 시 이전 런
+        # 최종 progress가 새 실행 타임스탬프와 뒤섞이는 tear 방지(아키텍트 P5-T1).
+        self._set(None, "running", "starting", 0, 0)
         run_id = await asyncio.to_thread(
             self._store.create_run, reference, cfg.to_json())
         universe_count = stale_excluded = 0
@@ -138,7 +143,7 @@ class ScoringService(BackgroundRunService):
                                 universe_count, stale_excluded, reason)
         self._set(run_id, "failed", "finished", 0, universe_count, reason)
 
-    def _set(self, run_id: int, status: str, stage: str, done: int,
+    def _set(self, run_id: int | None, status: str, stage: str, done: int,
              total: int, failure_reason: str | None = None) -> None:
         self._progress = ScoringProgress(run_id, status, stage, done, total,
                                          failure_reason)

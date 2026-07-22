@@ -33,12 +33,17 @@ async def start_collection(request: Request) -> dict:
 
 @router.get("/collect/status")
 async def collection_status(request: Request) -> dict:
-    progress = request.app.state.collection.progress()
+    service = request.app.state.collection
+    progress = service.progress()
     if progress is None:
         return {"status": "idle"}
+    # started_at/finished_at은 베이스 서비스 타임스탬프에서 노출(P5 Task 1 —
+    # 4서비스 대칭, 이전엔 analysis에만 있던 것을 collect/score까지 확장).
     body = {"run_id": progress.run_id, "status": progress.status,
             "stage": progress.stage, "done": progress.done,
-            "total": progress.total, "failed": progress.failed}
+            "total": progress.total, "failed": progress.failed,
+            "started_at": service.started_at_iso(),
+            "finished_at": service.finished_at_iso()}
     if progress.warning is not None:
         body["warning"] = progress.warning
     return body

@@ -132,6 +132,27 @@ async def test_정상_수집은_전_단계를_완료한다():
 
 
 @pytest.mark.anyio
+async def test_create_run_이전에_running_placeholder를_세팅한다():
+    """재실행 시 이전 런 최종 progress가 새 실행의 started_at/finished_at과
+    뒤섞여 노출되는 tear를 방지 — create_run await 진입 시점에 progress가 이미
+    running/starting이어야 한다(아키텍트 패널 P5-T1: analysis처럼 첫 _set이
+    첫 await 이전). 실제 서브클래스의 갱신 순서를 검증한다(Fake 패스스루 아님)."""
+    broker = FakeBroker()
+    captured = []
+
+    class SpyStore(MemoryStore):
+        def create_run(self):
+            captured.append(svc.progress())  # create_run 진입 시점 progress
+            return super().create_run()
+
+    svc = CollectionService(broker, SpyStore(), markets=("kospi",))
+    await svc.run()
+    assert captured and captured[0] is not None
+    assert captured[0].status == "running" and captured[0].stage == "starting"
+    assert captured[0].run_id is None  # create_run 이전이라 아직 None
+
+
+@pytest.mark.anyio
 async def test_재실행은_이미_최신인_종목을_건너뛴다():
     broker, store = FakeBroker(), MemoryStore()
     reference = date(2026, 7, 16)  # FakeBroker가 반환하는 봉 일자와 동일 — 결정론적 기준

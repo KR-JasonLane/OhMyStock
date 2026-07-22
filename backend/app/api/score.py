@@ -22,12 +22,15 @@ async def start_scoring(request: Request) -> dict:
 
 @router.get("/score/status")
 async def scoring_status(request: Request) -> dict:
-    progress = request.app.state.scoring.progress()
+    service = request.app.state.scoring
+    progress = service.progress()
     if progress is None:
         return {"status": "idle"}
+    # started_at/finished_at은 베이스 서비스 타임스탬프에서 노출(P5 Task 1 대칭).
     body = {"run_id": progress.run_id, "status": progress.status,
             "stage": progress.stage, "done": progress.done,
-            "total": progress.total}
+            "total": progress.total, "started_at": service.started_at_iso(),
+            "finished_at": service.finished_at_iso()}
     if progress.failure_reason is not None:
         body["failure_reason"] = progress.failure_reason
     return body

@@ -23,9 +23,12 @@ _ALL_MARKETS = frozenset({"kospi", "kosdaq", "etf"})
 
 @dataclass(frozen=True)
 class CollectionProgress:
-    run_id: int
+    # run_id는 create_run 이전의 시작 placeholder progress에서만 None이다
+    # (재실행 시 status/타임스탬프 tear 방지 — 아키텍트 패널 P5-T1). 그 외
+    # 모든 상태는 create_run 이후이므로 실제 정수 run_id를 갖는다.
+    run_id: int | None
     status: str  # running | done | failed
-    stage: str   # instruments | sectors | candles | finished
+    stage: str   # starting | instruments | sectors | candles | finished
     done: int
     total: int
     failed: int
@@ -116,6 +119,11 @@ class CollectionService(BackgroundRunService):
         보장한다 — create_run 실패를 포함해 이 메서드 어디서 예외가 나든
         별도 처리가 필요 없다.
         """
+        # create_run await 이전에 progress를 running으로 즉시 세팅한다 — 그렇지
+        # 않으면 재실행 시 이전 런의 최종 progress(status=done/failed)가 새 실행의
+        # started_at/finished_at=None과 뒤섞여 status API에 노출된다(아키텍트 패널
+        # P5-T1: analysis는 이미 첫 _set이 첫 await 이전이라 안전, collect/scoring도 정렬).
+        self._set(None, "running", "starting", 0, 0, 0)
         run_id = await asyncio.to_thread(self._store.create_run)
         succeeded = failed = total = 0
         notes: list[str] = []
@@ -241,7 +249,7 @@ class CollectionService(BackgroundRunService):
             self._set(run_id, "failed", "finished", succeeded + failed, total, failed)
             raise
 
-    def _set(self, run_id: int, status: str, stage: str,
+    def _set(self, run_id: int | None, status: str, stage: str,
              done: int, total: int, failed: int) -> None:
         self._progress = CollectionProgress(
             run_id, status, stage, done, total, failed, self._warning)

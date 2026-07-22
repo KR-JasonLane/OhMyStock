@@ -74,6 +74,29 @@ async def test_성공_경로_결과_저장():
 
 
 @pytest.mark.anyio
+async def test_create_run_이전에_running_placeholder를_세팅한다():
+    """collection과 대칭 — create_run await 진입 시점에 progress가 이미
+    running/starting(run_id=None)이어야 재실행 tear가 없다(아키텍트 패널
+    P5-T1 델타 Minor: scoring에도 순서 회귀 테스트 대칭 추가)."""
+    candles = make_candles([10, 20, 30, 40, 50, 60, 70, 80])
+    captured = []
+
+    class SpyStore(FakeStore):
+        def create_run(self, reference_date, config_json):
+            captured.append(service.progress())
+            return super().create_run(reference_date, config_json)
+
+    store = SpyStore([normal("AAA111")], {"005": ["AAA111"]},
+                     {"005": "음식료"}, {"AAA111": candles})
+    service = ScoringService(store, config=CFG, strategies=(AlwaysOn(),),
+                             reference_provider=lambda: candles[-1].date)
+    await service.run()
+    assert captured and captured[0] is not None
+    assert captured[0].status == "running" and captured[0].stage == "starting"
+    assert captured[0].run_id is None
+
+
+@pytest.mark.anyio
 async def test_유니버스_필터_비정상_상태_제외():
     candles = make_candles([10, 20, 30, 40, 50, 60, 70, 80])
     store = FakeStore(

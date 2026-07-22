@@ -11,10 +11,13 @@ from app.domain.scoring.service import ScoringProgress
 
 
 class FakeScoring:
-    def __init__(self, running=False, progress=None, latest=None):
+    def __init__(self, running=False, progress=None, latest=None,
+                 started_at_iso=None, finished_at_iso=None):
         self._running = running
         self._progress = progress
         self._latest = latest
+        self._started_at_iso = started_at_iso
+        self._finished_at_iso = finished_at_iso
 
     def is_running(self):
         return self._running
@@ -24,6 +27,12 @@ class FakeScoring:
 
     def progress(self):
         return self._progress
+
+    def started_at_iso(self):
+        return self._started_at_iso
+
+    def finished_at_iso(self):
+        return self._finished_at_iso
 
     def latest_results(self):
         return self._latest
@@ -87,6 +96,18 @@ def test_status_실패사유_노출():
     resp = make_client(scoring=FakeScoring(progress=progress)).get("/score/status")
     body = resp.json()
     assert body["status"] == "failed" and body["failure_reason"] == "stale data"
+
+
+def test_status_타임스탬프_실제값_노출():
+    # P5 Task 1 대칭 — score도 실제 ISO 타임스탬프 배선 검증(개발자 패널).
+    progress = ScoringProgress(run_id=3, status="running", stage="computing",
+                               done=5, total=10)
+    resp = make_client(scoring=FakeScoring(
+        progress=progress, started_at_iso="2026-07-22T00:00:00+00:00",
+        finished_at_iso=None)).get("/score/status")
+    body = resp.json()
+    assert body["started_at"] == "2026-07-22T00:00:00+00:00"
+    assert body["finished_at"] is None
 
 
 def test_latest_없으면_404():

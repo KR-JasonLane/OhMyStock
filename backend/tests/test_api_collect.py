@@ -18,9 +18,12 @@ class StubService:
     깨지지 않는다 — 항상 완료된 것으로 취급해 None을 반환한다.
     """
 
-    def __init__(self, running=False, progress=None):
+    def __init__(self, running=False, progress=None,
+                 started_at_iso=None, finished_at_iso=None):
         self._running = running
         self._progress = progress
+        self._started_at_iso = started_at_iso
+        self._finished_at_iso = finished_at_iso
         self.start_calls: list[str | None] = []
 
     def start(self, warning=None):
@@ -35,6 +38,12 @@ class StubService:
 
     def progress(self):
         return self._progress
+
+    def started_at_iso(self):
+        return self._started_at_iso
+
+    def finished_at_iso(self):
+        return self._finished_at_iso
 
 
 class FakeScoring:
@@ -93,7 +102,8 @@ def test_status는_progress를_그대로_노출한다():
             run_id=1, status="running", stage="candles", done=10, total=100, failed=2))
         body = client.get("/collect/status").json()
     assert body == {"run_id": 1, "status": "running", "stage": "candles",
-                    "done": 10, "total": 100, "failed": 2}
+                    "done": 10, "total": 100, "failed": 2,
+                    "started_at": None, "finished_at": None}
 
 
 def test_status는_warning이_있으면_함께_노출한다():
@@ -105,7 +115,22 @@ def test_status는_warning이_있으면_함께_노출한다():
         body = client.get("/collect/status").json()
     assert body == {"run_id": 1, "status": "running", "stage": "candles",
                     "done": 10, "total": 100, "failed": 2,
+                    "started_at": None, "finished_at": None,
                     "warning": "market-hours run may store unconfirmed candles"}
+
+
+def test_status_타임스탬프_실제값_노출():
+    # P5 Task 1 대칭 — collect도 analyze처럼 실제 ISO 타임스탬프가 배선되는지
+    # (빈 값 패스스루가 아니라) 검증한다(개발자 패널: positive-value 회귀).
+    app = create_app(_settings())
+    with TestClient(app) as client:
+        app.state.collection = StubService(
+            progress=CollectionProgress(run_id=1, status="running",
+                                        stage="candles", done=1, total=10, failed=0),
+            started_at_iso="2026-07-22T09:00:00+00:00", finished_at_iso=None)
+        body = client.get("/collect/status").json()
+    assert body["started_at"] == "2026-07-22T09:00:00+00:00"
+    assert body["finished_at"] is None  # running 중 = 미종료
 
 
 def test_최초에는_idle():

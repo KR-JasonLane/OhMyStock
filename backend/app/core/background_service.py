@@ -86,9 +86,18 @@ class BackgroundRunService:
         return self._started_at
 
     def finished_at(self) -> datetime | None:
-        """실행 종료 시각(성공/실패 무관, finally에서 고정). running 중이면
-        직전 종료 시각(또는 최초 실행 전 None)."""
+        """실행 종료 시각(성공/실패 무관, finally에서 고정). running 중에는
+        None이다 — _execute 진입 시 None으로 리셋하므로(진행 중 = 미종료).
+        미실행 전에도 None."""
         return self._finished_at
+
+    def started_at_iso(self) -> str | None:
+        """started_at의 ISO 문자열(API status 노출용, 4서비스 공통). None이면 None."""
+        return self._started_at.isoformat() if self._started_at else None
+
+    def finished_at_iso(self) -> str | None:
+        """finished_at의 ISO 문자열(API status 노출용). running 중이면 None."""
+        return self._finished_at.isoformat() if self._finished_at else None
 
     def request_stop(self, mode: StopMode) -> None:
         """협조적 정지 요청(외부/API에서 호출). 실제 정지는 상시 루프 서비스가
@@ -117,9 +126,7 @@ class BackgroundRunService:
             return None
         if self._conflict_check is not None and self._conflict_check():
             return None
-        self._running = True
-        self._stop_mode = None  # 새 실행 시작 — 이전 정지 신호 클리어
-        self._on_accepted()
+        self._accept()
         self._task = asyncio.create_task(self._execute())
         self._task.add_done_callback(self._log_task_exception)
         return self._task
@@ -135,20 +142,30 @@ class BackgroundRunService:
             raise RuntimeError(f"{self._task_label} already running")
         if self._conflict_check is not None and self._conflict_check():
             raise RuntimeError("conflicting run in progress")
-        self._running = True
-        self._stop_mode = None  # 새 실행 시작 — 이전 정지 신호 클리어
-        self._on_accepted()
+        self._accept()
         await self._execute()
+
+    def _accept(self) -> None:
+        """가드 통과 후 실행 시작 공통 처리 — start()/run() 중복 제거(개발자 패널).
+        running 세팅, 정지 신호 클리어, **started_at 고정(accepted 시점 — 계획서
+        Task 1: start() 반환 즉시 감사 가능)**, finished_at 리셋, _on_accepted 훅.
+
+        started_at을 여기(동기 구간)서 세팅해 _execute()의 첫 await 이전에
+        확정한다 — 그렇지 않으면(_execute에서 세팅) 태스크 스케줄~첫 틱 사이에
+        started_at이 비는 창이 생긴다(아키텍트 패널 #2)."""
+        self._running = True
+        self._stop_mode = None
+        self._started_at = self._now()
+        self._finished_at = None
+        self._on_accepted()
 
     async def _execute(self) -> None:
         """`_run()`을 실행하고 결과와 무관하게 `_running`을 되돌린다.
 
         `_run()` 내부 어디에서 예외가 나든(초기화 단계 포함) 이 finally가
         구조적으로 `_running`을 복원한다 — 서브클래스가 각자 try/finally를
-        중복할 필요가 없다. started_at은 진입 시, finished_at은 종료 시
-        고정한다(4서비스 공통 감사 타임스탬프 — P5 Task 1)."""
-        self._started_at = self._now()
-        self._finished_at = None
+        중복할 필요가 없다. finished_at은 종료 시 고정한다(started_at은
+        _accept()에서 이미 고정 — 4서비스 공통 감사 타임스탬프, P5 Task 1)."""
         try:
             await self._run()
         finally:

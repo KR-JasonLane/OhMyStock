@@ -161,9 +161,9 @@ async def test_성공_런_시작종료_시각과_advice가_기록된다():
     await service.run()
 
     progress = service.progress()
-    assert progress.started_at is not None
-    assert progress.finished_at is not None
-    assert progress.started_at <= progress.finished_at  # ISO 문자열 비교
+    assert service.started_at() is not None
+    assert service.finished_at() is not None
+    assert service.started_at() <= service.finished_at()  # datetime 객체 비교(베이스 started_at/finished_at)
     assert store.finished[6] == 5  # max_picks_advice
 
 
@@ -188,9 +188,9 @@ async def test_게이트_스코어링_런_없음():
     # run 자체는 생성되지 않았지만 progress는 종결 상태이므로 타임스탬프는
     # 여전히 기록된다 (T1) — finish_run이 없다고 finished_at도 없어지면
     # 안 된다(감사 목적상 "언제 거부됐는지"가 중요).
-    assert progress.started_at is not None
-    assert progress.finished_at is not None
-    assert progress.started_at <= progress.finished_at
+    assert service.started_at() is not None
+    assert service.finished_at() is not None
+    assert service.started_at() <= service.finished_at()
 
 
 @pytest.mark.anyio
@@ -217,9 +217,9 @@ async def test_게이트_낡은_스코어링():
     assert "stale" in progress.failure_reason
     assert stale_ref.isoformat() in progress.failure_reason
     # T1 — _fail 경로도 finished_at을 스탬프한다.
-    assert progress.started_at is not None
-    assert progress.finished_at is not None
-    assert progress.started_at <= progress.finished_at
+    assert service.started_at() is not None
+    assert service.finished_at() is not None
+    assert service.started_at() <= service.finished_at()
 
 
 @pytest.mark.anyio

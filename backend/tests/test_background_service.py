@@ -144,7 +144,6 @@ async def test_request_stop이_상시루프를_협조적으로_종료시킨다()
     svc = StopAwareService()
     task = svc.start()
     # 루프가 몇 사이클 돌게 이벤트 루프에 양보
-    import asyncio
     await asyncio.sleep(0)
     svc.request_stop(StopMode.STOP_NEW_ENTRIES)
     await task

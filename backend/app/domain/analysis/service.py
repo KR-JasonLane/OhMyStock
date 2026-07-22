@@ -13,7 +13,7 @@ import json
 import logging
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 
 from app.core.background_service import BackgroundRunService
 from app.core.market_calendar import KST
@@ -40,14 +40,9 @@ class AnalysisProgress:
     done: int
     total: int
     failure_reason: str | None = None
-    # T1(P5pre) — `/analyze/status`가 신선도를 판별할 수 있도록 ISO
-    # 문자열로 노출한다(트레이더 패널: 타임스탬프가 없어 며칠 지난
-    # succeeded 런이 방금 끝난 것처럼 보이는 문제). started_at은 `_run()`
-    # 진입 시 한 번만 고정해 모든 progress 스냅샷에 그대로 실어 보낸다.
-    # finished_at은 run이 종결(succeeded/failed)될 때만 채워진다 — 아직
-    # running인 progress에는 None으로 남아 "종료 여부"를 명확히 구분한다.
-    started_at: str | None = None
-    finished_at: str | None = None
+    # started_at/finished_at은 progress 필드가 아니라 베이스 BackgroundRunService의
+    # started_at()/finished_at()에서 노출된다(P5 Task 1 대칭 이관) — 4서비스 공통.
+    # API status가 service.started_at()/finished_at() ISO를 합쳐 응답한다.
 
 
 class AnalysisService(BackgroundRunService):
@@ -64,23 +59,20 @@ class AnalysisService(BackgroundRunService):
         자체의 reference_date를 오늘과 비교하므로, ScoringService처럼
         전 거래일로 당길 필요가 없다.
 
-        now: progress의 started_at/finished_at 타임스탬프(T1, P5pre)에 쓴다.
-        `today`와 별개 주입점인 이유: today는 날짜 단위 게이트 판정용이고
-        now는 초 단위 감사 타임스탬프용이라 테스트에서 독립적으로 고정할
-        필요가 있다. 기본값은 `datetime.now(timezone.utc)` — DB
-        컬럼(DateTime(timezone=True))과 동일하게 UTC aware로 통일."""
-        super().__init__(task_label="analysis", logger=logger)
+        now: 베이스 started_at/finished_at 타임스탬프 시계(P5 Task 1로 베이스
+        승격). `today`와 별개 주입점인 이유: today는 날짜 단위 게이트 판정용이고
+        now는 초 단위 감사 타임스탬프용이라 테스트에서 독립적으로 고정할 필요가
+        있다. 기본값은 베이스의 UTC now — DB 컬럼(DateTime(timezone=True))과
+        동일하게 UTC aware."""
+        # now는 베이스 BackgroundRunService가 started_at/finished_at 타임스탬프에
+        # 쓴다(P5 Task 1 대칭 이관 — 이전 self._clock을 베이스로 승격). API가
+        # service.started_at()/finished_at()으로 노출한다.
+        super().__init__(task_label="analysis", logger=logger, now=now)
         self._store = store
         self._llm = llm
         self._news = news
         self._config = config or AnalysisConfig()
         self._today = today or (lambda: datetime.now(KST).date())
-        # ⚠️ P5 Task 1: 베이스 BackgroundRunService에 now/started_at/finished_at을
-        # 승격했으나, AnalysisService의 progress-임베드 타임스탬프(P4 T1) 이관은
-        # 다음 단계로 미룬다 — 지금은 자체 시계를 self._clock으로 분리해 베이스
-        # self._now와의 이중 호출(테스트 clock 소진)을 피한다(회귀 0). 4서비스
-        # 완전 대칭(progress→베이스 노출)은 후속 태스크에서 완료.
-        self._clock = now or (lambda: datetime.now(timezone.utc))
         self._progress: AnalysisProgress | None = None
 
     def progress(self) -> AnalysisProgress | None:
@@ -111,22 +103,20 @@ class AnalysisService(BackgroundRunService):
         stage를 progress에 그대로 보존한다(더 이상 "finished"로 뭉개지
         않음, T5 패널 개발자/트레이더 리뷰)."""
         cfg = self._config
-        # `_run()` 진입 시 한 번만 고정한다 — 이후 모든 중간 progress
-        # 스냅샷(_set)이 같은 started_at을 실어 보내고, 종결 스냅샷만
-        # finished_at을 추가로 채운다(T1, 브리프 지시).
-        started = self._clock().isoformat()
-        self._set(None, "running", "gate", 0, 0, started=started)
+        # started_at은 베이스 _accept()가 start()/run() 동기 구간에서 고정한다
+        # (P5 Task 1) — progress에 실어보내지 않고 API가 service.started_at_iso()로
+        # 노출. 첫 _set을 첫 await 이전(동기)에 두어 재실행 tear를 막는다
+        # (collection/scoring의 "starting" placeholder와 동일 순서 계약).
+        self._set(None, "running", "gate", 0, 0)
 
         gate = await asyncio.to_thread(self._store.latest_succeeded_score_run)
         if gate is None:
             logger.warning("analysis rejected: no succeeded scoring run")
-            # run 자체가 만들어지지 않는 유일한 게이트라 `_fail`(finish_run
-            # 호출 포함)을 거치지 않지만, progress는 여기서 이미 종결
-            # 상태이므로 finished_at도 함께 남긴다 — "언제 거부됐는지"가
-            # 이 경우에도 감사에 필요하다.
+            # run 자체가 만들어지지 않는 유일한 게이트지만, _run()이 정상 return
+            # 하므로 베이스 _execute() finally가 finished_at을 남긴다 — "언제
+            # 거부됐는지"가 이 경우에도 감사에 유지된다(API가 노출).
             self._set(None, "failed", "gate", 0, 0,
-                      "no succeeded scoring run - run scoring first",
-                      started=started, finished=self._clock().isoformat())
+                      "no succeeded scoring run - run scoring first")
             return
         score_run_id, reference_date = gate
 
@@ -136,7 +126,7 @@ class AnalysisService(BackgroundRunService):
         # create_run 직후 progress를 즉시 동기화 — 이 시점부터 DB에 run이
         # 실재하므로 run_id=None("런 미생성") 계약을 위반하는 시간창을 없앤다
         # (T5 아키텍트 재검증 지적).
-        self._set(run_id, "running", "gate", 0, 0, started=started)
+        self._set(run_id, "running", "gate", 0, 0)
 
         age_days = (self._today() - reference_date).days
         if age_days > cfg.score_max_age_days:
@@ -168,11 +158,11 @@ class AnalysisService(BackgroundRunService):
                     "market regime")
                 return
 
-            self._set(run_id, "running", "news", 0, total, started=started)
+            self._set(run_id, "running", "news", 0, total)
             market_headlines, symbol_headlines, news_warnings = \
                 await self._collect_news(candidates)
 
-            self._set(run_id, "running", "economist", 0, total, started=started)
+            self._set(run_id, "running", "economist", 0, total)
             # AnalysisPipeline은 런마다 새로 만든다 — 생성자의 LangSmith
             # 환경변수 가드(RuntimeError)가 서비스 생성 시점이 아니라 실행
             # 시점 값으로 평가되게 하기 위함(P4-T2 보안 패널 의도를 유지:
@@ -192,9 +182,9 @@ class AnalysisService(BackgroundRunService):
                 return
             result = await pipeline.run(snapshot, candidates,
                                         market_headlines, symbol_headlines)
-            self._set(run_id, "running", "traders", total, total, started=started)
+            self._set(run_id, "running", "traders", total, total)
 
-            self._set(run_id, "running", "synthesize", total, total, started=started)
+            self._set(run_id, "running", "synthesize", total, total)
             # regime/market_summary/warnings는 한 번만 추출해 로컬 변수로
             # 고정한 뒤 finish_run에 넘긴다(save_results는 result 객체
             # 전체를 받으므로 별도 추출이 필요 없다) — 이중 추출 방지
@@ -220,9 +210,7 @@ class AnalysisService(BackgroundRunService):
                 self._store.finish_run, run_id, "succeeded", regime,
                 market_summary, warnings, None,
                 max_picks_advice=result.market.max_picks_advice)
-            finished = self._clock().isoformat()
-            self._set(run_id, "succeeded", "finished", total, total,
-                      started=started, finished=finished)
+            self._set(run_id, "succeeded", "finished", total, total)
             logger.info(
                 "analysis run %d: %d candidates, regime=%s, %d picks",
                 run_id, total, regime, len(result.picks))
@@ -289,21 +277,15 @@ class AnalysisService(BackgroundRunService):
         실패했는지"가 최종 progress에서 사라졌다(T5 패널 개발자/트레이더
         리뷰). status는 "failed"로 고정.
 
-        started_at은 `self._progress.started_at`에서 그대로 이어받는다 —
-        `_fail`은 오직 `_run()` 내부에서, 그것도 진입 시 첫 `_set`이 이미
-        started를 채운 뒤에만 호출되므로 이 시점의 `self._progress`는 항상
-        존재하고 started_at도 항상 채워져 있다(계약). finished_at은 여기서
-        새로 찍는다 — 실패 런도 "언제 끝났는지"를 감사할 수 있어야 한다
-        (T1, 브리프 지시: "실패 런(_fail)도 finished_at 스탬프")."""
+        started_at/finished_at은 progress가 아니라 베이스 타임스탬프에서
+        노출된다(P5 Task 1) — `_fail`도 `_run()` 내부이므로 베이스 _execute()
+        finally가 finished_at을 남긴다(실패 런도 "언제 끝났는지" 감사 유지)."""
         logger.warning("analysis run %d rejected: %s", run_id, reason)
         await asyncio.to_thread(
             self._store.finish_run, run_id, "failed", None, None, None, reason)
-        started = self._progress.started_at if self._progress else None
-        self._set(run_id, "failed", stage, 0, total, reason,
-                  started=started, finished=self._clock().isoformat())
+        self._set(run_id, "failed", stage, 0, total, reason)
 
     def _set(self, run_id: int | None, status: str, stage: str, done: int,
-             total: int, failure_reason: str | None = None,
-             started: str | None = None, finished: str | None = None) -> None:
+             total: int, failure_reason: str | None = None) -> None:
         self._progress = AnalysisProgress(run_id, status, stage, done, total,
-                                          failure_reason, started, finished)
+                                          failure_reason)

@@ -10,10 +10,13 @@ from app.domain.analysis.service import AnalysisProgress
 
 
 class FakeAnalysis:
-    def __init__(self, running=False, progress=None, latest=None):
+    def __init__(self, running=False, progress=None, latest=None,
+                 started_at_iso=None, finished_at_iso=None):
         self._running = running
         self._progress = progress
         self._latest = latest
+        self._started_at_iso = started_at_iso
+        self._finished_at_iso = finished_at_iso
 
     def is_running(self):
         return self._running
@@ -23,6 +26,12 @@ class FakeAnalysis:
 
     def progress(self):
         return self._progress
+
+    def started_at_iso(self):
+        return self._started_at_iso
+
+    def finished_at_iso(self):
+        return self._finished_at_iso
 
     def latest_results(self):
         return self._latest
@@ -87,13 +96,14 @@ def test_status_run_id_None이면_null로_노출한다():
 def test_status_타임스탬프_노출():
     # T1 — /analyze/status에 started_at/finished_at이 노출돼야 며칠 지난
     # succeeded 런이 "방금 끝난 것"처럼 보이는 문제를 소비자가 판별할 수
-    # 있다 (트레이더 패널 지적).
+    # 있다 (트레이더 패널). P5 Task 1: progress 필드가 아니라 베이스 서비스
+    # 타임스탬프(started_at_iso/finished_at_iso)에서 노출한다(4서비스 대칭).
     progress = AnalysisProgress(run_id=5, status="succeeded", stage="finished",
-                                done=3, total=3,
-                                started_at="2026-07-18T09:00:00+00:00",
-                                finished_at="2026-07-18T09:05:00+00:00")
-    resp = make_client(analysis=FakeAnalysis(progress=progress)).get(
-        "/analyze/status")
+                                done=3, total=3)
+    resp = make_client(analysis=FakeAnalysis(
+        progress=progress,
+        started_at_iso="2026-07-18T09:00:00+00:00",
+        finished_at_iso="2026-07-18T09:05:00+00:00")).get("/analyze/status")
     body = resp.json()
     assert body["started_at"] == "2026-07-18T09:00:00+00:00"
     assert body["finished_at"] == "2026-07-18T09:05:00+00:00"

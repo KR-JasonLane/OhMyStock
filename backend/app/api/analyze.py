@@ -17,7 +17,8 @@ async def start_analysis(request: Request) -> dict:
 
 @router.get("/analyze/status")
 async def analysis_status(request: Request) -> dict:
-    progress = request.app.state.analysis.progress()
+    service = request.app.state.analysis
+    progress = service.progress()
     if progress is None:
         return {"status": "idle"}
     # run_id는 스코어링 런 자체가 없어(NOT NULL FK를 채울 수 없어) run을
@@ -30,11 +31,12 @@ async def analysis_status(request: Request) -> dict:
     # started_at/finished_at은 None 허용으로 항상 포함한다(failure_reason과
     # 달리 조건부 생략하지 않음) — 소비자가 "며칠 지난 succeeded 런"을
     # "방금 끝난 것"으로 오인하지 않게 신선도를 판별할 수 있어야 한다
-    # (T1, P4 트레이더 패널 지적).
+    # (T1, P4 트레이더 패널 지적). P5 Task 1에서 progress 필드가 아니라 베이스
+    # 서비스 타임스탬프(started_at_iso/finished_at_iso)에서 노출한다(4서비스 대칭).
     body = {"run_id": progress.run_id, "status": progress.status,
             "stage": progress.stage, "done": progress.done,
-            "total": progress.total, "started_at": progress.started_at,
-            "finished_at": progress.finished_at}
+            "total": progress.total, "started_at": service.started_at_iso(),
+            "finished_at": service.finished_at_iso()}
     if progress.failure_reason is not None:
         body["failure_reason"] = progress.failure_reason
     return body
