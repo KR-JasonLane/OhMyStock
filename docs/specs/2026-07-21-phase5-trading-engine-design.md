@@ -404,7 +404,9 @@ fail-fast 검증: `0 < stop_loss_pct < 100`, `0 < take_profit_pct`,
 **`_run()` 최초 진입부**(가드 통과 후. `_on_accepted()`가 아님 — 그 훅은 "예외
 금지" 계약이라 실패 가능한 I/O 배치 불가, 아키텍처 #5)에서:
 
-1. DB의 미종결 포지션(`PENDING_ENTRY`/`ENTERED`/`EXITING`) 조회
+1. DB의 미종결 포지션(`PENDING_ENTRY`/`ENTERED`/`EXITING`/**`EXIT_FAILED`**) 조회 —
+   EXIT_FAILED는 '실패로 고정됐지만 실보유가 잔존할 수 있는' 상태라 재기동 시
+   반드시 재확인한다(P5-T5 아키텍트 — 저장소 open_positions와 정합)
 2. `get_open_orders()` + `get_balance()`로 **브로커 실제 상태를 ground truth로** 대조.
    분기(전수 나열 — 유한하게 닫는다):
    - ① `PENDING_ENTRY`인데 브로커엔 이미 체결 완료 → `ENTERED`로 승격, 감시 편입
@@ -419,6 +421,10 @@ fail-fast 검증: `0 < stop_loss_pct < 100`, `0 < take_profit_pct`,
      재평가**: 청산 사유가 여전히 유효하면 시장가로 마무리, 아니면 감시 복귀.
      청산은 진입과 달리 신호 시점 제약이 없으므로 재개해도 안전
    - ⑥ DB엔 없는데 브로커 잔고에 있음 → **경고**(수동 개입 필요, 상태 API 노출)
+   - ⑦ **`EXIT_FAILED`인데 브로커 잔고에 보유 없음** → `CLOSED` 확정(직전
+     매도가 실제로는 나갔던 것 — 확인 실패였을 뿐). **보유 있음** → 자동
+     재청산하지 않고 **경고**(EXIT_FAILED는 이미 재시도 소진 상태 — 무한
+     재시도 루프 금지, 수동 개입 대상. §6-7 warnings 노출)(P5-T5 아키텍트)
    - **시장가 미확정 케이스(v3.1 아키텍처·개발자 공통):** `PENDING_ENTRY
      (MARKET_SUBMITTED)` 또는 시장가 청산(`EXITING`, 손절·트레일링·기간초과 —
      `ExitPhase` 없음)에서 시장가 주문이 아직 미체결인 채 재기동된 경우는, 위
@@ -530,8 +536,8 @@ fail-fast 검증: `0 < stop_loss_pct < 100`, `0 < take_profit_pct`,
 | 테이블 | 용도 |
 |---|---|
 | `trade_runs` | 엔진 기동 단위(`started_at`/`finished_at`/`status` — 기존 3서비스 패턴). **+`stopped_by_kill_switch`·`kill_switch_mode`**(감사, 보안 #8) |
-| `orders` | 발주 이력 — 주문번호, 종목, 방향, 호가구분, 요청가·수량, **응답 바디 원문**, 상태 |
-| `fills` | 체결 이력 — 주문 연결, 체결가·수량·시각(부분체결 다건 가능) |
+| `trade_orders` | 발주 이력 — 주문번호, 종목, 방향, 호가구분, 요청가·수량, **응답 바디 원문**, 상태 |
+| `trade_fills` | 체결 이력 — 주문 연결, 체결가·수량·시각(부분체결 다건 가능) |
 | `trade_positions` | 상태(+`entry_phase`), 진입가, 수량, **`peak_price`·`trailing_active`**, 청산가, `exit_reason`, **비용 반영 실현손익** |
 
 - **주문 요청·응답은 바디만 저장한다. `Authorization` 헤더·Bearer 토큰은 저장·로그

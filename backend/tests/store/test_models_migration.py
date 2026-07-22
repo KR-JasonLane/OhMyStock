@@ -156,3 +156,40 @@ def test_0005의_run_id_외래키_2종은_CASCADE_삭제다(tmp_path, monkeypatc
         fks = insp.get_foreign_keys(table)
         run_id_fk = next(fk for fk in fks if fk["constrained_columns"] == ["run_id"])
         assert run_id_fk["options"].get("ondelete") == "CASCADE", table
+
+
+def test_0007이_트레이딩_테이블_4종을_만들고_0008이_폴백_칼럼을_추가한다(
+        tmp_path, monkeypatch):
+    db_url = f"sqlite+pysqlite:///{tmp_path / 'mig.db'}"
+    monkeypatch.setenv("DATABASE_URL", db_url)
+    cfg = Config(str(BACKEND_DIR / "alembic.ini"))
+    cfg.set_main_option("script_location", str(BACKEND_DIR / "alembic"))
+    command.upgrade(cfg, "head")
+    insp = inspect(create_engine(db_url))
+    names = set(insp.get_table_names())
+    assert {"trade_runs", "trade_positions", "trade_orders", "trade_fills"} <= names
+    # 0008 — analysis_runs.economist_fallback (별도 리비전, 규칙 4)
+    cols = {c["name"] for c in insp.get_columns("analysis_runs")}
+    assert "economist_fallback" in cols
+
+    # downgrade 왕복 — 0006으로 되돌리면 트레이딩 테이블·폴백 칼럼 제거
+    command.downgrade(cfg, "0006")
+    insp = inspect(create_engine(db_url))
+    names = set(insp.get_table_names())
+    assert not {"trade_runs", "trade_positions", "trade_orders", "trade_fills"} & names
+    cols = {c["name"] for c in insp.get_columns("analysis_runs")}
+    assert "economist_fallback" not in cols
+
+
+def test_0007_트레이딩_FK는_전부_비CASCADE다(tmp_path, monkeypatch):
+    """실거래 감사 자산은 연쇄 삭제 금지(스펙 §9 RESTRICT) —
+    AnalysisRunRow.score_run_id의 non-CASCADE 관례와 정합."""
+    db_url = f"sqlite+pysqlite:///{tmp_path / 'mig.db'}"
+    monkeypatch.setenv("DATABASE_URL", db_url)
+    cfg = Config(str(BACKEND_DIR / "alembic.ini"))
+    cfg.set_main_option("script_location", str(BACKEND_DIR / "alembic"))
+    command.upgrade(cfg, "head")
+    insp = inspect(create_engine(db_url))
+    for table in ("trade_positions", "trade_orders", "trade_fills"):
+        for fk in insp.get_foreign_keys(table):
+            assert fk["options"].get("ondelete") is None, (table, fk)

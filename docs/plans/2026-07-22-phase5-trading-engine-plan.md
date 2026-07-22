@@ -263,17 +263,17 @@ API 응답에 타임스탬프가 노출되지 않으므로(현재 AnalysisServic
 **Interfaces (컬럼 단위 명세 — Phase 3/4 관례):**
 - `trade_runs`: `id` PK auto, `started_at`/`finished_at` tz, `status`(16),
   `stopped_by_kill_switch` bool default false, `kill_switch_mode`(16, nullable).
-- `orders`: `id` PK auto, `trade_run_id` Integer FK(trade_runs.id, **RESTRICT**),
+- `trade_orders`(접두 일관 — 구현 정합): `id` PK auto, `trade_run_id` Integer FK(trade_runs.id, **RESTRICT**),
   `trade_position_id` Integer FK(trade_positions.id, RESTRICT, **nullable**) — **이
   주문이 속한 포지션**(개발자 델타 신규 — reconcile 분기 ②가 symbol 매칭이 아니라
   명시적 연결로 판단, realized_pnl 계산이 포지션→주문 조회 가능), `order_no`(32)
   브로커 주문번호, `symbol`(16), `side`(4: buy/sell), `order_style`(8:
   limit/market), `req_price` Integer, `req_qty` Integer, `status`(16),
   `resp_body` JSON(응답 바디 원문 — **Authorization 헤더/토큰 제외**), `created_at` tz.
-- `fills`: `id` PK auto, `order_id` Integer FK(orders.id, RESTRICT), `fill_price`
+- `trade_fills`: `id` PK auto, `order_id` Integer FK(orders.id, RESTRICT), `fill_price`
   Integer, `fill_qty` Integer, `filled_at` tz. (부분체결 다건 → order:fills = 1:N)
-- `trade_positions`: `id` PK auto, `trade_run_id` FK(RESTRICT), `symbol`(16),
-  `name`(64), `state`(16: PositionState), `entry_phase`(20, nullable),
+- `trade_positions`: `id` PK auto, `trade_run_id` FK(RESTRICT), `symbol`(12 —
+  기존 InstrumentRow 관례), `name`(64), `market`(8 — §7 비용 계산, T2 트레이더), `state`(16: PositionState), `entry_phase`(20, nullable),
   `exit_phase`(20, nullable), `entry_price` Integer, `qty` Integer,
   `peak_price` Integer, `trailing_active` bool, `exit_price` Integer(nullable),
   `exit_reason`(20, nullable), `realized_pnl` Integer(nullable, **비용 반영 — Task 6b
@@ -421,7 +421,10 @@ async def apply_reconcile(actions, orders: OrderPort, store): ...          # 오
       `check_order_caps` 주입.
 - [ ] **`_run()` 종료(finally) 시 `trade_runs.stopped_by_kill_switch`/`kill_switch_mode`를
       `request_stop` 여부·모드로부터 기록**(보안 Important — 킬 스위치 감사, 요약과
-      스텝 일치).
+      스텝 일치). **finish_run은 모든 종료 경로(정상/예외/킬스위치)에서 try/finally로
+      보장** — 미호출 시 status='running' 좀비 행이 감사 질문에 답 못 함(P5-T5
+      보안 forward-pointer). entry_price는 체결 확정 시 1회만 기록하는 불변식도
+      호출부가 준수(감사 재구성 전제 — P5-T5 보안 Minor).
 - [ ] API 4종 + 인증. 버그 봉쇄 한도는 Task 6의 `check_order_caps`로 발주 직전 재검증.
 - [ ] 3자 배타 양방향 배선(collect/score API 가드 포함) + 실전 스코프 검증자.
 - [ ] **패널:** (보안) 인증·스코프 강제·킬스위치 가용성·감사 기록, (아키텍트) 3자
