@@ -11,34 +11,27 @@
 
 ## ▶ 여기서 재개 (다음 액션)
 
-**Phase 5 진행 중(2026-07-22) — Task 0(G1~G3)·1B·1~5·6a·6b·6c 완료(각 태스크
-4-에이전트 패널 통과 후 커밋). 다음: Task 7(TradingService/API 통합).**
+**Phase 5 진행 중(2026-07-23) — Task 0(G1~G3)·1B·1~7 완료(각 태스크
+4-에이전트 패널 통과 후 커밋). 다음: Task 8(장중 라이브 스모크).**
 
 > **▶ 다음 세션 재개 (우선순위 순):**
-> 1. **Task 7 — TradingService + API + 앱 조립.** 계획서 Task 7 절의 스텝
->    전수(패널 이월 캐리가 많음 — 반드시 계획서를 먼저 읽을 것). 핵심:
->    - `_run()` 진입부 reconcile(§6-6): store.open_positions→(good,corrupted)
->      →DbPosition(order_nos는 trade_orders 연결)→decide→apply→RESUME 계열
->      후처리(RESUME_EXIT_WATCH→monitor.track_existing_exit / RESUME_ENTRY_
->      WATCH→EntryExecutor.resume). **재기동 EXITING 최우선**.
->    - persist_position은 store.save_position_snapshot(None=비움 계약)으로
->      배선 — update_position(None=미변경)과 혼용 금지(아키텍트 P5-T6c #2).
->    - **requires_reconcile=True → 즉시 미니 reconcile + CLOSED는 잔고 교차
->      검증 후 확정(잔고 잔존 시 재오픈) 하드 게이트** + reconcile 적용 직후
->      CANCEL_* 심볼 잔고 재확정. ENTRY_FAILED 영속 금지 캐비어트.
->    - caps 구현 `(amount, side)` — **매도(SELL) 차단 금지**(패널 재검증
->      항목). 진입 직후 잔고 대사(수량·평단 확정). monitor는 run당 새
->      인스턴스. 콜백(on_order/persist/caps)은 to_thread 경유. 3자 배타
->      양방향 배선 + api_trade_token(+실전 스코프 검증자).
-> 2. **Task 8(라이브 스모크 — 장중, 강제 손절 트리거 포함)** → Phase 5 회고.
-> 3. **Task 0 G4**(모의키→실전 엔드포인트 대칭성 — 독립 스크립트+즉시 revoke,
+> 1. **Task 8 — 라이브 스모크(장중, 코디네이터 직접).** 계획서 Task 8 절:
+>    사전 준비 — `.env`에 TRADE_* 한도 4종 추가(§8-1 all-or-nothing —
+>    미설정이면 엔진 미조립 503), docker 백엔드 기동, 수집→스코어링→분석이
+>    최신 상태여야 진입 신선도 가드 통과(mock 일봉 지연 주의 — CLAUDE.md §5).
+>    검증 항목: `/trade/start` 진입 1건 체결 → 감시 폴링 → **강제 손절
+>    (stop_loss_pct 타이트 설정) 시장가 청산 실증** → 킬스위치 2모드 실동작+
+>    감사 컬럼 → 재기동 reconcile 복구. 증거 `.superpowers/sdd/p5-task-8-*`.
+>    실측 팩트 CLAUDE.md §5 반영 + Phase 5 회고록(규칙 4).
+> 2. **Task 0 G4**(모의키→실전 엔드포인트 대칭성 — 독립 스크립트+즉시 revoke,
 >    장 무관) — "준비되면" 사용자 지시 대기 상태.
+> 3. Phase 5 회고록 → Phase 6(스케줄러) 착수 준비.
 >
 > **환경:** DB 컨테이너 `127.0.0.1:15432` 가동 중. 테스트는 DB 불필요(sqlite,
-> 542 passed / live 11 deselected). 키움 모의 키는 `.env`(backend/.env 심볼릭).
-> 실측 evidence는 `.superpowers/sdd/`(gitignore). **주문 폴링 체결 판정 계약
-> (전파 유예+연속 2회 부재 확인)은 execution.poll_unfilled·_check_pending
-> (seen_alive) — 7에서 반드시 준수.**
+> 579 passed / live 11 deselected). 키움 모의 키는 `.env`(backend/.env 심볼릭).
+> 실측 evidence는 `.superpowers/sdd/`(gitignore). **Task 7 이월 게이트:
+> /trade/status·positions 무인증은 Phase 7 착수 전 읽기 스코프 확정(§8-2),
+> 실전 전환 시 수수료 기본값 실측 재설정 + API_TRADE_TOKEN 별도 발급.**
 
 원 스펙·계획서 확정 요약: 스펙
 `docs/specs/2026-07-21-phase5-trading-engine-design.md`(v3.1), 계획서

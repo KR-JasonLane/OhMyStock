@@ -141,6 +141,12 @@ class PositionMonitor:
         """경고 상태(§6-4 — 상태 API 노출용). 비면 정상."""
         return list(self._warnings.values())
 
+    @property
+    def has_pending(self) -> bool:
+        """체결 미확정 청산 주문 추적 여부 — 킬스위치 완결 대기 루프(§8-1-b)가
+        '전 포지션 종결'을 판정하는 공개 표면(트레이더 P5-T7 C1)."""
+        return bool(self._pending)
+
     def recommended_delay(self, now: datetime | None = None) -> float:
         """다음 폴까지 권장 대기(초) — Task 7 루프 케이던스용. 동시호가
         구간·미확정 청산 추적 중에는 백오프(§6-4: 즉시 체결 가정 비적용

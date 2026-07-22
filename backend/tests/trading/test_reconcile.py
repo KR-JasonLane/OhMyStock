@@ -278,10 +278,12 @@ async def test_apply_취소성공은_영속과_감사_수행():
     persisted, recorded = [], []
     applied, warnings = await apply_reconcile(
         actions, fake, persisted.append,
-        record_cancel=lambda ack, orig: recorded.append(orig))
+        record_cancel=lambda ack, act: recorded.append(
+            (act.symbol, act.cancel_order_no)))
     assert fake.cancelled == ["ORD1"]
     assert [p.state for p in persisted] == [PositionState.ENTRY_FAILED]
-    assert recorded == ["ORD1"]
+    # 감사에 실제 심볼·원주문 전달(보안 P5-T7 Minor — 하드코딩 금지)
+    assert recorded == [("005930", "ORD1")]
     assert len(applied) == 1 and warnings == []
 
 
@@ -332,7 +334,7 @@ async def test_apply_취소_감사_실패는_경고로_노출():
     actions = _decide_one(db, orders=[_open("ORD1")], in_window=False)
     fake = FakeOrderPortBase()
 
-    def bad_audit(ack, orig):
+    def bad_audit(ack, action):
         raise RuntimeError("db-dsn://user:pw@host down")
 
     applied, warnings = await apply_reconcile(actions, fake, lambda _: None,

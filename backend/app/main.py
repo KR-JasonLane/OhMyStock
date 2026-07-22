@@ -14,16 +14,21 @@ from app.api.analyze import router as analyze_router
 from app.api.collect import router as collect_router
 from app.api.health import router as health_router
 from app.api.score import router as score_router
+from app.api.trade import router as trade_router
 from app.api.ws import router as ws_router
+from app.core import market_calendar
 from app.core.config import Settings, get_settings
 from app.domain.analysis.config import AnalysisConfig
 from app.domain.analysis.service import AnalysisService
 from app.domain.collection import CollectionService
 from app.domain.scoring.service import ScoringService
+from app.domain.trading.config import TradingConfig
+from app.domain.trading.service import TradingService
 from app.store.analysis_store import AnalysisStore
 from app.store.collection_store import CollectionStore
 from app.store.db import create_db_engine
 from app.store.scoring_store import ScoringStore
+from app.store.trading_store import TradingStore
 
 logging.basicConfig(
     level=logging.INFO,
@@ -50,13 +55,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             app.state.broker = KiwoomBroker(KiwoomHttpClient(settings))
             # conflict_check 람다는 app.state를 통해 늦은 바인딩되므로 두 서비스의
             # 생성 순서와 무관하다 (아래에서 scoring이 나중에 만들어져도 안전).
+            # 상호 배제는 도메인 계약(scoring 서비스 docstring — API 409는
+            # 1차 관문일 뿐). P5부터 트레이딩 포함 3자 배타(아키텍트 P5-T7 #1:
+            # Phase 6 스케줄러가 HTTP를 우회해 start()를 불러도 진입 조인이
+            # 읽는 candles/instruments가 갱신 중이지 않도록 도메인 레벨 보장).
+            def _trading_running() -> bool:
+                trading = getattr(app.state, "trading", None)
+                return trading is not None and trading.is_running()
+
             app.state.collection = CollectionService(
                 app.state.broker, CollectionStore(app.state.engine),
-                conflict_check=lambda: app.state.scoring.is_running())
+                conflict_check=lambda: (app.state.scoring.is_running()
+                                        or _trading_running()))
             app.state.scoring_store = ScoringStore(app.state.engine)
             app.state.scoring = ScoringService(
                 app.state.scoring_store,
-                conflict_check=lambda: app.state.collection.is_running())
+                conflict_check=lambda: (app.state.collection.is_running()
+                                        or _trading_running()))
 
             # AnalysisConfig 기본값으로 Ollama 클라이언트를 만든다(모델/베이스
             # URL/타임아웃 — cfg.to_json()이 매 런 config 스냅샷으로 저장하는
@@ -78,14 +93,48 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # AnalysisConfig()를 새로 만들어 두 설정이 서로 다른 인스턴스가
             # 되고, 실제 LLM 호출 설정과 DB에 남는 config 스냅샷/감사 기록이
             # 드리프트될 수 있다.
+            analysis_store = AnalysisStore(app.state.engine)
             app.state.analysis = AnalysisService(
-                AnalysisStore(app.state.engine), app.state.llm, app.state.news,
+                analysis_store, app.state.llm, app.state.news,
                 config=analysis_cfg)
+
+            # 트레이딩 엔진(P5 Task 7) — §8-1 버그 봉쇄 한도 4종이 전부
+            # 설정된 경우에만 조립(하드 게이트: 상한 없이 실주문 엔진이
+            # 켜지지 않는다). 미설정이면 /trade/*는 503.
+            app.state.trading_store = TradingStore(app.state.engine)
+            trade_limits = (settings.trade_max_single_order_krw,
+                            settings.trade_max_daily_orders,
+                            settings.trade_max_daily_order_krw,
+                            settings.trade_min_avg_trading_value_krw)
+            if all(v is not None for v in trade_limits):
+                trading_cfg = TradingConfig(
+                    max_single_order_krw=settings.trade_max_single_order_krw,
+                    max_daily_orders=settings.trade_max_daily_orders,
+                    max_daily_order_krw=settings.trade_max_daily_order_krw,
+                    min_avg_trading_value_krw=(
+                        settings.trade_min_avg_trading_value_krw))
+                app.state.trading = TradingService(
+                    app.state.broker, app.state.broker,
+                    app.state.trading_store, trading_cfg, market_calendar,
+                    analysis_store.latest_results,
+                    conflict_check=lambda: (
+                        app.state.collection.is_running()
+                        or app.state.scoring.is_running()))
+            else:
+                app.state.trading = None
+                logger.warning(
+                    "TRADE_* 한도 미설정 - 트레이딩 엔진 비활성 (§8-1 하드 "
+                    "게이트: TRADE_MAX_SINGLE_ORDER_KRW/TRADE_MAX_DAILY_ORDERS/"
+                    "TRADE_MAX_DAILY_ORDER_KRW/TRADE_MIN_AVG_TRADING_VALUE_KRW "
+                    "4종 전부 설정 필요)")
             try:
                 yield
             finally:
-                for service in (app.state.scoring, app.state.collection,
-                                app.state.analysis):
+                services = [app.state.scoring, app.state.collection,
+                            app.state.analysis]
+                if app.state.trading is not None:
+                    services.append(app.state.trading)
+                for service in services:
                     task = service.current_task()
                     if task is not None and not task.done():
                         task.cancel()
@@ -121,4 +170,5 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(collect_router)
     app.include_router(score_router)
     app.include_router(analyze_router)
+    app.include_router(trade_router)
     return app

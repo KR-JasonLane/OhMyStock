@@ -3,6 +3,7 @@ import json
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
+from app.api.exclusion import reject_conflicting_runs
 from app.api.security import require_write_token
 
 router = APIRouter()
@@ -10,10 +11,8 @@ router = APIRouter()
 
 @router.post("/score", status_code=202, dependencies=[Depends(require_write_token)])
 async def start_scoring(request: Request) -> dict:
-    if request.app.state.collection.is_running():
-        # 수집이 소속/상태/봉을 갱신하는 도중의 반쪽 데이터 읽기 방지 (스펙 §6)
-        raise HTTPException(status_code=409,
-                            detail="collection is running - retry after it finishes")
+    # 3자 배타(§6/§8-1) — 공용 헬퍼. 실제 방어선은 도메인 conflict_check.
+    reject_conflicting_runs(request, "collection", "trading")
     task = request.app.state.scoring.start()
     if task is None:
         raise HTTPException(status_code=409, detail="scoring already running")

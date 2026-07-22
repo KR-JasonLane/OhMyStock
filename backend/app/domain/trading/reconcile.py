@@ -31,11 +31,12 @@ from app.domain.trading.models import (EntryPhase, ExitPhase, PositionState,
                                        TradePosition)
 
 logger = logging.getLogger(__name__)
-# 취소 감사 콜백 — (ack, orig_order_no). Task 7이 store.record_order 연결.
-# (execution.OnOrder는 OrderRequest 필수 — reconcile 취소엔 원 요청이 없어
-# 별도 좁은 계약. 격리 정책은 동일: 취소는 이미 나갔으므로 기록 실패가
-# 나머지 정합을 죽이면 안 된다.)
-RecordCancel = Callable[[OrderAck, str], None]
+# 취소 감사 콜백 — (ack, action). action이 심볼·kind(진입/청산 방향 유추)·
+# cancel_order_no를 담아 감사 행의 정확성을 보장한다(보안 P5-T7 Minor —
+# 하드코딩 심볼/방향 금지). execution.OnOrder는 OrderRequest 필수라 재사용
+# 불가(취소엔 원 요청이 없음). 격리 정책은 동일: 취소는 이미 나갔으므로
+# 기록 실패가 나머지 정합을 죽이면 안 된다.
+RecordCancel = Callable[[OrderAck, "ReconcileAction"], None]
 
 
 class ReconcileKind(enum.Enum):
@@ -281,7 +282,7 @@ async def apply_reconcile(actions: list[ReconcileAction], orders: OrderPort,
                 continue
             if record_cancel is not None:
                 try:  # 격리 — 취소는 이미 나갔다(6a/6b 감사 계약과 동일)
-                    record_cancel(ack, action.cancel_order_no)
+                    record_cancel(ack, action)
                 except Exception as exc:  # noqa: BLE001
                     # 감사 실패도 상태 API로 노출(보안 P5-T6c #1 — 로그 유실
                     # 시 "취소가 있었다"는 사실 자체가 재구성 불가)

@@ -79,6 +79,15 @@ def test_score_중복이면_409():
     assert resp.status_code == 409
 
 
+def test_score_트레이딩_실행중이면_409():
+    # 3자 배타(P5 §8-1) — 양방향 가드의 이쪽 절반
+    client = make_client()
+    client.app.state.trading = FakeCollection(running=True)  # is_running 표면
+    resp = client.post("/score")
+    assert resp.status_code == 409
+    assert "trading" in resp.json()["detail"]
+
+
 def test_수집중이면_409():
     resp = make_client(collection=FakeCollection(running=True)).post("/score")
     assert resp.status_code == 409

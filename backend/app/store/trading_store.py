@@ -11,13 +11,16 @@ import logging
 from collections.abc import Callable
 from datetime import datetime, timezone
 
-from sqlalchemy import Engine, select
+from dataclasses import dataclass
+from datetime import date
+
+from sqlalchemy import Engine, func, select
 from sqlalchemy.orm import sessionmaker
 
 from app.domain.trading.models import (EntryPhase, ExitPhase, ExitReason,
                                        PositionState, TradePosition)
-from app.store.models import (TradeFillRow, TradeOrderRow, TradePositionRow,
-                              TradeRunRow)
+from app.store.models import (CandleRow, InstrumentRow, TradeFillRow,
+                              TradeOrderRow, TradePositionRow, TradeRunRow)
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +47,19 @@ def _validate_resp_body(resp_body: dict) -> dict:
 # 포함한다(재기동 시 반드시 재확인 — 스펙 §6-1 침묵 금지).
 _OPEN_STATES = (PositionState.PENDING_ENTRY.value, PositionState.ENTERED.value,
                 PositionState.EXITING.value, PositionState.EXIT_FAILED.value)
+
+
+@dataclass(frozen=True)
+class EntryContext:
+    """entry_context 반환 행 — selection.EntryCandidate의 저장소측 재료
+    (current_price는 브로커 시세라 서비스가 별도 조인)."""
+    symbol: str
+    name: str
+    market: str
+    audit_info: str
+    state: str
+    signal_price: int          # 기준일 종가 (0 = 결측 — selection이 제외)
+    avg_trading_value_krw: int
 
 
 def _row_to_position(row: TradePositionRow) -> TradePosition:
@@ -155,6 +171,83 @@ class TradingStore:
                 row.entered_at = entered_at
             if closed_at is not None:
                 row.closed_at = closed_at
+
+    def submitted_order_nos(self, position_id: int) -> tuple[str, ...]:
+        """포지션에 연결된 미종결(submitted) 주문번호 — reconcile ②의 명시
+        연결 입력(§6-6: symbol 매칭 금지, trade_position_id로만 판단)."""
+        with self._sessions() as session:
+            rows = session.scalars(
+                select(TradeOrderRow.order_no)
+                .where(TradeOrderRow.trade_position_id == position_id,
+                       TradeOrderRow.status == "submitted")).all()
+            return tuple(rows)
+
+    def entry_context(self, symbols: list[str], signal_date: date,
+                      avg_days: int = 20) -> dict[str, "EntryContext"]:
+        """진입 후보 조인(§6-3 — selection 입력 재료). collection 소유 테이블
+        (instruments/candles)의 **읽기 전용** 조회다 — 트레이딩은 이 데이터를
+        쓰지 않는다(경계 주석, 단일 엔진 전제).
+
+        signal_price = signal_date(스코어링 기준일)의 종가 — P3 as-of 신호가
+        (갭 가드 비교 기준). avg_trading_value = 최근 avg_days개 일봉의
+        close×volume 평균(스펙 §6-3.2 — 별도 TR 없이 수집 자산 재사용)."""
+        if not symbols:
+            return {}
+        out: dict[str, EntryContext] = {}
+        with self._sessions() as session:
+            instruments = {
+                row.symbol: row for row in session.scalars(
+                    select(InstrumentRow)
+                    .where(InstrumentRow.symbol.in_(symbols))).all()}
+            signal_rows = dict(session.execute(
+                select(CandleRow.symbol, CandleRow.close)
+                .where(CandleRow.symbol.in_(symbols),
+                       CandleRow.date == signal_date)).all())
+            for symbol in symbols:
+                inst = instruments.get(symbol)
+                if inst is None:
+                    continue  # 카탈로그에 없는 픽 — 호출자가 결측 경고
+                recent = session.scalars(
+                    select(CandleRow).where(CandleRow.symbol == symbol,
+                                            CandleRow.date <= signal_date)
+                    .order_by(CandleRow.date.desc()).limit(avg_days)).all()
+                avg_value = (int(sum(c.close * c.volume for c in recent)
+                                 / len(recent)) if recent else 0)
+                out[symbol] = EntryContext(
+                    symbol=symbol, name=inst.name, market=inst.market,
+                    audit_info=inst.audit_info, state=inst.state,
+                    signal_price=int(signal_rows.get(symbol, 0)),
+                    avg_trading_value_krw=avg_value)
+        return out
+
+    def get_position(self, position_id: int) -> TradePosition | None:
+        """상태 무관 단건 조회 — CLOSED 직후 하드 게이트 재오픈(P5-T7 트레이더
+        C3: open_positions는 CLOSED를 제외하므로 방금 닫힌 행의 market을 여기서
+        읽는다)."""
+        with self._sessions() as session:
+            row = session.get(TradePositionRow, position_id)
+            return _row_to_position(row) if row is not None else None
+
+    def recent_closed_symbols(self, cutoff: datetime) -> set[str]:
+        """cutoff 이후 CLOSED 확정된 심볼 — 재진입 쿨다운 입력(§8-1
+        reentry_cooldown_min, P5-T7 트레이더 I6). DB 기반이라 당일 재기동
+        후에도 쿨다운이 유지된다."""
+        with self._sessions() as session:
+            rows = session.scalars(
+                select(TradePositionRow.symbol).distinct()
+                .where(TradePositionRow.state == PositionState.CLOSED.value,
+                       TradePositionRow.closed_at.is_not(None),
+                       TradePositionRow.closed_at >= cutoff)).all()
+            return set(rows)
+
+    def instrument_state(self, symbol: str) -> str | None:
+        """종목 state 원문(ka10099 — 수집 시점 스냅샷, 읽기 전용) — monitor의
+        거래정지 vs 네트워크 구분(§6-4)에 사용. ⚠️ 최신성은 마지막 수집
+        시점까지다(장중 신규 정지는 반영 전일 수 있음 — 구분 실패 시 monitor는
+        네트워크 의심 경고로 폴백하므로 보수 방향)."""
+        with self._sessions() as session:
+            return session.scalar(select(InstrumentRow.state)
+                                  .where(InstrumentRow.symbol == symbol))
 
     def save_position_snapshot(self, position_id: int,
                                pos: TradePosition) -> None:

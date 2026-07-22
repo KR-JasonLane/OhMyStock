@@ -95,6 +95,18 @@ def test_스코어링_실행중이면_409():
     assert "scoring" in r.json()["detail"]
 
 
+def test_트레이딩_실행중이면_409():
+    # 3자 배타(P5 §8-1) — 트레이딩 진입 조인이 읽는 candles/instruments를
+    # 수집이 갱신하지 않게 양방향 가드의 이쪽 절반
+    app = create_app(_settings())
+    with TestClient(app) as client:
+        app.state.trading = FakeScoring(running=True)  # is_running 표면 동일
+        app.state.collection = StubService()
+        r = client.post("/collect")
+    assert r.status_code == 409
+    assert "trading" in r.json()["detail"]
+
+
 def test_status는_progress를_그대로_노출한다():
     app = create_app(_settings())
     with TestClient(app) as client:

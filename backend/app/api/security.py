@@ -22,15 +22,13 @@ from fastapi import Header, HTTPException, Request
 logger = logging.getLogger(__name__)
 
 
-async def require_write_token(
-        request: Request,
-        x_api_key: str | None = Header(default=None)) -> None:
-    token = request.app.state.settings.api_write_token
+def _check_token(token, x_api_key: str | None, request: Request,
+                 scope: str) -> None:
     if token is None:
-        return  # 미설정 — main.py 기동 시 경고 로그가 이미 남음
+        return  # 미설정 — main.py 기동 시 경고 로그가 이미 남음(모의 전용)
     if x_api_key is None:
-        logger.warning("write endpoint auth rejected: path=%s reason=%s",
-                        request.url.path, "missing")
+        logger.warning("%s endpoint auth rejected: path=%s reason=%s",
+                       scope, request.url.path, "missing")
         raise HTTPException(status_code=401, detail="invalid or missing API key")
     # secrets.compare_digest는 str 인자에 비-ASCII가 섞이면 TypeError를
     # 던진다(CPython 구현 제약) — 401 대신 500으로 새는 것을 막기 위해
@@ -38,6 +36,24 @@ async def require_write_token(
     # compare_digest가 여전히 보장).
     if not secrets.compare_digest(
             token.get_secret_value().encode(), x_api_key.encode()):
-        logger.warning("write endpoint auth rejected: path=%s reason=%s",
-                        request.url.path, "mismatch")
+        logger.warning("%s endpoint auth rejected: path=%s reason=%s",
+                       scope, request.url.path, "mismatch")
         raise HTTPException(status_code=401, detail="invalid or missing API key")
+
+
+async def require_write_token(
+        request: Request,
+        x_api_key: str | None = Header(default=None)) -> None:
+    _check_token(request.app.state.settings.api_write_token, x_api_key,
+                 request, "write")
+
+
+async def require_trade_token(
+        request: Request,
+        x_api_key: str | None = Header(default=None)) -> None:
+    """주문 엔드포인트(/trade/start,/trade/stop) 스코프 토큰(결정 #33).
+    api_trade_token 미설정 시 api_write_token 폴백(모의 편의) — 실전 모드는
+    Settings validator가 별도 설정+상이 값을 기동 시점에 강제한다(§6-2-c)."""
+    settings = request.app.state.settings
+    token = settings.api_trade_token or settings.api_write_token
+    _check_token(token, x_api_key, request, "trade")
