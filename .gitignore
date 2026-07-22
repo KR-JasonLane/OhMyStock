@@ -33,3 +33,6 @@ postgres-data/
 Thumbs.db
 .idea/
 .vscode/
+
+# PRE-GATE / SDD 실측 로그 (계좌·시세 데이터 포함 가능 — 회고록·CLAUDE.md에 요약만 인용)
+.superpowers/

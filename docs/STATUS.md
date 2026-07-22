@@ -228,9 +228,16 @@ G2 주문TR 3종+레이트리밋 버킷, G3 kt00018 행단위(기존 #1), G4 모
 [x] Phase 5: 트레이딩 엔진 구현 계획서 확정 — Task 0~8(6분할), 4-에이전트
     계획 리뷰+개발자 델타 반영(v1.2)
     (docs/plans/2026-07-22-phase5-trading-engine-plan.md, 2026-07-22)
-[ ] Phase 5: Task 0 PRE-GATE G1~G4 장중 실측                   <-- 다음
-    (영업일 09:00~15:30 필요. G1 다종목시세가 감시 아키텍처 좌우 — 불발 시
-    결정 #27 재결정. 순서: G1→G2→모의매수→G3→G4)
+[x] Phase 5: Task 0 PRE-GATE G1~G3 장중 실측 완료 (2026-07-22)
+    G1 ka10095: 파이프구분자·100종목·호가5단계(결정#27 생존), G2 주문TR:
+    trde_tp"0"/"3"·취소 orig_ord_no/cncl_qty·버킷분리(§11-5 해소), G3 kt00018:
+    avg_price 원단위 정수(PRE-GATE#1 해소)·get_balance 파싱검증. 실측 팩트
+    CLAUDE.md §5 반영. 증거 .superpowers/sdd/p5-pregate-G{1,2,3}.txt
+[x] broker-api-expert 에이전트 추가 (CLAUDE.md 규칙 8-b) — 키움 명세 검증,
+    G1 파이프·G2 필드명 실측으로 문서 오류 2건 조기 차단
+[ ] Phase 5: Task 0 G4(모의키→실전엔드포인트 대칭성) 실측         <-- 다음
+    (장 무관·조회 1건, 독립 스크립트+즉시 revoke). 이후 문서 반영 커밋 →
+    Task 1B(캘린더)/Task 1(베이스확장) 코드 착수
 ... Task 1B(캘린더)·1(베이스확장) → 순수 → 어댑터/저장 → 부수효과 → 통합 → 라이브
 ... Phase 6~8 (CLAUDE.md 로드맵 참고)
 ```

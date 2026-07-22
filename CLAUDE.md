@@ -60,6 +60,17 @@ updated whenever the user introduces a new rule or changes direction.
    (`senior-developer`, `senior-trader`, `architecture-expert`, `security-expert`) —
    dispatch them by those names via the Agent tool.
 
+   **8-b. Optional broker-API reviewer (`broker-api-expert`).** For tasks that touch
+   the broker API — adapter implementation, TR call sites, PRE-GATE probe scripts —
+   additionally dispatch `broker-api-expert` (defined in `.claude/agents/`). It
+   verifies our code calls the Kiwoom REST API per spec/measured reality: request
+   body/headers/order-type codes, `cont-yn`/`next-key` pagination, response field
+   parsing, token/rate-limit handling, mock/real boundary. Its governing rule is
+   **measured evidence over documentation** (Kiwoom docs are unreliable — see §5).
+   Not part of the always-on 4-agent panel; summon it only when the task is
+   API-shaped. Findings at Critical/Important must be fixed and re-reviewed, same as
+   rule 8.
+
 ## 3. Architecture (decided)
 
 Runtime model **A**: a containerized Python backend + a host-native Electron UI.
@@ -145,9 +156,44 @@ evidence trail.
   possible), and future dates clamp to today. **The raw daily
   candle response is descending (newest → oldest)** — callers/adapters must re-sort
   to ascending (oldest → newest) if that ordering is required.
-- **Orders:** buy `kt10000`, sell `kt10001`, modify `kt10002`, cancel `kt10003`.
-  Order types (호가구분): `00` limit, `03` market, `05` conditional-limit, plus
-  IOC/FOK and after-hours variants. Not exercised in Phase 1 (deferred to Phase 5).
+- **Multi-symbol quote `ka10095` (관심종목정보요청) — verified live against mock
+  server (2026-07-22, Phase 5 PRE-GATE G1, `.superpowers/sdd/p5-pregate-G1.txt`):**
+  `POST /api/dostk/stkinfo`, body `{stk_cd: "<code1>|<code2>|..."}`. **⚠️ The
+  multi-symbol delimiter is a PIPE (`|`), NOT semicolon** — semicolon/comma/space all
+  return an empty 1-row response (web docs claiming ";" are WRONG; measured). Codes are
+  **plain (no `KRX:` prefix — prefix makes it fail)**. **Max 100 symbols per call**
+  (50→50 rows, 100→100 rows, **101→`rc=5` error**); no pagination (cont-yn="N", hard
+  cap at 100). List key `atn_stk_infr`; each row has 63 fields including `cur_prc`
+  **plus 5-level order book `sel_1th_bid`..`sel_5th_bid` / `buy_1th_bid`..`buy_5th_bid`
+  and best `sel_bid`/`buy_bid`** — so a SEPARATE order-book TR is NOT needed for the
+  monitor. Partial failure: a bogus code is returned as an empty row (3 requested →
+  3 rows, bogus one blank) — filter empty `stk_cd` rows. Pre-open (before 09:00),
+  low-liquidity symbols return blank values but liquid symbols (e.g. 005930) return
+  base price; intraday all fields populate. This confirms decision #27 (REST polling
+  monitor: 1 pipe-call covers ≤5 held symbols in ~1s).
+- **Orders — verified live against mock server (2026-07-22, Phase 5 PRE-GATE G2/G3,
+  `.superpowers/sdd/p5-pregate-G2.txt`/`p5-pregate-G3.txt`):** buy `kt10000`, sell
+  `kt10001`, cancel `kt10003` — all `POST /api/dostk/ordr` (category **`ordr`**,
+  not `stkinfo`). **⚠️ Order-type field is `trde_tp` with SINGLE-digit codes, not
+  two-digit** — verified live: `"0"`=limit(지정가), `"3"`=market(시장가) both accepted
+  (`rc=0`). The earlier "`00`/`03`" note was WRONG (single-digit is correct).
+  - **Buy/sell body (identical schema):** `{dmst_stex_tp:"KRX", stk_cd:<맨코드>,
+    ord_qty:<str>, trde_tp:<"0"|"3">, ord_uv:<price str, LIMIT ONLY — omit for market>}`.
+    **No account-number/password field** (account bound to appkey — same as kt00001/
+    kt00018). Response: `{ord_no, dmst_stex_tp, return_code, return_msg}`, msg e.g.
+    "모의투자 매수주문완료".
+  - **Cancel `kt10003` body:** `{dmst_stex_tp:"KRX", orig_ord_no:<str>, stk_cd,
+    cncl_qty:"0"}` — **verified: `orig_ord_no`/`cncl_qty` are the correct field names**
+    (community wrapper's `org_ord_no`/`ord_qty` was wrong); `cncl_qty="0"`=전량취소.
+    Response: `{ord_no, base_orig_ord_no, cncl_qty, ...}`.
+  - **Unfilled-order query `ka10075`** (`POST /api/dostk/acnt`, category `acnt`):
+    body `{all_stk_tp:"0", trde_tp:"0", stex_tp:"0"}`; list key **`oso`**; row fields
+    include `ord_no`/`stk_cd`/`ord_qty`/`oso_qty`/`ord_pric`/`ord_stt`(="접수")/
+    `orig_ord_no`/`stex_tp`/`tm`/`cntr_qty`. `stex_tp="0"` accepted (not "KRX" literal).
+  - **⚠️ Order and quote TRs use SEPARATE rate-limit buckets — verified:** a quote
+    (`ka10095`) call immediately after an order (`kt10000`) returned `rc=0` with no 429.
+    This RESOLVES the §11-5 risk (손절 order delayed by quote polling) — no order-
+    priority design needed (decision #14 concern retired by measurement).
 - **⚠️ No native TP/SL/Stop or conditional auto-orders via REST.** Stop-loss /
   take-profit must be implemented **client-side**: monitor the execution price
   (WebSocket `0B`) and send a market/limit order when a threshold is hit.
@@ -164,13 +210,22 @@ evidence trail.
   top-level fields `tot_evlt_amt` (총평가금액) and `tot_evlt_pl` (총평가손익). **All
   four fields are present in the response even when the mock account holds zero
   positions** (values are `0`, not absent/omitted) — safe to hard-index rather than
-  defensively `.get()`. **Still unverified (pending):** `kt00018`'s row-level fields
-  inside the `acnt_evlt_remn_indv_tot` array (`stk_cd`, `stk_nm`, `pur_pric`,
-  `cur_prc`, `evlt_amt`, etc.) and whether `avg_price`/`pur_pric` carries fractional
-  won — the mock account had zero positions throughout Phase 1, so these were never
-  actually returned by the server. **PRE-GATE before Phase 5:** verify against a
-  real mock-account position (live test already exists:
-  `test_live_잔고_원본응답_avg_price_실측`).
+  defensively `.get()`. **✅ Row-level fields — verified live against a real mock
+  position (2026-07-22, Phase 5 PRE-GATE G3, `.superpowers/sdd/p5-pregate-G3.txt`):**
+  list key `acnt_evlt_remn_indv_tot`; each row has **23 fields**: `stk_cd`
+  (**⚠️ `"A005930"` — carries `A` prefix**, `_normalize_symbol` strips it), `stk_nm`,
+  `pur_pric` (매입가), `cur_prc`, `evlt_amt` (평가금액), `evltv_prft`, `prft_rt`,
+  `rmnd_qty` (보유수량), `trde_able_qty`, `pur_amt`, `pur_cmsn`/`sell_cmsn`/`tax`/
+  `sum_cmsn` (매수·매도 수수료/세금/합계), `poss_rt`, `crd_tp`, `tdy_buyq`/`tdy_sellq`,
+  `pred_buyq`/`pred_sellq`/`pred_close_pric`. All values are **zero-padded integer
+  strings** (e.g. `pur_pric="000000000272750"`). **`pur_pric`/`avg_price` is an
+  INTEGER (원 단위, no fractional won)** — the `TradePosition.avg_price: int`
+  assumption is confirmed safe. `broker.get_balance()` parsing was validated against
+  this real position (positions count matched raw rows; avg_price=272750,
+  cur=272500, eval=272500). **Cost fields measured** (삼성전자 272,750원 1주):
+  `tax=544` ≈ 0.2% of proceeds (코스피 매도세+농특세, matches), `pur_cmsn`/`sell_cmsn`
+  each 950 (mock commission ~0.35%, HIGHER than real ~0.015% — keep `costs.py` rates
+  configurable, adjust at live cutover). `evltv_prft`/`prft_rt` can be negative.
 - **Real-time WebSocket:** `0B` execution, `0D` order book, `04` balance, etc. Not
   exercised in Phase 1 (deferred to Phase 5).
 - **Catalog TRs — verified live against mock server (2026-07-17, Phase 2):**
