@@ -34,7 +34,9 @@ class TradingConfig:
     trailing_stop_wide_pct: float = 5.0   # 활성화 직후 넓은 폭 (휘핑쏘 방지)
     trailing_widen_until_pct: float = 8.0  # 이 수익률까지 선형 보간으로 좁힘
     trailing_stop_pct: float = 3.0        # 안착 후 좁은 폭 (고점 대비)
-    max_holding_days: int = 10            # 영업일 보유 상한 (초과 시 시장가 청산)
+    # 영업일 보유 상한 — N 설정 시 진입일 포함 N번째 거래일 첫 판정에서 강제
+    # 청산(오버나이트 갭 노출 최대 N−1회 — 보수 방향, exit_rules docstring 참조)
+    max_holding_days: int = 10
 
     # --- 진입 (스펙 §6-3, 결정 #26/#28/#30) ---
     max_positions: int = 5                # 사이징 분모 (고정 슬롯)

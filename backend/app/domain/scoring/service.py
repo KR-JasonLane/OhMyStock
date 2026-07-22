@@ -13,6 +13,7 @@ from app.core.market_calendar import scoring_reference_date
 from app.domain.scoring.config import ScoringConfig
 from app.domain.scoring.engine import run_scoring
 from app.domain.scoring.strategies import Strategy, default_strategies
+from app.domain.scoring.universe import passes_universe
 
 logger = logging.getLogger(__name__)
 
@@ -27,13 +28,6 @@ class ScoringProgress:
     done: int
     total: int
     failure_reason: str | None = None
-
-
-def _passes_universe(audit_info: str, state: str) -> bool:
-    """스펙 §4-2: auditInfo가 "정상"이고 state에 거래정지/관리종목 플래그가 없다."""
-    return (audit_info == "정상"
-            and "거래정지" not in state
-            and "관리종목" not in state)
 
 
 class ScoringService(BackgroundRunService):
@@ -82,7 +76,7 @@ class ScoringService(BackgroundRunService):
             instruments = await asyncio.to_thread(
                 self._store.active_common_instruments)
             universe = [sym for sym, audit, state in instruments
-                        if _passes_universe(audit, state)]
+                        if passes_universe(audit, state)]
             universe_count = len(universe)
             if universe_count == 0:
                 await self._fail(run_id, 0, 0,

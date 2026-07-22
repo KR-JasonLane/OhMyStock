@@ -343,11 +343,17 @@ class PositionMonitor:
 - 조회 실패 구분(`list_instruments` state로 거래정지 vs 네트워크), 동시호가
   (15:20~15:30)·VI 백오프, 장운영시간 밖 중지·15:30 정상 반환(`calendar` 사용).
 - EXIT_FAILED 침묵 금지 → 상태 노출.
+- **⚠️ trailing_active 계약(P5-T3 트레이더 이월):** `evaluate_exit`의 익절
+  백스톱은 입력 `trailing_active`가 **DB 영속값 그대로(직전 관측 상태)**라는
+  계약에 의존한다 — monitor가 매 폴링마다 재계산해 넘기면(new_active와 동치)
+  백스톱이 통합 지점에서 조용히 재사(도달 불가)한다. `TradePosition.
+  trailing_active`를 그대로 전달하는 fake-store 왕복 통합 테스트 필수.
 
 **Steps:**
 - [ ] 청산 사유별 체결 방식, 실현손익 계산, 실패 구분, 백오프.
-- [ ] **패널:** (트레이더) 청산 체결·비용 반영, (개발자) 순수/부수 경계,
-      (아키텍트) 캘린더 재사용, (보안) 실패 침묵 금지.
+- [ ] trailing_active DB 영속값 그대로 전달 — fake store 왕복 통합 테스트.
+- [ ] **패널:** (트레이더) 청산 체결·비용 반영·**trailing_active 계약 재검증**,
+      (개발자) 순수/부수 경계, (아키텍트) 캘린더 재사용, (보안) 실패 침묵 금지.
 
 ---
 

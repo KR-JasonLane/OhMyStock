@@ -194,6 +194,17 @@ evidence trail.
     (`ka10095`) call immediately after an order (`kt10000`) returned `rc=0` with no 429.
     This RESOLVES the §11-5 risk (손절 order delayed by quote polling) — no order-
     priority design needed (decision #14 concern retired by measurement).
+  - **Tick size (호가단위) — discriminating probe verified (2026-07-22,
+    `.superpowers/sdd/p5-pregate-tick-probe.txt`):** the 200,000–500,000 KRW band is
+    **500 KRW** (matches official 2023 KRX reform docs). A limit order priced at a
+    multiple of 250 but not 500 (244,750) was REJECTED with `rc=20` /
+    `[2000](RC4003:모의투자 호가단위 오류입니다.)`; a control order (…510) was also
+    rejected — so the mock DOES validate tick alignment on limit orders (`RC4003` is
+    the tick-violation signal). **⚠️ Mock MARKET-order fill prices do NOT respect the
+    tick grid** (G3 fill 272,750 is not a 500-multiple — matching-engine blended/
+    approximated price). Never infer the tick table from fill prices; only from
+    limit-order accept/reject. Full table in `domain/trading/ticks.py`; other bands
+    and ETF (5 KRW, doc-confirmed only) are doc-based — low-priority probe candidates.
 - **⚠️ No native TP/SL/Stop or conditional auto-orders via REST.** Stop-loss /
   take-profit must be implemented **client-side**: monitor the execution price
   (WebSocket `0B`) and send a market/limit order when a threshold is hit.
