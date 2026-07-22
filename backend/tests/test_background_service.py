@@ -2,16 +2,19 @@
 스캐폴딩(원자적 start, conflict_check, _running 수명주기, run() 예외)만
 직접 확인한다. 파이프라인 본문(수집/스코어링)은 각 서비스 테스트가 맡는다."""
 
+import asyncio
+from datetime import datetime, timezone
+
 import pytest
 
-from app.core.background_service import BackgroundRunService
+from app.core.background_service import BackgroundRunService, StopMode
 
 
 class DummyService(BackgroundRunService):
     """_run()만 구현하는 최소 서브클래스 — boom=True면 예외를 던진다."""
 
-    def __init__(self, conflict_check=None, boom: bool = False) -> None:
-        super().__init__(task_label="dummy", conflict_check=conflict_check)
+    def __init__(self, conflict_check=None, boom: bool = False, now=None) -> None:
+        super().__init__(task_label="dummy", conflict_check=conflict_check, now=now)
         self.ran = 0
         self._boom = boom
         self.accepted_calls = 0
@@ -23,6 +26,19 @@ class DummyService(BackgroundRunService):
 
     def _on_accepted(self) -> None:
         self.accepted_calls += 1
+
+
+class StopAwareService(BackgroundRunService):
+    """_run()이 사이클 경계에서 stop_requested()를 확인하는 상시 루프 모사."""
+
+    def __init__(self, now=None) -> None:
+        super().__init__(task_label="stopaware", now=now)
+        self.cycles = 0
+
+    async def _run(self) -> None:
+        while self.stop_requested() is None and self.cycles < 100:
+            self.cycles += 1
+            await asyncio.sleep(0)  # 사이클 경계 — 이벤트 루프에 양보(정지 신호 반영 지점)
 
 
 @pytest.mark.anyio
@@ -98,3 +114,58 @@ async def test_on_accepted_훅은_가드_통과_직후에만_호출된다():
     plain = DummyService()
     await plain.run()
     assert plain.accepted_calls == 1  # run()의 가드 통과 경로도 호출됨
+
+
+# --- P5 Task 1: 타임스탬프 + 정지 계약 ---
+
+@pytest.mark.anyio
+async def test_started_finished_at은_now주입_시계로_고정된다():
+    ticks = iter([datetime(2026, 7, 22, 0, 0, tzinfo=timezone.utc),
+                  datetime(2026, 7, 22, 0, 5, tzinfo=timezone.utc)])
+    svc = DummyService(now=lambda: next(ticks))
+    assert svc.started_at() is None and svc.finished_at() is None
+    await svc.run()
+    assert svc.started_at() == datetime(2026, 7, 22, 0, 0, tzinfo=timezone.utc)
+    assert svc.finished_at() == datetime(2026, 7, 22, 0, 5, tzinfo=timezone.utc)
+
+
+@pytest.mark.anyio
+async def test_finished_at은_예외로_끝나도_고정된다():
+    ticks = iter([datetime(2026, 7, 22, 1, 0, tzinfo=timezone.utc),
+                  datetime(2026, 7, 22, 1, 1, tzinfo=timezone.utc)])
+    svc = DummyService(boom=True, now=lambda: next(ticks))
+    with pytest.raises(RuntimeError, match="boom"):
+        await svc.run()
+    assert svc.finished_at() == datetime(2026, 7, 22, 1, 1, tzinfo=timezone.utc)
+
+
+@pytest.mark.anyio
+async def test_request_stop이_상시루프를_협조적으로_종료시킨다():
+    svc = StopAwareService()
+    task = svc.start()
+    # 루프가 몇 사이클 돌게 이벤트 루프에 양보
+    import asyncio
+    await asyncio.sleep(0)
+    svc.request_stop(StopMode.STOP_NEW_ENTRIES)
+    await task
+    assert svc.is_running() is False
+    assert svc.stop_requested() is StopMode.STOP_NEW_ENTRIES
+    assert svc.cycles < 100  # 100 상한 전에 정지 신호로 종료
+
+
+@pytest.mark.anyio
+async def test_start는_이전_정지신호를_클리어한다():
+    svc = StopAwareService()
+    svc.request_stop(StopMode.LIQUIDATE_ALL)
+    assert svc.stop_requested() is StopMode.LIQUIDATE_ALL
+    task = svc.start()  # 새 실행 — 정지 신호 리셋
+    assert svc.stop_requested() is None
+    await task
+    assert svc.cycles == 100  # 정지 신호 없어 상한까지 돎
+
+
+def test_기존_서브클래스는_정지신호를_확인안해도_무영향():
+    # 정지 계약은 첨가형 — stop_requested를 안 보는 _run은 동작 불변.
+    # DummyService(_run이 stop_requested 미확인)가 정상 동작함을 계약으로 명시.
+    svc = DummyService()
+    assert svc.stop_requested() is None  # 기본 None

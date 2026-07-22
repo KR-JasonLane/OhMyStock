@@ -75,7 +75,12 @@ class AnalysisService(BackgroundRunService):
         self._news = news
         self._config = config or AnalysisConfig()
         self._today = today or (lambda: datetime.now(KST).date())
-        self._now = now or (lambda: datetime.now(timezone.utc))
+        # ⚠️ P5 Task 1: 베이스 BackgroundRunService에 now/started_at/finished_at을
+        # 승격했으나, AnalysisService의 progress-임베드 타임스탬프(P4 T1) 이관은
+        # 다음 단계로 미룬다 — 지금은 자체 시계를 self._clock으로 분리해 베이스
+        # self._now와의 이중 호출(테스트 clock 소진)을 피한다(회귀 0). 4서비스
+        # 완전 대칭(progress→베이스 노출)은 후속 태스크에서 완료.
+        self._clock = now or (lambda: datetime.now(timezone.utc))
         self._progress: AnalysisProgress | None = None
 
     def progress(self) -> AnalysisProgress | None:
@@ -109,7 +114,7 @@ class AnalysisService(BackgroundRunService):
         # `_run()` 진입 시 한 번만 고정한다 — 이후 모든 중간 progress
         # 스냅샷(_set)이 같은 started_at을 실어 보내고, 종결 스냅샷만
         # finished_at을 추가로 채운다(T1, 브리프 지시).
-        started = self._now().isoformat()
+        started = self._clock().isoformat()
         self._set(None, "running", "gate", 0, 0, started=started)
 
         gate = await asyncio.to_thread(self._store.latest_succeeded_score_run)
@@ -121,7 +126,7 @@ class AnalysisService(BackgroundRunService):
             # 이 경우에도 감사에 필요하다.
             self._set(None, "failed", "gate", 0, 0,
                       "no succeeded scoring run - run scoring first",
-                      started=started, finished=self._now().isoformat())
+                      started=started, finished=self._clock().isoformat())
             return
         score_run_id, reference_date = gate
 
@@ -215,7 +220,7 @@ class AnalysisService(BackgroundRunService):
                 self._store.finish_run, run_id, "succeeded", regime,
                 market_summary, warnings, None,
                 max_picks_advice=result.market.max_picks_advice)
-            finished = self._now().isoformat()
+            finished = self._clock().isoformat()
             self._set(run_id, "succeeded", "finished", total, total,
                       started=started, finished=finished)
             logger.info(
@@ -295,7 +300,7 @@ class AnalysisService(BackgroundRunService):
             self._store.finish_run, run_id, "failed", None, None, None, reason)
         started = self._progress.started_at if self._progress else None
         self._set(run_id, "failed", stage, 0, total, reason,
-                  started=started, finished=self._now().isoformat())
+                  started=started, finished=self._clock().isoformat())
 
     def _set(self, run_id: int | None, status: str, stage: str, done: int,
              total: int, failure_reason: str | None = None,

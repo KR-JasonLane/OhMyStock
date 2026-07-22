@@ -8,22 +8,46 @@
 못한다."""
 
 import asyncio
+import enum
 import logging
 from collections.abc import Callable
+from datetime import datetime, timezone
 
 _default_logger = logging.getLogger(__name__)
+
+
+class StopMode(enum.Enum):
+    """협조적 정지 모드. STOP_NEW_ENTRIES는 신규 작업만 중단하고 진행 중인 감시를
+    유지, LIQUIDATE_ALL은 보유분까지 정리한다. 단발 배치 서비스(collection/
+    scoring/analysis)는 정지 신호를 확인하지 않으므로 이 모드가 무의미하다 —
+    장시간 상시 루프(P5 TradingService)만 소비한다."""
+    STOP_NEW_ENTRIES = "stop_new_entries"
+    LIQUIDATE_ALL = "liquidate_all"
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 class BackgroundRunService:
     """단일 실행(at-most-one) 백그라운드 서비스의 오케스트레이션 베이스.
 
     서브클래스는 `_run()`에 파이프라인 본문을 구현한다. `_running` 수명주기,
-    원자적 시작, 태스크 강참조, done 콜백 예외 로깅은 이 클래스가 전담한다.
+    원자적 시작, 태스크 강참조, done 콜백 예외 로깅, 실행별 타임스탬프
+    (started_at/finished_at), 협조적 정지 신호는 이 클래스가 전담한다.
+
+    **정지 계약(P5 Task 1):** 장시간 상시 루프 서비스는 `_run()` 안에서
+    폴링 사이클 경계마다 `stop_requested()`를 확인해 협조적으로 종료한다.
+    주문 발행 같은 원자적 구간에서는 신호를 무시하고 완료 후 다음 사이클에서만
+    확인한다(신호 도중 취소 시 브로커-DB 불일치 방지 — 스펙 §6-5). 단발 배치
+    서비스는 이 신호를 확인하지 않으며, 확인하지 않는 `_run()`은 동작 불변이다
+    (첨가형 확장 — 기존 collection/scoring/analysis 무영향).
     """
 
     def __init__(self, task_label: str,
                  conflict_check: Callable[[], bool] | None = None,
-                 logger: logging.Logger | None = None) -> None:
+                 logger: logging.Logger | None = None,
+                 now: Callable[[], datetime] | None = None) -> None:
         """task_label: done 콜백 예외 로그 문구에 쓰는 서비스 이름
         (예: "collection", "scoring") — 서브클래스별 로그 메시지를 그대로
         유지하기 위한 최소한의 커스터마이즈 지점이다.
@@ -35,18 +59,46 @@ class BackgroundRunService:
         그대로 유지한다.
 
         conflict_check: 동시 실행 금지 콜러블 — 진행 중이면 시작 거부.
+
+        now: 실행별 started_at/finished_at 타임스탬프 시계(초 단위 감사용).
+        기본값 UTC now. 테스트에서 결정적으로 고정하기 위한 주입점 —
+        4서비스(collection/scoring/analysis/trading) 공통(P5 Task 1, 이전에
+        AnalysisService에만 있던 것을 베이스로 승격).
         """
         self._task_label = task_label
         self._conflict_check = conflict_check
         self._logger = logger or _default_logger
+        self._now = now or _utc_now
         self._running = False
         self._task: asyncio.Task | None = None
+        self._started_at: datetime | None = None
+        self._finished_at: datetime | None = None
+        self._stop_mode: StopMode | None = None
 
     def is_running(self) -> bool:
         return self._running
 
     def current_task(self) -> asyncio.Task | None:
         return self._task
+
+    def started_at(self) -> datetime | None:
+        """현재/직전 실행의 시작 시각(_execute 진입 시 고정). 미실행이면 None."""
+        return self._started_at
+
+    def finished_at(self) -> datetime | None:
+        """실행 종료 시각(성공/실패 무관, finally에서 고정). running 중이면
+        직전 종료 시각(또는 최초 실행 전 None)."""
+        return self._finished_at
+
+    def request_stop(self, mode: StopMode) -> None:
+        """협조적 정지 요청(외부/API에서 호출). 실제 정지는 상시 루프 서비스가
+        다음 사이클 경계에서 `stop_requested()`를 확인해 반영한다 — 즉시 취소가
+        아니다(원자적 구간 보호). 실행 중이 아니어도 세팅은 무해하다."""
+        self._stop_mode = mode
+
+    def stop_requested(self) -> StopMode | None:
+        """정지 요청 모드(없으면 None). 상시 루프 `_run()`이 사이클 경계에서 확인."""
+        return self._stop_mode
 
     def start(self) -> asyncio.Task | None:
         """원자적 시작: 이미 실행 중이거나 충돌하면 None. 태스크 강참조는
@@ -66,6 +118,7 @@ class BackgroundRunService:
         if self._conflict_check is not None and self._conflict_check():
             return None
         self._running = True
+        self._stop_mode = None  # 새 실행 시작 — 이전 정지 신호 클리어
         self._on_accepted()
         self._task = asyncio.create_task(self._execute())
         self._task.add_done_callback(self._log_task_exception)
@@ -83,6 +136,7 @@ class BackgroundRunService:
         if self._conflict_check is not None and self._conflict_check():
             raise RuntimeError("conflicting run in progress")
         self._running = True
+        self._stop_mode = None  # 새 실행 시작 — 이전 정지 신호 클리어
         self._on_accepted()
         await self._execute()
 
@@ -91,11 +145,14 @@ class BackgroundRunService:
 
         `_run()` 내부 어디에서 예외가 나든(초기화 단계 포함) 이 finally가
         구조적으로 `_running`을 복원한다 — 서브클래스가 각자 try/finally를
-        중복할 필요가 없다.
-        """
+        중복할 필요가 없다. started_at은 진입 시, finished_at은 종료 시
+        고정한다(4서비스 공통 감사 타임스탬프 — P5 Task 1)."""
+        self._started_at = self._now()
+        self._finished_at = None
         try:
             await self._run()
         finally:
+            self._finished_at = self._now()
             self._running = False
 
     async def _run(self) -> None:
