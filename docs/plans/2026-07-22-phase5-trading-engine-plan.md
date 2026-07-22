@@ -476,6 +476,15 @@ async def apply_reconcile(actions, orders: OrderPort,
       (지정가=발주가/시장가=fresh ask)와 부분체결 확정 수량(취소 직전 폴
       스냅샷, 최대 1 interval 낡음 — 트레이더 I4)을 실측값으로 교정하고,
       잔고 0이면 유령 포지션 즉시 해소(C1 잔여 리스크 봉쇄 — ⓒ 방어선).
+- [ ] **requires_reconcile=True인 CLOSED는 잔고 교차 검증 후에만 최종 확정
+      (하드 게이트 — 보안 P5-T6c #2)**: pending 지연 확정·reconcile 시드
+      경유 CLOSED는 잔고에 해당 심볼이 실제로 없는지 kt00018로 확인하고,
+      잔고에 남아 있으면 포지션을 재오픈(ENTERED·잔고 수량)해 감시로 복귀
+      — "다음 대사가 교정한다"는 기대를 코드 강제로 승격. 테스트 필수.
+- [ ] **reconcile 적용 직후 CANCEL_AND_SETTLE_ENTRY·CANCEL_AND_REWATCH 심볼
+      잔고 재조회로 최종 수량 재확정**(트레이더 P5-T6c I3): decide의 잔고
+      스냅샷과 실제 취소 실행 사이에 추가 체결 레이스가 가능 — settle된
+      수량이 실보유보다 작으면 초과분이 당일 감시 밖에 방치된다.
 - [ ] 3자 배타 양방향 배선(collect/score API 가드 포함) + 실전 스코프 검증자.
 - [ ] **패널:** (보안) 인증·스코프 강제·킬스위치 가용성·감사 기록 + **caps
       구현체가 SELL을 실제로 차단하지 않는지 재검증**(P5-T6b 보안 델타

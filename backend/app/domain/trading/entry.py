@@ -128,11 +128,32 @@ class EntryExecutor:
                                  quantity=plan.quantity,
                                  limit_price=limit_price)
         ack = await self._submit(EntryPhase.LIMIT_SUBMITTED, limit_req)
+        return await self._settle_limit(plan, ask, ack.order_no, limit_req)
 
+    async def resume(self, plan: EntryPlan, ask: int, order_no: str,
+                     limit_price: int) -> EntryOutcome:
+        """재기동 reconcile ②(진입 지정가 생존, 창 안) 재개 — 신규 발주 없이
+        기존 주문의 폴링→취소→시장가 폴백 꼬리를 이어받는다(아키텍트 P5-T6c
+        #3: Task 7이 이 꼬리를 재구현하면 6a 로직과 드리프트한다).
+        limit_price는 생존 주문의 발주가(ka10075 ord_pric — 부분 체결 인정 시
+        진입가 추정에 사용), ask는 재기동 후 재조회한 시세."""
+        if ask <= 0:
+            return EntryOutcome(None, f"invalid ask for {plan.symbol}: {ask}")
+        limit_req = OrderRequest(symbol=plan.symbol, side=OrderSide.BUY,
+                                 style=OrderStyle.LIMIT,
+                                 quantity=plan.quantity,
+                                 limit_price=limit_price)
+        return await self._settle_limit(plan, ask, order_no, limit_req)
+
+    async def _settle_limit(self, plan: EntryPlan, ask: int, order_no: str,
+                            limit_req: OrderRequest) -> EntryOutcome:
+        """지정가 발주 이후의 공통 꼬리([2] 폴링 → [3] 취소 → [4] 시장가
+        폴백). execute(신규 발주)와 resume(재기동 재개)이 공유한다."""
+        limit_price = limit_req.limit_price
         # [2] 체결 폴링(타임아웃까지). unfilled<0 = 관측 전무(조회 계속 실패) —
         # 전량 미체결로 보수 간주(취소 경로가 실주문을 정리, 체결분은 §6-6
         # reconcile이 잔고 ground truth로 복구)
-        unfilled = await self._poll_unfilled(ack.order_no,
+        unfilled = await self._poll_unfilled(order_no,
                                              self._config.limit_order_timeout_sec)
         if unfilled == 0:
             return EntryOutcome(self._position(plan, limit_price))
@@ -145,15 +166,15 @@ class EntryExecutor:
         # reconcile(잔고 ground truth)로 위임한다.
         self._persist(EntryPhase.CANCEL_REQUESTED)
         try:
-            cancel_ack = await self._orders.cancel_order(ack.order_no,
+            cancel_ack = await self._orders.cancel_order(order_no,
                                                          plan.symbol)
         except Exception as exc:  # noqa: BLE001 — 이중 매수 가드가 우선
             logger.error("entry limit cancel FAILED %s (order_no=%s): %s — "
                          "market fallback skipped (double-buy guard), "
-                         "reconcile required", plan.symbol, ack.order_no, exc)
+                         "reconcile required", plan.symbol, order_no, exc)
             return EntryOutcome(
                 None, f"limit cancel failed for {plan.symbol} "
-                      f"(order_no={ack.order_no}) — order state unknown, "
+                      f"(order_no={order_no}) — order state unknown, "
                       f"market fallback skipped", requires_reconcile=True)
         self._audit(cancel_ack, limit_req, "cancelled")
 

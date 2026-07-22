@@ -16,12 +16,18 @@ import logging
 from collections.abc import Awaitable, Callable
 
 from app.domain.broker import OrderAck, OrderPort, OrderRequest
+from app.domain.trading.models import TradePosition
 
 logger = logging.getLogger(__name__)
 
 # 주문 감사 콜백 — (ack, request, status). Task 7이 store.record_order 연결.
 OnOrder = Callable[[OrderAck, OrderRequest, str], None]
 Sleep = Callable[[float], Awaitable[None]]
+# 포지션 영속 콜백 — 갱신 TradePosition 스냅샷 전체 전달(Task 7이 symbol→
+# row id 매핑 후 store.update_position 연결). monitor/reconcile 공유 단일
+# 정의(개발자 P5-T6c #3 — 리터럴 중복은 드리프트 위험). 격리/비격리 정책은
+# 사용 위치별 계약(발주 전=fail-closed, 관측·체결 후=격리 — 각 모듈 참조).
+PersistPosition = Callable[[TradePosition], None]
 
 
 def audit_order(on_order: OnOrder | None, ack: OrderAck, req: OrderRequest,

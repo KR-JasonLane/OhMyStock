@@ -35,7 +35,8 @@ from app.domain.broker import (MarketData, OrderAck, OrderPort, OrderRequest,
 from app.domain.trading.config import TradingConfig
 from app.domain.trading.costs import realized_pnl
 from app.domain.trading.exit_rules import evaluate_exit
-from app.domain.trading.execution import (OnOrder, audit_order, poll_unfilled,
+from app.domain.trading.execution import (OnOrder, PersistPosition,
+                                          audit_order, poll_unfilled,
                                           submit_order)
 from app.domain.trading.models import (ExitPhase, ExitReason, PositionState,
                                        TradePosition)
@@ -43,12 +44,10 @@ from app.domain.trading.ticks import round_to_tick
 
 logger = logging.getLogger(__name__)
 
-# 포지션 영속 콜백 — 갱신된 TradePosition 스냅샷 전체를 전달(Task 7이 symbol→
-# row id 매핑 후 store.update_position 연결). 발주 전 호출은 fail-closed(예외
-# 전파 — 주문이 안 나가는 안전 방향), **체결 후 호출은 격리**(주문·체결은
-# 이미 일어난 사실 — 기록 실패가 나머지 포지션 감시를 죽이면 안 된다.
-# DB가 놓친 상태는 재기동 reconcile(§6-6 ④)이 잔고 대조로 복구).
-PersistPosition = Callable[[TradePosition], None]
+# PersistPosition 계약(정의는 execution.py — 6b/6c 공유): 발주 전 호출은
+# fail-closed(예외 전파 — 주문이 안 나가는 안전 방향), **관측·체결 후 호출은
+# 격리**(주문·체결은 이미 일어난 사실 — 기록 실패가 나머지 포지션 감시를
+# 죽이면 안 된다. DB가 놓친 상태는 재기동 reconcile(§6-6 ④)이 잔고로 복구).
 # 종목 상태 조회(거래정지 구분용) — Task 7이 list_instruments 기반으로 연결.
 LookupState = Callable[[str], Awaitable[str | None]]
 
@@ -82,11 +81,22 @@ class ExitAction:
 
 @dataclass(frozen=True)
 class _PendingExit:
-    """체결 미확정 청산 주문(취소하지 않고 추적) — 다음 사이클에서 재확인."""
+    """체결 미확정 청산 주문(취소하지 않고 추적) — 다음 사이클에서 재확인.
+
+    seen_alive: 이 주문이 미체결 조회(ka10075)에 등록된 것을 관측한 적이
+    있는가. False(관측 전무 pending·reconcile 시드)면 부재=체결 판정에
+    **연속 2회 부재 확인**을 요구한다(보안 P5-T6c #2 — 잘못된 시드/전파
+    지연이 실보유를 CLOSED로 오판해 감시 밖 방치하는 것 방지, C1과 동일
+    방어). 한 번이라도 관측되면 부재=체결 즉시 판정(6b 기존 계약)."""
     position: TradePosition   # EXITING으로 영속된 스냅샷
     order_no: str
     reason: ExitReason
-    est_price: int
+    # 추정 체결가. None = 신뢰할 추정 없음(reconcile 시드) — 확정 시 pnl을
+    # 계산하지 않고 None으로 영속(트레이더 P5-T6c I4: entry_price 따위를
+    # 대입하면 손실이 0에 가깝게 과소평가된 "확정처럼 보이는" 숫자가 남는다).
+    est_price: int | None
+    seen_alive: bool = True
+    absent_streak: int = 0
 
 
 class PositionMonitor:
@@ -242,6 +252,23 @@ class PositionMonitor:
 
     # ── 집행 (§6-2-b) ───────────────────────────────────────────────────
 
+    def track_existing_exit(self, pos: TradePosition, order_no: str,
+                            est_price: int | None = None) -> None:
+        """재기동 reconcile ⑤(청산 **시장가** 주문 생존 — 취소 금지 계약)의
+        _pending 시드(6c → Task 7). 인메모리 _pending은 재시작 시 소실되므로
+        (보안 P5-T6b #4 고아 갭) reconcile이 식별한 생존 청산 주문을 여기로
+        복원해야 다음 poll_once가 체결을 추적한다. est_price 미상(None)이면
+        확정 시 pnl/exit_price를 기록하지 않는다(트레이더 I4) — pending 확정은
+        항상 requires_reconcile=True라 잔고 대사가 실측으로 채운다."""
+        reason = pos.exit_reason or ExitReason.STOP_LOSS  # 미상 시 보수 라벨
+        # est_price 기본 None — 신뢰할 추정이 없으면 pnl을 기록하지 않는다
+        # (트레이더 I4). seen_alive=False — 부재=체결에 연속 2회 확인(보안 #2).
+        self._pending[pos.symbol] = _PendingExit(pos, order_no, reason,
+                                                 est_price, seen_alive=False)
+        self._warnings[f"pending:{pos.symbol}"] = (
+            f"{pos.symbol}: exit order {order_no} restored from reconcile — "
+            "tracking")
+
     async def liquidate(self, pos: TradePosition,
                         now: datetime | None = None) -> ExitAction:
         """킬스위치 LIQUIDATE_ALL(§8-1-b) — Task 7이 호출. 즉시 시장가 청산.
@@ -284,7 +311,11 @@ class PositionMonitor:
                            reason: ExitReason, now: datetime) -> ExitAction:
         """손절/트레일링/기간초과/킬스위치 — 시장가 즉시, 폴백 없음(§6-2-b:
         미청산 리스크 > 슬리피지)."""
-        exiting = replace(pos, state=PositionState.EXITING, exit_reason=reason)
+        # exit_phase 명시 clear — 시장가 청산은 서브상태가 없다. 스테일 phase
+        # (직전 TP 시도 잔재)가 영속되면 재기동 reconcile이 "익절 지정가
+        # 생존"으로 오판해 살아있는 시장가 매도를 취소한다(아키텍트 P5-T6c #2).
+        exiting = replace(pos, state=PositionState.EXITING, exit_reason=reason,
+                          exit_phase=None)
         req = OrderRequest(symbol=pos.symbol, side=OrderSide.SELL,
                            style=OrderStyle.MARKET, quantity=pos.quantity)
         ack = await self._submit_exit(exiting, req, est_price)
@@ -448,16 +479,21 @@ class PositionMonitor:
 
     # ── 체결 확정/추적 ──────────────────────────────────────────────────
 
-    def _close(self, pos: TradePosition, sell_price: int, reason: ExitReason,
-               now: datetime, requires_reconcile: bool = False) -> ExitAction:
+    def _close(self, pos: TradePosition, sell_price: int | None,
+               reason: ExitReason, now: datetime,
+               requires_reconcile: bool = False) -> ExitAction:
         """청산 확정. requires_reconcile: 추정치 신뢰도가 낮은 경로(부분체결
-        혼합·pending 지연 확정)의 즉시 잔고 대사 표식(트레이더 I5/I6)."""
-        pnl = realized_pnl(pos.market, pos.entry_price * pos.quantity,
-                           sell_price * pos.quantity, self._config)
+        혼합·pending 지연 확정)의 즉시 잔고 대사 표식(트레이더 I5/I6).
+        sell_price=None(reconcile 시드 — 신뢰할 추정 없음)이면 pnl/exit_price를
+        기록하지 않고(None) 잔고 대사를 강제 표식한다(트레이더 I4 — 과소평가
+        손실이 확정 숫자처럼 남는 것 방지)."""
+        pnl = (realized_pnl(pos.market, pos.entry_price * pos.quantity,
+                            sell_price * pos.quantity, self._config)
+               if sell_price is not None else None)
         closed = replace(pos, state=PositionState.CLOSED, exit_price=sell_price,
                          exit_reason=reason, realized_pnl=pnl, closed_at=now,
                          exit_phase=None)
-        needs = requires_reconcile
+        needs = requires_reconcile or sell_price is None
         try:
             self._persist(closed)  # 체결 후 — 격리(모듈 상단 PersistPosition 계약)
         except Exception as exc:  # noqa: BLE001
@@ -482,8 +518,11 @@ class PositionMonitor:
     def _track_pending(self, pos: TradePosition, order_no: str,
                        reason: ExitReason, est_price: int,
                        observed_nothing: bool) -> ExitAction:
-        self._pending[pos.symbol] = _PendingExit(pos, order_no, reason,
-                                                 est_price)
+        # 관측 전무(observed_nothing) pending은 등록 자체가 미확인 — 부재=체결
+        # 판정에 연속 2회 확인 요구(보안 P5-T6c #2, C1 방어 대칭)
+        self._pending[pos.symbol] = _PendingExit(
+            pos, order_no, reason, est_price,
+            seen_alive=not observed_nothing)
         self._warnings[f"pending:{pos.symbol}"] = (
             f"{pos.symbol}: exit order {order_no} unfilled — tracking "
             "(auction/VI window not cancelled)")
@@ -516,7 +555,18 @@ class PositionMonitor:
         alive = {o.order_no for o in open_orders}
         actions: list[ExitAction] = []
         for symbol, pending in list(self._pending.items()):
+            if pending.order_no in alive and not pending.seen_alive:
+                # 등록 관측 확정 — 이후 부재는 즉시 체결 판정 가능
+                self._pending[symbol] = replace(pending, seen_alive=True,
+                                                absent_streak=0)
+                continue
             if pending.order_no not in alive:
+                if not pending.seen_alive and pending.absent_streak + 1 < 2:
+                    # 미관측 pending의 첫 부재 — 체결/미전파/오시드 구분 불가
+                    # (보안 P5-T6c #2): 연속 2회 확인 전에는 CLOSED 금지
+                    self._pending[symbol] = replace(
+                        pending, absent_streak=pending.absent_streak + 1)
+                    continue
                 del self._pending[symbol]
                 # est_price가 제출 시점 관측치라 지연 확정일수록 괴리가 큼
                 # (트레이더 I6) + 미추적 창 체결 — 즉시 잔고 대사 표식.

@@ -4,20 +4,20 @@
 폴링 계약(execution.poll_unfilled — 6a C1과 동일): exit_limit_timeout_sec=3.0/
 interval=1.0 기준 유예 sleep 1회 + 폴 3회, 미관측 주문의 부재는 연속 2회 확인."""
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime
 from decimal import Decimal
 
 import pytest
 
 from app.domain.broker import MarketData, OrderSide, OrderStyle, Quote
-from tests.trading.conftest import FakeOrderPortBase
 from app.domain.trading import costs
 from app.domain.trading.config import TradingConfig
 from app.domain.trading.models import (ExitPhase, ExitReason, PositionState,
                                        TradePosition)
 from app.domain.trading.monitor import PositionMonitor
+from tests.trading.conftest import (KST, FakeCalendar, FakeOrderPortBase,
+                                    FakeStore)
 
-KST = timezone(timedelta(hours=9))
 # 화요일 10:00 KST 장중
 T0 = datetime(2026, 7, 22, 10, 0, tzinfo=KST)
 
@@ -26,20 +26,6 @@ CFG = TradingConfig(max_single_order_krw=100_000_000, max_daily_orders=100,
                     min_avg_trading_value_krw=0,
                     exit_limit_timeout_sec=3.0, poll_interval_sec=1.0,
                     quote_failure_threshold=2)
-
-
-class FakeCalendar:
-    KST = KST
-
-    def __init__(self, held=0, market_open=True):
-        self.held = held
-        self.market_open = market_open
-
-    def held_business_days(self, entry_date: date, now: datetime) -> int:
-        return self.held
-
-    def is_market_hours(self, now: datetime) -> bool:
-        return self.market_open
 
 
 def _md(symbol: str, price: int, bid: int | None = None) -> MarketData:
@@ -66,23 +52,6 @@ class FakeOrders(FakeOrderPortBase):
         if isinstance(item, Exception):
             raise item
         return [item[s] for s in symbols if s in item]
-
-
-class FakeStore:
-    """persist_position 콜백 뒷단 — symbol 키 dict. trailing_active/peak가
-    DB 영속값 그대로 다음 사이클 입력이 되는 왕복(§6-2)을 재현한다."""
-
-    def __init__(self, *positions: TradePosition):
-        self.rows: dict[str, TradePosition] = {p.symbol: p for p in positions}
-        self.history: list[TradePosition] = []
-
-    def persist(self, pos: TradePosition) -> None:
-        self.rows[pos.symbol] = pos
-        self.history.append(pos)
-
-    def open_positions(self) -> list[TradePosition]:
-        return [p for p in self.rows.values()
-                if p.state is PositionState.ENTERED]
 
 
 async def _no_sleep(_):

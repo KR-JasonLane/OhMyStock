@@ -5,8 +5,8 @@ from datetime import datetime, timezone
 import pytest
 from sqlalchemy import create_engine, select
 
-from app.domain.trading.models import (EntryPhase, ExitReason, PositionState,
-                                       TradePosition)
+from app.domain.trading.models import (EntryPhase, ExitPhase, ExitReason,
+                                       PositionState, TradePosition)
 from app.store.models import Base, TradeOrderRow
 from app.store.trading_store import TradingStore
 
@@ -154,6 +154,24 @@ def test_오염_행은_행단위_격리되고_나머지는_반환(store, engine)
     good, corrupted = store.open_positions()
     assert [pid for pid, _ in good] == [p2]
     assert corrupted == [p1]
+
+
+def test_snapshot_영속은_None을_비움으로_기록(store):
+    """save_position_snapshot 계약(P5-T6c 아키텍트 #2) — update_position의
+    None=미변경과 달리 스냅샷의 None 필드는 명시적으로 비운다. 스테일
+    exit_phase가 남으면 재기동 reconcile이 살아있는 시장가 청산을 오취소."""
+    run_id = store.create_run("{}")
+    pos_id = store.create_position(run_id, _pos())
+    store.update_position(pos_id, state=PositionState.EXITING,
+                          exit_phase=ExitPhase.LIMIT_SUBMITTED,
+                          exit_reason=ExitReason.TAKE_PROFIT, entered_at=T0)
+    # ENTERED 복귀 스냅샷 — phase/reason 명시 clear
+    snapshot = _pos(state=PositionState.ENTERED, entry_phase=None)
+    store.save_position_snapshot(pos_id, snapshot)
+    (pid, pos), = store.open_positions()[0]
+    assert pid == pos_id and pos.state is PositionState.ENTERED
+    assert pos.exit_phase is None and pos.exit_reason is None
+    assert pos.entry_phase is None
 
 
 def test_주문_상태_전이는_updated_at을_남긴다(store):

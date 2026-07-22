@@ -124,9 +124,9 @@ class TradingStore:
                         realized_pnl: int | None = None,
                         entered_at: datetime | None = None,
                         closed_at: datetime | None = None) -> None:
-        """부분 갱신(상태 전이). None 인자는 미변경 — enum/phase를 명시적으로
-        비우려면 전용 전이 메서드를 추가할 것(현재 P5 흐름엔 불필요:
-        phase는 전진만 하고 청산 필드는 한 번만 채워진다)."""
+        """부분 갱신(상태 전이). None 인자는 **미변경** — phase/enum을 명시적으로
+        비워야 하는 도메인 스냅샷 영속(PersistPosition 콜백)은
+        `save_position_snapshot`을 쓸 것(P5-T6c 아키텍트 #2)."""
         with self._sessions.begin() as session:
             row = session.get(TradePositionRow, position_id)
             if row is None:
@@ -155,6 +155,35 @@ class TradingStore:
                 row.entered_at = entered_at
             if closed_at is not None:
                 row.closed_at = closed_at
+
+    def save_position_snapshot(self, position_id: int,
+                               pos: TradePosition) -> None:
+        """도메인 `PersistPosition` 콜백용 **전체 스냅샷 영속** — None 필드는
+        '비움'으로 기록된다(update_position의 None=미변경과 다른 계약 —
+        P5-T6c 아키텍트 #2: ENTERED 복귀·CLOSED 확정은 entry/exit_phase·
+        exit_reason의 명시적 clear를 전제하며, 미변경으로 남기면 재기동
+        reconcile이 스테일 phase를 보고 살아있는 시장가 청산 주문을
+        오취소한다). 식별 필드(symbol/name/market/trade_run_id)는 불변 —
+        갱신하지 않는다."""
+        with self._sessions.begin() as session:
+            row = session.get(TradePositionRow, position_id)
+            if row is None:
+                raise ValueError(f"unknown trade position: {position_id}")
+            row.state = pos.state.value
+            row.entry_phase = (pos.entry_phase.value
+                               if pos.entry_phase is not None else None)
+            row.exit_phase = (pos.exit_phase.value
+                              if pos.exit_phase is not None else None)
+            row.entry_price = pos.entry_price
+            row.quantity = pos.quantity
+            row.peak_price = pos.peak_price
+            row.trailing_active = pos.trailing_active
+            row.exit_price = pos.exit_price
+            row.exit_reason = (pos.exit_reason.value
+                               if pos.exit_reason is not None else None)
+            row.realized_pnl = pos.realized_pnl
+            row.entered_at = pos.entered_at
+            row.closed_at = pos.closed_at
 
     def open_positions(self) -> tuple[list[tuple[int, TradePosition]], list[int]]:
         """미종결 포지션(reconcile §6-6 입력, EXIT_FAILED 포함 — 스펙 분기 ⑦).

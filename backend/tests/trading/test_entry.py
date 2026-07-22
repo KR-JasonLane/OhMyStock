@@ -269,6 +269,31 @@ async def test_감사_콜백_예외는_격리되고_흐름은_계속():
 
 
 @pytest.mark.anyio
+async def test_resume은_기존_주문의_폴링_취소_폴백_꼬리를_이어받는다():
+    """재기동 reconcile ② 재개 primitive(아키텍트 P5-T6c #3) — 신규 지정가
+    발주 없이 생존 주문의 [2]~[4] 꼬리를 공유 코드로 수행."""
+    # fake는 마지막 발주 seq로 행을 만들므로 미발주 상태의 생존 주문은 ORD0
+    fake = FakeOrders(open_orders_script=[10, 10, 10, None, None])
+    phases = []
+    out = await _executor(fake, persist=phases.append).resume(
+        PLAN, ask=273_500, order_no="ORD0", limit_price=272_500)
+    assert out.position is not None and out.position.quantity == 10
+    assert fake.cancelled == ["ORD0"]          # 기존 주문 취소
+    assert [r.style for r in fake.placed] == [OrderStyle.MARKET]  # 신규 지정가 없음
+    assert phases == [EntryPhase.CANCEL_REQUESTED, EntryPhase.MARKET_SUBMITTED]
+
+
+@pytest.mark.anyio
+async def test_resume_체결_확인시_지정가_기준_포지션():
+    fake = FakeOrders(open_orders_script=[None, None])  # 부재 2회 확인=체결
+    out = await _executor(fake).resume(PLAN, ask=273_500, order_no="ORD0",
+                                       limit_price=272_500)
+    assert out.position is not None
+    assert out.position.entry_price == 272_500  # 생존 주문 발주가 기준
+    assert fake.placed == [] and fake.cancelled == []
+
+
+@pytest.mark.anyio
 async def test_시장가_잔여취소도_감사를_남긴다():
     fake = FakeOrders(open_orders_script=[10] * 3 + [10] * 3)
     audit = []
