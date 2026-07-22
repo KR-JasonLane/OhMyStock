@@ -77,7 +77,9 @@ backend/
 └─ replay/                 # 신규 — app의 **형제 최상위 패키지**(임포트 격리*)
    ├─ main.py              # create_replay_app() — `uvicorn replay.main:app`
    ├─ clock.py             # 시간 오프셋(§5)
-   ├─ data.py              # 분봉 저장소 로더(§6 — 기동 시 전량 메모리 적재)
+   ├─ minute_store.py      # 분봉 저장소 로더(§6 — ⚠️ data.py 금지: 데이터
+   │                       #  디렉토리 data/와 이름 충돌 시 패키지 섀도잉,
+   │                       #  아키텍트 R2 Critical 실재현)
    ├─ account.py           # 인메모리 계좌(예수금/보유/미체결)
    ├─ matching.py          # 매칭 엔진(§8)
    ├─ faults.py            # 결함 주입(§9 — FaultPolicy 주입 seam)
@@ -92,10 +94,14 @@ backend/
 `from app`/`import app` 패턴이 존재하면 실패하는 정적 검사 테스트 1건
 (아키텍트 I4 — 같은 venv/PYTHONPATH라 런타임은 못 막는다).
 
-**저장소 접근(아키텍트 I6):** data.py는 **기동 시 분봉 sqlite를 전량 메모리
-적재**(12종목×수일 분봉 — 수만 행, 수 MB)하고 요청 경로에는 DB I/O가 없다 —
-async 핸들러의 블로킹으로 결함 주입 타이밍(전파 지연 N초 등)이 왜곡되는 것
-방지. 계좌/미체결/faults 상태도 전부 인메모리.
+**저장소 접근(아키텍트 I6, R2 실측 갱신):** minute_store는 기동 시 분봉
+sqlite를 메모리 적재하고 요청 경로에는 DB I/O가 없다 — async 핸들러의
+블로킹으로 결함 주입 타이밍(전파 지연 N초 등)이 왜곡되는 것 방지. ⚠️ R1
+실측이 예상(수일)을 초과(13개월 — 전량 적재 시 842MB/9.5s 실측)했으므로
+**재생 서버는 symbols/since 필터로 앵커 이후 구간만 적재**한다(로더 필터
+구현됨). 전량 적재는 오프라인 분석(커버리지 게이트) 전용. R4 기동은
+executor 경유 + compose 메모리 상한 명시(R6). 계좌/미체결/faults 상태는
+전부 인메모리.
 
 ### 4-1. 프로필 전환(자동 전환 금지 — 안전)
 

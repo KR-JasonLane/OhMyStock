@@ -15,7 +15,7 @@
 
 2부(수집): 프로브가 성공하면 대상 종목 전체를 페이지네이션으로 끝까지 수집해
 backend/replay/data/minutes.sqlite 에 저장(gitignore — 운영 DB와 분리, 스펙 §6).
-수집 원본 형태(정렬·문자열)는 raw 그대로 두고 파싱은 로더(replay/data.py)가
+수집 원본 형태(정렬·문자열)는 raw 그대로 두고 파싱은 로더(replay/minute_store.py)가
 담당 — 프로브 단계에서 형태 가정을 최소화한다.
 
 전제: .env 모의 키. 같은 앱키로 백엔드/타 프로세스 가동 중이면 실행 금지

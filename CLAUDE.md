@@ -156,6 +156,26 @@ evidence trail.
   possible), and future dates clamp to today. **The raw daily
   candle response is descending (newest → oldest)** — callers/adapters must re-sort
   to ascending (oldest → newest) if that ordering is required.
+- **Minute candles `ka10080` — verified live against mock server (2026-07-22,
+  replay R1, `.superpowers/sdd/replay-ka10080-probe.txt`):** `POST
+  /api/dostk/chart`, body `{stk_cd, tic_scope:"1"(분 단위), upd_stkpc_tp:"1",
+  base_dt(YYYYMMDD)}` — **base_dt 포함 바디가 1차 시도에 수락**(랩퍼
+  changelog의 "기준일자 추가" 정황과 부합; base_dt 없는 변형은 미측정 —
+  포함이 안전). List key `stk_min_pole_chart_qry`; row fields `cntr_tm`
+  (**YYYYMMDDHHMMSS**), `open_pric`/`high_pric`/`low_pric`/`cur_prc`
+  (**등락 부호 ±prefix 포함** — 파서는 abs 처리 필수; 같은 행 안에서
+  필드별 부호가 다를 수 있음 — 등락 방향 표기이지 델타가 아님), `trde_qty`,
+  `acc_trde_qty`, `pred_pre`, `pred_pre_sig`. **내림차순(newest→oldest)**,
+  900 rows/page, cont-yn/next-key 페이지네이션. **보관 ~13개월**(2026-07-22
+  실행 시 2025-07-01 09:00까지). 429는 로그상 3회만 관측(RateLimiter
+  백오프로 즉시 흡수 — stdout/stderr 버퍼링으로 정확한 발생 시점 추적
+  불가). `012510`은 분봉도 전 필드 빈 문자열 1행(degenerate — 일봉 전례와
+  동일 클래스; 이로 인해 "저유동 커버리지" 심볼이 실질 부재 — 대체 심볼
+  확보 전까지 저유동 검증 공백). **무거래 분은 봉이 없다**(결측 —
+  `replay-ka10080-coverage.txt` 갭 실측: 예 371460 5거래일 중 132분 결측)
+  — 리플레이의 "직전가 유지" 정책의 실측 근거. ⚠️ 이 수집은 **장중
+  (15:09~15:29 KST) 실행분**이라 당일(7/22) tail 1~2분봉은 미확정 가능 —
+  리플레이 앵커는 당일 tail 구간 회피 권장. 전 종목(12) 수집 ~20분.
 - **Multi-symbol quote `ka10095` (관심종목정보요청) — verified live against mock
   server (2026-07-22, Phase 5 PRE-GATE G1, `.superpowers/sdd/p5-pregate-G1.txt`):**
   `POST /api/dostk/stkinfo`, body `{stk_cd: "<code1>|<code2>|..."}`. **⚠️ The
