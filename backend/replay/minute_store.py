@@ -83,6 +83,11 @@ class MinuteStore:
         self._series: dict[str, list[MinuteCandle]] = {}
         self._keys: dict[str, list[datetime]] = {}
         self.skipped = 0   # 파싱 스킵(결측 필드 행) — 침묵 금지, 로더가 보고
+        # 재생 시계 바인딩(아키텍트 R3 #2 — candles_between의 미래 누출
+        # 방어를 호출 규율이 아니라 구조로): 설정되면 until이 now()로 클램프
+        # 된다. **재생 배선(R4 컴포지션 루트)은 반드시 바인딩**, 오프라인
+        # 분석(게이트 — 전량 접근 필요)만 미바인딩 허용.
+        self.now_provider = None  # Callable[[], datetime] | None
 
     @classmethod
     def load(cls, sqlite_path: Path | str,
@@ -155,6 +160,27 @@ class MinuteStore:
         candle_at/last_at_or_before만 사용할 것 — 이 메서드를 재생 응답에
         쓰면 §5 미래 누출 불변식이 깨진다(호출자 책임 경계 명시)."""
         return tuple(self._series.get(symbol, ()))
+
+    def candles_between(self, symbol: str, after: datetime,
+                        until: datetime) -> tuple[MinuteCandle, ...]:
+        """(after, until] 구간 봉 — 매칭 엔진의 미체결 크로스 판정용(§8:
+        등록 시점 이후 재생 진행분만 순차 검사). **until 초과는 반환 불가**
+        (§5 미래 누출 불변식). now_provider가 바인딩돼 있으면 until을
+        now()로 **구조적 클램프**(아키텍트 R3 #2 — 오호출이 미래를 새게
+        하는 공격면 차단, 호출 규율 의존 제거).
+
+        경계 주의(트레이더 R3 Minor): after는 **배타** — 제출 시각과 같은
+        분의 봉은 스캔에서 제외된다(제출 분 내 크로스는 §2 초 단위 한계와
+        동일 계열; 마켓터블 재평가 규칙이 현재가 경로를 보완)."""
+        keys = self._keys.get(symbol)
+        if not keys:
+            return ()
+        until = _ensure_kst(until)
+        if self.now_provider is not None:
+            until = min(until, _ensure_kst(self.now_provider()))
+        lo = bisect.bisect_right(keys, _ensure_kst(after))
+        hi = bisect.bisect_right(keys, until)
+        return tuple(self._series[symbol][lo:hi])
 
     def candle_at(self, symbol: str, ts: datetime) -> MinuteCandle | None:
         """ts가 속한 분의 봉(정확히 그 분). 없으면 None(결측 분)."""

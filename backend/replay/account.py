@@ -44,6 +44,11 @@ class OpenOrder:
     price: int             # limit 가격(시장가 0)
     submitted_at: datetime  # 벽시계(전파 지연 판정용 — §8 벽시계 기준)
     visible_after: datetime  # 이 시각 전에는 ka10075에 미노출(전파 지연 재현)
+    # 예약 단가(매수: limit가 or 접수 시점 현재가, 매도: 0) — 접수 시점에
+    # 고정해 이후 시세 결측이 예약액을 침묵 0원으로 만들 수 없게 한다
+    # (개발자 R3 델타 #2 — 결측 케이스의 구조적 제거. 실서버도 접수 시점에
+    # ord_alow_amt를 차감한다). 시장가의 접수가 근사는 스펙 §2 잔여 한계.
+    reserve_price: int = 0
 
 
 @dataclass
@@ -53,11 +58,19 @@ class Account:
     open_orders: dict[str, OpenOrder] = field(default_factory=dict)
     last_eval_missing: int = 0   # 직전 eval_total의 시세 결측 심볼 수(침묵 금지)
     cost_drift_total: int = 0    # 평단 절삭 누적 드리프트(원 — 가시화 계약)
+    negative_cash_events: int = 0  # 음수 예수금(§2 — 예약 근사 한계의 최후 방어선)
     _seq: int = 0
 
     def next_order_no(self) -> str:
         self._seq += 1
         return f"R{self._seq:07d}"
+
+    def estimate_buy_cost(self, price: int, quantity: int) -> int:
+        """매수 소요 추정(금액+수수료) — 접수 시점 예수금 검사용(§8).
+        수수료 수식은 Account가 소유(개발자 R3 #3 — 엔진이 _pct를 직접
+        임포트하면 내부 반올림 정책 변경에 조용히 깨진다)."""
+        amount = price * quantity
+        return amount + _pct(amount, COMMISSION_PCT)
 
     # ── 체결 반영(매칭 엔진이 호출) ─────────────────────────────────────
 
@@ -66,6 +79,15 @@ class Account:
         amount = price * quantity
         fee = _pct(amount, COMMISSION_PCT)
         self.cash -= amount + fee
+        if self.cash < 0:
+            # 접수 시점 예약 차감(matching.submit — 실서버 ord_alow_amt 재현)
+            # 이 1차 방어선이지만, 시장가 미체결의 예약액은 현재가 근사라
+            # 순차 체결이 검사를 초과할 수 있다(스펙 §2 잔여 한계).
+            # 침묵 음수 금지 — 카운터+경고로 표면화(kt00001 원천 오염 감지).
+            self.negative_cash_events += 1
+            logger.warning("cash went negative (%d) after buy fill %s — "
+                           "reservation approximation limit (spec §2)",
+                           self.cash, symbol)
         holding = self.holdings.get(symbol)
         if holding is None:
             self.holdings[symbol] = Holding(symbol, market, quantity, amount)

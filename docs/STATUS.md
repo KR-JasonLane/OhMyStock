@@ -24,18 +24,25 @@
 >    감사 컬럼 → 재기동 reconcile 복구. 증거 `.superpowers/sdd/p5-task-8-*`.
 >    실측 팩트 CLAUDE.md §5 반영 + Phase 5 회고록(규칙 4).
 > 2. **리플레이 목 서버(장외 검증 하네스 — 사용자 제안 2026-07-22):** 스펙
->    `docs/specs/2026-07-22-replay-mock-server-design.md` — 5자 리뷰(4패널+
->    broker-api) 전원 승인. ka10080 분봉 수집 실측 진행/완료(
->    `.superpowers/sdd/replay-ka10080-probe.txt`, 데이터
->    `backend/replay/data/minutes.sqlite` — gitignore). 다음: §11 R1~R7을
->    계획서로 승격 → 태스크별 구현. **부산물: market_calendar KST 정규화
+>    `docs/specs/2026-07-22-replay-mock-server-design.md`(5자 리뷰 승인) +
+>    계획서 `docs/plans/2026-07-22-replay-mock-server-plan.md`(R1~R7).
+>    **R1(수집 실측)·R2(clock/minute_store/account/ticks)·R3(매칭 엔진+
+>    FaultPolicy seam) 완료** — ka10080 실측(`replay-ka10080-probe.txt`),
+>    커버리지 게이트(윈도우 모드, 앵커 후보 2026-06-25 확보 —
+>    `replay-ka10080-coverage.txt`), 데이터 `backend/replay/data/minutes.sqlite`
+>    (281MB, gitignore). R3 핵심: §8 매칭 룰(시장가 현재가/마켓터블 재평가=
+>    현재가 체결/과거 구간 크로스=limit가), 미체결 매수 예약 차감(실서버
+>    ord_alow_amt 재현), 전파 지연, store.now_provider 자동 바인딩(미래
+>    누출 클램프). **다음: R4(키움 엔드포인트 1세트 — check_fills 호출 계약
+>    포함, broker-api 패널 추가).** R1 잔여: 저유동 대체 심볼 수집+ka10095
+>    프로브, 페이지 경계 표본(R7 전). **부산물: market_calendar KST 정규화
 >    프로덕션 버그 수정 완료**(UTC now로 진입 창 9시간 어긋남 — 회귀 테스트).
 > 3. **Task 0 G4**(모의키→실전 엔드포인트 대칭성 — 독립 스크립트+즉시 revoke,
 >    장 무관) — "준비되면" 사용자 지시 대기 상태.
 > 4. Phase 5 회고록 → Phase 6(스케줄러) 착수 준비.
 >
 > **환경:** DB 컨테이너 `127.0.0.1:15432` 가동 중. 테스트는 DB 불필요(sqlite,
-> 579 passed / live 11 deselected). 키움 모의 키는 `.env`(backend/.env 심볼릭).
+> 620 passed / live 11 deselected). 키움 모의 키는 `.env`(backend/.env 심볼릭).
 > 실측 evidence는 `.superpowers/sdd/`(gitignore). **Task 7 이월 게이트:
 > /trade/status·positions 무인증은 Phase 7 착수 전 읽기 스코프 확정(§8-2),
 > 실전 전환 시 수수료 기본값 실측 재설정 + API_TRADE_TOKEN 별도 발급.**

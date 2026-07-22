@@ -59,7 +59,10 @@
   배속, 로더 파싱 fail-loud(012510 degenerate 클래스), 계좌 수수료 계산.
 
 ### R3 — 매칭 엔진
-- Files: `backend/replay/matching.py`, `backend/replay/tests/test_matching.py`
+- Files: `backend/replay/matching.py`, **`backend/replay/faults.py`(seam만 —
+  FaultPolicy 계약+무결함 기본값. R5 소유 파일을 R3가 선행 생성: 매칭이
+  주입 지점을 필요로 하기 때문 — 아키텍트 R3 #1 문서화)**,
+  `backend/tests/replay_mock/test_matching.py`
 - §8 룰: 시장가=현재 분봉 close 즉시, 지정가=크로스 시(replay_now 동기 —
   사전 미래 스캔 금지), 전파 지연 기본 재현(벽시계 N초), 체결 반영(잔고/
   미체결/수수료), 부분체결·fill 억제는 FaultPolicy 훅만(§9 seam).
@@ -67,6 +70,13 @@
   시각 미리 계산 안 함을 시계 전진으로 검증).
 
 ### R4 — 키움 엔드포인트 1세트 (+broker-api 패널)
+- **check_fills 호출 계약(트레이더 R3 #3 — 결함 재현의 재현성):** 모든
+  조회 TR 핸들러(ka10095/ka10075/kt00001/kt00018) 진입 시 `check_fills()`
+  1회 호출을 계약으로 명문화하고 통합 테스트로 고정한다(호출 시점이
+  암묵이면 동일 시나리오의 체결 시점·가격이 배선에 따라 달라진다).
+- **MinuteStore 조립 계약:** 컴포지션 루트(main)가 store.now_provider에
+  ReplayClock.now를 바인딩(§5 구조적 클램프)하고 store 참조를 보관
+  (엔진 경유 이중 로드 금지 — 아키텍트 R3 Minor).
 - Files: `backend/replay/main.py`, `backend/replay/api/*.py`,
   `backend/replay/tests/fixtures/*.json`(정제 픽스처 — §7),
   `backend/replay/tests/test_endpoints.py`
@@ -77,14 +87,23 @@
 - 테스트: 정제 픽스처 형태 대조 회귀, 시크릿 무로그 단정.
 
 ### R5 — 결함 주입
-- Files: `backend/replay/faults.py`, `backend/replay/api/admin.py`,
-  `backend/replay/tests/test_faults.py`
+- Files: `backend/replay/faults.py`(**이미 존재 — R3가 seam 선행 생성,
+  시나리오 정책·상태만 확장**), `backend/replay/api/admin.py`,
+  `backend/tests/replay_mock/test_faults.py`
 - FaultPolicy 주입 seam(§9 — 전역 플래그 금지), 관리 API 3종(faults/
   status/reset — reset 범위: faults+account+pending, clock 유지),
   시나리오 표 전수(§9 12종 — 상하한가 락·fill 억제·VI·신규 거부·거래정지
   결측 포함).
+- ⚠️ 제약(아키텍트 R3 Minor): MatchingEngine은 FaultPolicy를 생성자
+  주입만 받는다 — /_replay/reset은 정책 객체 교체가 아니라 **기존 인스턴스
+  상태의 in-place 리셋**으로 구현할 것.
 
 ### R6 — 프로필 배선 (app 쪽 변경 — 별도 패널)
+- **격리 강제 체크리스트(보안 R3 Important):** replay 서버는 별도 프로세스·
+  별도 실행 스크립트(`uvicorn replay.main:app`)로만 기동 — `app.main`/
+  프로덕션 compose 서비스에 replay 라우터·임포트가 절대 등록되지 않음을
+  회귀 테스트("프로덕션 라우트 /_replay 부재" + app→replay 역방향 임포트
+  부재)로 못박는다(현재는 "아무도 연결 안 함"이라는 우연에 의존).
 - Files: `app/core/config.py`(kiwoom_base_url_override — **루프백/replay
   서비스명 exact-match allowlist**, 실전+override 차단, anchor 단독 차단,
   replay_time_anchor), `app/adapters/kiwoom/client.py`(override 적용+실효
