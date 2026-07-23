@@ -241,6 +241,24 @@ class TradePositionRow(Base):
         DateTime(timezone=True), nullable=True)
 
 
+class SchedulerEventRow(Base):
+    """스케줄러 판정 감사(P6 스펙 §6, 결정 #36 — "왜 그 시각에 그 잡이
+    돌았나/안 돌았나"를 SQL로 복기). insert-only. job/action/reason은
+    도메인 enum의 .value(고정 리터럴)만 — 자유 텍스트 금지(무인증
+    /schedule/status 노출 표면). run의 성공/실패는 각 서비스 run 테이블에
+    이미 있으므로 중복 기록하지 않는다(run_id 조인)."""
+    __tablename__ = "scheduler_events"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True,
+                                    autoincrement=True)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    job: Mapped[str] = mapped_column(String(8))       # collect|score|analyze|trade
+    action: Mapped[str] = mapped_column(String(16))   # triggered|retry|skipped|gave_up|start_rejected
+    reason: Mapped[str] = mapped_column(String(32))   # timeline.Reason 리터럴
+    # FK 미설정 — 의도적(폴리모픽 참조: job 값에 따라 4개 run 테이블 중
+    # 하나를 가리킨다 — 단일 FK 시도 금지, P6 계획 Task 4 아키텍트)
+    run_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
 class TradeOrderRow(Base):
     __tablename__ = "trade_orders"
     # 마이그레이션 0010과 동시 선언(프로젝트 관례 — order_no의 index=True와

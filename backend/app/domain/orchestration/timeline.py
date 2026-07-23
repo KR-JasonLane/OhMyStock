@@ -31,12 +31,18 @@ class Job(Enum):
 class Action(Enum):
     """평가 결과 액션. TRIGGER/RETRY만 실행 지시(start() 호출 대상)이고
     나머지는 상태 서술 — 이벤트 기록(action 문자열은 스펙 §6 어휘)은
-    SchedulerService가 상태 전이 시에만 수행해 틱마다 중복 적재를 막는다."""
+    SchedulerService가 상태 전이 시에만 수행해 틱마다 중복 적재를 막는다.
+
+    START_REJECTED는 evaluate()가 산출하지 않는 **서비스측 전용** 값이다
+    (start()가 None을 반환한 뒤에만 알 수 있음 — Task 5 소관): 이벤트
+    어휘를 스펙 §6과 1:1로 이 enum 하나에 모아 store 경계에서 fail-loud
+    검증할 수 있게 한다(P6 Task 4)."""
     TRIGGER = "triggered"      # 첫 시도 실행
     RETRY = "retry"            # 실패 후 재시도 실행
-    WAIT = "wait"              # 창 밖/선행 대기/백오프/완료/휴면 — 무동작
+    WAIT = "wait"              # 창 밖/선행 대기/백오프/완료/휴면 — 무동작(이벤트 비대상)
     SKIP = "skipped"           # 오늘 몫 실행 불가 확정(시도 없이 — 예: 엔진 미조립)
     GAVE_UP = "gave_up"        # 창 종료 시점까지 실패 잔존(스펙 §5 — 포기)
+    START_REJECTED = "start_rejected"  # 서비스측: start()가 None(충돌/실행 중)
 
 
 class Reason(Enum):
@@ -54,6 +60,9 @@ class Reason(Enum):
     RETRY_BACKOFF = "retry_backoff"
     FIRST_ATTEMPT = "first_attempt"
     AFTER_FAILURE = "after_failure"
+    # ── 서비스측 전용(evaluate() 미산출 — Task 5가 이벤트에 사용) ──
+    CONFLICT = "conflict"                  # start() None — 타 서비스 배타/자체 실행 중
+    EXECUTION_ERROR = "execution_error"    # Decision 실행 중 예외(원문은 로그 전용)
 
 
 @dataclass(frozen=True)
@@ -230,6 +239,30 @@ def _next_trading_day(day: date, calendar) -> date:
         nxt += timedelta(days=1)
     raise ValueError(
         f"no trading day within 30 days after {day} — calendar defective?")
+
+
+def _previous_trading_day(day: date, calendar) -> date:
+    prev = day - timedelta(days=1)
+    for _ in range(30):
+        if calendar.is_trading_day(prev):
+            return prev
+        prev -= timedelta(days=1)
+    raise ValueError(
+        f"no trading day within 30 days before {day} — calendar defective?")
+
+
+def score_reference_for(now: datetime, config: ScheduleConfig,
+                        calendar) -> date:
+    """스코어링/수집 몫의 기준일 R 산정(스펙 §4-b 자정 경계, 순수 함수 —
+    Task 4 store가 facts 구성 시 사용): 거래일 저녁(수집 창 개시 이후)이면
+    오늘이 R, 그 외(아침·비거래일)는 직전 거래일. collect 몫과 score 몫은
+    같은 R을 가리킨다 — 19:00 경계에서 R이 오늘로 넘어가는 순간 수집 몫도
+    '오늘 미완'으로 바뀌어 트리거된다(창 열림과 동시)."""
+    kst = now.astimezone(calendar.KST)
+    today = kst.date()
+    if calendar.is_trading_day(today) and kst.time() >= config.collect_at:
+        return today
+    return _previous_trading_day(today, calendar)
 
 
 def evaluate(now: datetime, facts: TimelineFacts, config: ScheduleConfig,

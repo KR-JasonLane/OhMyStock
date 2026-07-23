@@ -158,3 +158,26 @@ class ScoringStore:
                 Candle(symbol=symbol, date=d, open=o, high=h, low=lo,
                        close=c, volume=v))
         return result
+
+    # ---------- P6 스케줄러 판정 헬퍼 (read-only, 스펙 §6) ----------
+
+    def has_completed_run(self, reference_date: date) -> bool:
+        """reference_date=R인 succeeded run 존재 — 스케줄러 "몫 완료" 판정.
+        스코어링만 시작 시각이 아니라 reference_date 컬럼으로 판정한다
+        (자정을 넘는 창 — 스펙 §4-b — 에서도 몫 귀속이 명확)."""
+        with self._sessions() as session:
+            return session.scalar(
+                select(ScoreRunRow.id)
+                .where(ScoreRunRow.status == "succeeded",
+                       ScoreRunRow.reference_date == reference_date)
+                .limit(1)) is not None
+
+    def last_failed_finished_at(self, reference_date: date) -> datetime | None:
+        """reference_date=R인 failed run의 마지막 종료 시각 — 백오프 기준."""
+        with self._sessions() as session:
+            stamps = session.scalars(
+                select(ScoreRunRow.finished_at)
+                .where(ScoreRunRow.status == "failed",
+                       ScoreRunRow.reference_date == reference_date,
+                       ScoreRunRow.finished_at.is_not(None))).all()
+        return max(stamps, default=None)

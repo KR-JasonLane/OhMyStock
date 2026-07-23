@@ -12,6 +12,7 @@ from sqlalchemy.orm import sessionmaker
 from app.domain.analysis.graph import AnalysisResult
 from app.domain.analysis.ports import (CandidateInput, Headline,
                                        MarketSnapshot, StrategyDetailInput)
+from app.store.kst_time import coarse_utc_bounds, within_kst_day
 from app.store.models import (ANALYSIS_NEWS_TITLE_MAX_LEN,
                               ANALYSIS_NEWS_URL_MAX_LEN, AnalysisNewsRow,
                               AnalysisRunRow, AnalysisVerdictRow,
@@ -286,3 +287,36 @@ class AnalysisStore:
                 "verdicts": verdicts_out,
                 "news_count": news_count,
             }
+
+    # ---------- P6 스케줄러 판정 헬퍼 (read-only, 스펙 §6) ----------
+
+    def has_completed_run(self, reference_date: date) -> bool:
+        """해당 KST 날짜에 시작한 succeeded run 존재(공통 시그니처 — P6
+        계획 Task 4). ⚠️ 날짜 판정은 KST 변환 후: 분석은 08:20 KST(=UTC
+        전날 23:20)에 돌아 SQL DATE() 비교는 정상 아침 런을 매일 전날로
+        오분류한다(개발자 Critical — kst_time 모듈이 단일 구현)."""
+        lo, hi = coarse_utc_bounds(reference_date)
+        with self._sessions() as session:
+            rows = session.scalars(
+                select(AnalysisRunRow.started_at)
+                .where(AnalysisRunRow.status == "succeeded",
+                       AnalysisRunRow.started_at >= lo,
+                       AnalysisRunRow.started_at <= hi)).all()
+        return any(within_kst_day(dt, reference_date) for dt in rows)
+
+    def last_failed_finished_at(self, reference_date: date) -> datetime | None:
+        """해당 KST 날짜에 시작한 failed run의 마지막 종료 시각 — 백오프
+        기준. ⚠️ 스코어링 succeeded 이력이 전무한 게이트 실패는 run 행
+        자체가 없어 여기 안 잡힌다(무해 — timeline._eval_analyze 독스트링,
+        트레이더 T3)."""
+        lo, hi = coarse_utc_bounds(reference_date)
+        with self._sessions() as session:
+            rows = session.execute(
+                select(AnalysisRunRow.started_at, AnalysisRunRow.finished_at)
+                .where(AnalysisRunRow.status == "failed",
+                       AnalysisRunRow.started_at >= lo,
+                       AnalysisRunRow.started_at <= hi)).all()
+        stamps = [finished for started, finished in rows
+                  if finished is not None
+                  and within_kst_day(started, reference_date)]
+        return max(stamps, default=None)

@@ -193,3 +193,30 @@ def test_0007_트레이딩_FK는_전부_비CASCADE다(tmp_path, monkeypatch):
     for table in ("trade_positions", "trade_orders", "trade_fills"):
         for fk in insp.get_foreign_keys(table):
             assert fk["options"].get("ondelete") is None, (table, fk)
+
+
+def test_0010_0011이_est_krw_인덱스_스케줄러_이벤트를_만든다(
+        tmp_path, monkeypatch):
+    """P6 Task 1(0010: trade_orders.est_krw + 복합 인덱스) + Task 4(0011:
+    scheduler_events 5컬럼)의 실제 마이그레이션 SQL 왕복(개발자 T4 —
+    create_all 우회 검증은 마이그레이션 자체를 증명하지 못한다)."""
+    db_url = f"sqlite+pysqlite:///{tmp_path / 'mig.db'}"
+    monkeypatch.setenv("DATABASE_URL", db_url)
+    cfg = Config(str(BACKEND_DIR / "alembic.ini"))
+    cfg.set_main_option("script_location", str(BACKEND_DIR / "alembic"))
+    command.upgrade(cfg, "head")
+    insp = inspect(create_engine(db_url))
+    cols = {c["name"] for c in insp.get_columns("trade_orders")}
+    assert "est_krw" in cols
+    index_names = {ix["name"] for ix in insp.get_indexes("trade_orders")}
+    assert "ix_trade_orders_run_created" in index_names
+    sched_cols = {c["name"] for c in insp.get_columns("scheduler_events")}
+    assert sched_cols == {"id", "ts", "job", "action", "reason", "run_id"}
+    fks = insp.get_foreign_keys("scheduler_events")
+    assert fks == []          # 폴리모픽 run_id — FK 미설정이 의도
+
+    command.downgrade(cfg, "0009")
+    insp = inspect(create_engine(db_url))
+    assert "scheduler_events" not in set(insp.get_table_names())
+    cols = {c["name"] for c in insp.get_columns("trade_orders")}
+    assert "est_krw" not in cols

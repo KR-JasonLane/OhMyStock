@@ -9,6 +9,7 @@ from sqlalchemy import Engine, delete, func, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.domain.broker import Candle, Instrument, Sector
+from app.store.kst_time import coarse_utc_bounds, within_kst_day
 from app.store.models import (INSTRUMENT_AUDIT_INFO_MAX_LEN,
                               INSTRUMENT_STATE_MAX_LEN, CandleRow,
                               CollectionRunRow, InstrumentRow,
@@ -185,3 +186,35 @@ class CollectionStore:
                                              failed=failed, error_summary=error_summary))
             if result.rowcount == 0:
                 logger.warning("finish_run: run %s not found", run_id)
+
+    # ---------- P6 스케줄러 판정 헬퍼 (read-only, 스펙 §6) ----------
+
+    def has_completed_run(self, reference_date: date) -> bool:
+        """해당 KST 날짜에 시작한 succeeded run 존재 — 스케줄러 "몫 완료"
+        판정. 4개 스토어 공통 시그니처(P6 계획 Task 4 — build_facts 합성이
+        분기 없이 대칭 호출). 날짜 판정은 KST 변환 후(kst_time 모듈 —
+        UTC DATE() 비교는 아침 런을 전날로 오분류, 개발자 Critical)."""
+        lo, hi = coarse_utc_bounds(reference_date)
+        with self._sessions() as session:
+            rows = session.scalars(
+                select(CollectionRunRow.started_at)
+                .where(CollectionRunRow.status == "succeeded",
+                       CollectionRunRow.started_at >= lo,
+                       CollectionRunRow.started_at <= hi)).all()
+        return any(within_kst_day(dt, reference_date) for dt in rows)
+
+    def last_failed_finished_at(self, reference_date: date) -> datetime | None:
+        """해당 KST 날짜에 시작한 failed run의 마지막 종료 시각 — 재시도
+        백오프 기준(DB 유래라 재부팅 후에도 정확, 스펙 §5)."""
+        lo, hi = coarse_utc_bounds(reference_date)
+        with self._sessions() as session:
+            rows = session.execute(
+                select(CollectionRunRow.started_at,
+                       CollectionRunRow.finished_at)
+                .where(CollectionRunRow.status == "failed",
+                       CollectionRunRow.started_at >= lo,
+                       CollectionRunRow.started_at <= hi)).all()
+        stamps = [finished for started, finished in rows
+                  if finished is not None
+                  and within_kst_day(started, reference_date)]
+        return max(stamps, default=None)
