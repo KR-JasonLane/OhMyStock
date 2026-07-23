@@ -22,6 +22,8 @@ from datetime import date, timedelta
 
 from app.core.market_calendar import is_trading_day
 from app.domain.trading.config import TradingConfig
+from app.domain.trading.exit_rules import (crossed_above,
+                                           crossed_below)
 from replay.minute_store import MinuteCandle, MinuteStore
 
 # 임계값 원천 — 버그 봉쇄 한도 4종은 게이트와 무관한 필수 인자라 더미
@@ -48,24 +50,63 @@ def _window_end(anchor: date, days: int) -> date:
     return d
 
 
-def _stats(series: list[MinuteCandle]) -> tuple[float, float, str, str, int]:
-    """(maxDD%, maxRU%, 첫 손절크로스 시각, 첫 익절크로스 시각, 정규장 결측 분)."""
+_ENTRY_CUTOFF_MIN = 9 * 60 + 5   # 09:05 — 엔진 진입 창 시작(§6-3)
+
+
+def _assumed_entry(series: list[MinuteCandle]) -> tuple[int, int]:
+    """(가정 진입가, 진입 봉 인덱스) — 윈도우 첫 거래일 09:05 이후 첫
+    체결가(엔진이 진입 창에서 관측할 현재가 근사). 크로스 탐색은 이
+    인덱스부터 시작한다(트레이더 R7-패치 Minor — 09:05 이전 갭 구간은
+    엔진이 물리적으로 겪을 수 없는 가짜 크로스). 09:05 이후 체결이
+    없으면 첫 봉 폴백(저유동 — 근사임을 감수, 게이트는 스크리닝 도구)."""
+    first_day = series[0].ts.date()
+    for i, candle in enumerate(series):
+        if candle.ts.date() == first_day and (
+                candle.ts.hour * 60 + candle.ts.minute) >= _ENTRY_CUTOFF_MIN:
+            return candle.close, i
+    # 폴백은 침묵하지 않는다(아키텍트 R7-패치 Minor — 저유동 심볼에서
+    # 조용히 걸리면 진입가 근사가 왜곡됐음을 사람이 못 알아챈다)
+    print(f"  ⚠️ {series[0].symbol}: 첫날 09:05 이후 체결 없음 — 첫 봉"
+          f"({series[0].ts:%H:%M}) 폴백 진입가 사용")
+    return series[0].close, 0
+
+
+def _stats(series: list[MinuteCandle]) -> tuple[float, float, str, str, str, int]:
+    """(maxDD%, maxRU%, 첫 손절/익절/트레일링안착 크로스 시각, 정규장 결측 분).
+
+    ⚠️ 크로스 기준 = **가정 진입가(윈도우 첫날 09:05 시점 가격) 대비**
+    (R7 발견①, 2026-07-23): 이전 정의(진행 고점 대비 DD)는 엔진의 손절
+    의미론(exit_rules — 진입가 대비 -stop_loss_pct)과 달라 심볼 선정이
+    빗나갔다(035760 — 게이트 "11:00 크로스" vs 엔진 기준 당일 최저
+    -4.45%로 미발동 실측). maxDD/RU는 참고용 진행 고/저점 통계로 유지."""
+    entry_ref, entry_idx = _assumed_entry(series)
     peak = trough = series[0].close
     max_dd = max_ru = 0.0
-    first_dd = first_ru = "-"
+    first_dd = first_ru = first_ru8 = "-"
     gaps = 0
     prev_ts = None
-    for candle in series:
+    for i, candle in enumerate(series):
         peak = max(peak, candle.close)
         trough = min(trough, candle.close)
-        dd = (peak - candle.close) / peak * 100
-        ru = (candle.close - trough) / trough * 100
-        max_dd = max(max_dd, dd)
-        if first_dd == "-" and dd >= _CFG.stop_loss_pct:
-            first_dd = candle.ts.strftime("%m-%d %H:%M")
-        max_ru = max(max_ru, ru)
-        if first_ru == "-" and ru >= _CFG.take_profit_pct:
-            first_ru = candle.ts.strftime("%m-%d %H:%M")
+        max_dd = max(max_dd, (peak - candle.close) / peak * 100)
+        max_ru = max(max_ru, (candle.close - trough) / trough * 100)
+        # 엔진 의미론 크로스(진입가 대비, **진입 봉부터** 탐색) — exit_rules
+        # 의 공유 헬퍼로 판정(하드코딩 복제 금지). ⚠️ 크로스는 "가격이
+        # 임계를 자극했다"는 커버리지 신호다 — 실제 청산 사유는 엔진
+        # 우선순위(§6-2: 트레일링 래치 시 고정 익절 영구 비활성)에 따라
+        # 다를 수 있다(트레이더 R7-패치 #2 — 예: +10% 크로스는 대개
+        # TAKE_PROFIT이 아니라 TRAILING_STOP으로 청산됨).
+        if i >= entry_idx:
+            stamp = candle.ts.strftime("%m-%d %H:%M")
+            if first_dd == "-" and crossed_below(candle.close, entry_ref,
+                                                 _CFG.stop_loss_pct):
+                first_dd = stamp
+            if first_ru == "-" and crossed_above(candle.close, entry_ref,
+                                                 _CFG.take_profit_pct):
+                first_ru = stamp
+            if first_ru8 == "-" and crossed_above(
+                    candle.close, entry_ref, _CFG.trailing_widen_until_pct):
+                first_ru8 = stamp
         # 정규장(09:00~15:20) 연속성 — 결측 분 실측(동시호가 구간 제외)
         if (prev_ts is not None and candle.ts.date() == prev_ts.date()
                 and prev_ts.time().hour * 60 + prev_ts.time().minute >= 540
@@ -74,7 +115,7 @@ def _stats(series: list[MinuteCandle]) -> tuple[float, float, str, str, int]:
             if delta > 0:
                 gaps += delta
         prev_ts = candle.ts
-    return max_dd, max_ru, first_dd, first_ru, gaps
+    return max_dd, max_ru, first_dd, first_ru, first_ru8, gaps
 
 
 def main() -> None:
@@ -117,10 +158,12 @@ def main() -> None:
             print(f"{symbol:8} {'(윈도우 내 데이터 없음)':>20}")
             continue
         days = len({c.ts.date() for c in series})
-        max_dd, max_ru, first_dd, first_ru, gaps = _stats(series)
-        any_dd |= max_dd >= _CFG.stop_loss_pct
-        any_ru8 |= max_ru >= _CFG.trailing_widen_until_pct
-        any_ru10 |= max_ru >= _CFG.take_profit_pct
+        max_dd, max_ru, first_dd, first_ru, first_ru8, gaps = _stats(series)
+        # 판정도 엔진 의미론(first_* — 진입가 대비)으로(개발자 R7-패치
+        # Critical: 요약 줄이 옛 진행고점 정의로 남으면 표만 고친 반쪽 수정)
+        any_dd |= first_dd != "-"
+        any_ru8 |= first_ru8 != "-"
+        any_ru10 |= first_ru != "-"
         print(f"{symbol:8} {days:5d} {max_dd:7.2f} {max_ru:7.2f} "
               f"{first_dd:>12} {first_ru:>12} {gaps:6d}")
     print("\n[게이트 판정]"
@@ -133,7 +176,10 @@ def main() -> None:
     print(f"  보유기간(기본 {_CFG.max_holding_days}일): 윈도우 일수 참조 — "
           "미달 시 config 단축(max_holding_days)이 1차 수단(스펙 §6)")
     print("  ※ 결측분>0 = 무거래 분은 봉이 없음(직전가 유지 정책의 실측 "
-          "근거). maxDD/RU는 구간 내 진행 고/저점 대비 누적치.")
+          "근거). maxDD/RU는 구간 내 진행 고/저점 대비 누적치(참고용).")
+    print("  ※ 크로스='가격이 임계를 자극' 커버리지 — 실제 청산 사유는 "
+          "엔진 우선순위에 따라 다를 수 있음(예: +10% 자극은 트레일링 "
+          "래치로 대개 TRAILING_STOP 청산 — §6-2).")
 
 
 if __name__ == "__main__":

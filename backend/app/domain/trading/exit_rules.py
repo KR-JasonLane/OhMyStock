@@ -17,6 +17,19 @@ from app.domain.trading.config import TradingConfig
 from app.domain.trading.models import ExitEvaluation, ExitReason
 
 
+def crossed_below(price: int, ref: int, pct: float) -> bool:
+    """`price ≤ ref×(1−pct%)` — bp 정수 교차곱셈(경계 포함). float 나눗셈은
+    정확한 경계에서 부동소수점 오차로 정상 케이스를 오판한다(실측 —
+    evaluate_exit 주석). **공유 헬퍼**(개발자 R7-패치: 커버리지 게이트가
+    같은 산술을 하드코딩 복제하면 반올림 정책 변경 시 조용히 stale)."""
+    return price * 10_000 <= ref * (10_000 - round(pct * 100))
+
+
+def crossed_above(price: int, ref: int, pct: float) -> bool:
+    """`price ≥ ref×(1+pct%)` — crossed_below의 상방 대칭."""
+    return price * 10_000 >= ref * (10_000 + round(pct * 100))
+
+
 def _trailing_width_pct(peak_gain_pct: float, config: TradingConfig) -> float:
     """현재 트레일링 폭(%) — 활성화 직후 넓은 폭에서 안착 후 좁은 폭으로
     **선형 보간**(결정 #35 v3.1). 계단 함수는 전환점(+8%)에서 보호선이
@@ -71,21 +84,20 @@ def evaluate_exit(*, entry_price: int, current_price: int, peak_price: int,
     # 오차, 설정값 정밀도 안).
     #   current <= entry×(1−s%) ⇔ current×10000 <= entry×(10000−s_bp)
     entry_bp = entry_price
-    activate_bp = round(config.trailing_activate_pct * 100)
-    new_active = trailing_active or (
-        new_peak * 10_000 >= entry_bp * (10_000 + activate_bp))
+    new_active = trailing_active or crossed_above(
+        new_peak, entry_bp, config.trailing_activate_pct)
 
     reason: ExitReason | None = None
     if held_business_days + 1 >= config.max_holding_days:
         reason = ExitReason.MAX_HOLDING
-    elif current_price * 10_000 <= entry_bp * (
-            10_000 - round(config.stop_loss_pct * 100)):
+    elif crossed_below(current_price, entry_bp, config.stop_loss_pct):
         reason = ExitReason.STOP_LOSS
-    elif new_active and current_price * 10_000 <= new_peak * (
-            10_000 - round(_trailing_width_pct(peak_gain_pct, config) * 100)):
+    elif new_active and crossed_below(
+            current_price, new_peak,
+            _trailing_width_pct(peak_gain_pct, config)):
         reason = ExitReason.TRAILING_STOP
-    elif not trailing_active and current_price * 10_000 >= entry_bp * (
-            10_000 + round(config.take_profit_pct * 100)):
+    elif not trailing_active and crossed_above(
+            current_price, entry_bp, config.take_profit_pct):
         # 백스톱 — 판정 기준은 **입력 trailing_active(이전 관측까지의 상태)**다.
         # new_active로 판정하면 +10%에 닿는 순간 peak_gain도 ≥ activate가 되어
         # 이 분기가 영원히 도달 불가가 된다(구현 중 발견). 폴링 간격 사이 급등이

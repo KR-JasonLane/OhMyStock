@@ -139,14 +139,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # 리플레이 프로필 기동 게이트(§4-1 확장) — 서버 프로브(미도달·
             # speed≠1.0 거부) + 서버 재생 시각을 앵커로 취득(SSOT)
             replay_anchor = None
+            trading_now = None
             if settings.kiwoom_base_url_override is not None:
                 replay_anchor = await _verify_replay_server(
                     settings.kiwoom_base_url_override)
+                trading_now = make_replay_clock(replay_anchor)
 
             # 트레이딩 엔진(P5 Task 7) — §8-1 버그 봉쇄 한도 4종이 전부
             # 설정된 경우에만 조립(하드 게이트: 상한 없이 실주문 엔진이
             # 켜지지 않는다). 미설정이면 /trade/*는 503.
-            app.state.trading_store = TradingStore(app.state.engine)
+            # 리플레이 프로필에서는 **store에도 재생 시계 주입**(R7 발견② —
+            # store 타임스탬프가 실시계면 쿨다운(recent_closed_symbols) 등
+            # 시간 비교가 재생 세계와 혼합되어 오발동한다. run 3 실측 재현).
+            # 의도(아키텍트 R7-패치 Minor): TRADE_* 미설정으로 트레이딩이
+            # 비활성이어도 override만 있으면 주입 — store 시계는 "프로필"
+            # 속성이지 "엔진 활성" 속성이 아니다. 수집/스코어링/분석 3
+            # 서비스의 store는 **의도적으로 실시계 유지**(1차 비범위 —
+            # §4-1 "4서비스" 경계. 리플레이 중 /collect 호출은 비권장).
+            app.state.trading_store = TradingStore(app.state.engine,
+                                                   now=trading_now)
             if settings.run_environment == "replay":
                 # 교차 오염 fail-fast(트레이더 R6 Critical): 같은 DB에 다른
                 # 환경(mock/real)의 미종결 포지션이 있으면 리플레이 reconcile
@@ -173,12 +184,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     max_daily_order_krw=settings.trade_max_daily_order_krw,
                     min_avg_trading_value_krw=(
                         settings.trade_min_avg_trading_value_krw))
-                # 리플레이 프로필(§4-1): 프로브가 취득한 서버 재생 시각을
-                # 앵커로 **트레이딩 서비스에만** 오프셋 시계 주입(speed=1.0
-                # 고정 전제 — app.core.replay_clock 독스트링).
-                trading_now = None
-                if replay_anchor is not None:
-                    trading_now = make_replay_clock(replay_anchor)
+                # 리플레이 프로필(§4-1): 위에서 만든 오프셋 시계(store와
+                # 동일 인스턴스 — R7 발견② 시계 단일화)를 서비스에 주입
+                # (speed=1.0 고정 전제 — app.core.replay_clock 독스트링).
+                if trading_now is not None:
                     logger.warning(
                         "trading clock OVERRIDDEN (replay anchor %s — "
                         "server-sourced)", trading_now().isoformat())

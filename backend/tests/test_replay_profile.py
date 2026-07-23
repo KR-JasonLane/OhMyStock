@@ -313,3 +313,29 @@ def test_create_run은_run_environment를_영속한다(tmp_path):
             select(TradeRunRow.id, TradeRunRow.run_environment))}
     assert rows[run_id] == "replay"
     assert rows[default_id] == "mock"   # 기본값(기존 호출 경로 하위 호환)
+
+
+def test_리플레이_프로필은_store에도_재생_시계를_주입한다(tmp_path):
+    """R7 발견② 회귀 — store 타임스탬프가 실시계면 쿨다운
+    (recent_closed_symbols) 등 시간 비교가 재생 세계와 혼합되어
+    오발동한다(run 3 실측: 재생 09:05 쿨다운 컷오프 vs 실시계 closed_at).
+    리플레이 기동 시 TradingStore._now가 재생 시계여야 한다."""
+    import respx
+    from fastapi.testclient import TestClient
+    settings = _replay_settings(tmp_path)
+    engine = create_engine(settings.database_url.get_secret_value())
+    Base.metadata.create_all(engine)
+    app = create_app(settings)
+    with respx.mock:
+        respx.get("http://127.0.0.1:9095/_replay/status").respond(
+            json={"replay_now": "2026-07-10T09:00:00+09:00", "speed": 1.0})
+        with TestClient(app):
+            # 공개 API 경유(개발자 R7-패치 — private _now 접근 금지):
+            # create_run이 store 시계로 started_at을 기록한다
+            run_id = app.state.trading_store.create_run("{}", "replay")
+    with engine.connect() as conn:
+        stamp = conn.execute(
+            select(TradeRunRow.started_at)
+            .where(TradeRunRow.id == run_id)).scalar_one()
+    assert stamp.year == 2026 and stamp.month == 7 and stamp.day == 10
+    assert stamp.hour == 9   # 재생 세계(09:00+ε) — 실시계였다면 오늘 날짜
