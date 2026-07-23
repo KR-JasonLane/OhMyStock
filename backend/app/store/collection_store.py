@@ -9,7 +9,8 @@ from sqlalchemy import Engine, delete, func, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.domain.broker import Candle, Instrument, Sector
-from app.store.kst_time import coarse_utc_bounds, within_kst_day
+from app.store.kst_time import (as_aware_utc, coarse_utc_bounds,
+                                within_kst_day)
 from app.store.models import (INSTRUMENT_AUDIT_INFO_MAX_LEN,
                               INSTRUMENT_STATE_MAX_LEN, CandleRow,
                               CollectionRunRow, InstrumentRow,
@@ -214,7 +215,7 @@ class CollectionStore:
                 .where(CollectionRunRow.status == "failed",
                        CollectionRunRow.started_at >= lo,
                        CollectionRunRow.started_at <= hi)).all()
-        stamps = [finished for started, finished in rows
+        stamps = [as_aware_utc(finished) for started, finished in rows
                   if finished is not None
                   and within_kst_day(started, reference_date)]
         return max(stamps, default=None)

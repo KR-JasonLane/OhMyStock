@@ -17,7 +17,8 @@ from datetime import date
 from sqlalchemy import Engine, func, select
 from sqlalchemy.orm import sessionmaker
 
-from app.store.kst_time import coarse_utc_bounds, within_kst_day
+from app.store.kst_time import (as_aware_utc, coarse_utc_bounds,
+                                within_kst_day)
 
 from app.domain.trading.models import (EntryPhase, ExitPhase, ExitReason,
                                        PositionState, TradePosition)
@@ -226,8 +227,8 @@ class TradingStore:
         """실패 = failed OR (stopped AND NOT kill_switch — 셧다운/크래시
         취소도 재시도 백오프 대상, §4-d 미완료 분기)의 마지막 종료 시각."""
         stamps = [
-            row.finished_at for row in self._day_runs(reference_date,
-                                                      run_environment)
+            as_aware_utc(row.finished_at)
+            for row in self._day_runs(reference_date, run_environment)
             if row.finished_at is not None
             and (row.status == "failed"
                  or (row.status == "stopped"

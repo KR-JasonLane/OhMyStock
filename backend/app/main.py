@@ -15,6 +15,7 @@ from app.adapters.ollama.client import OllamaClient
 from app.api.analyze import router as analyze_router
 from app.api.collect import router as collect_router
 from app.api.health import router as health_router
+from app.api.schedule import router as schedule_router
 from app.api.score import router as score_router
 from app.api.trade import router as trade_router
 from app.api.ws import router as ws_router
@@ -24,12 +25,16 @@ from app.core.replay_clock import make_replay_clock
 from app.domain.analysis.config import AnalysisConfig
 from app.domain.analysis.service import AnalysisService
 from app.domain.collection import CollectionService
+from app.domain.orchestration.config import ScheduleConfig
+from app.domain.orchestration.service import SchedulerService
+from app.domain.orchestration.timeline import Job
 from app.domain.scoring.service import ScoringService
 from app.domain.trading.config import TradingConfig
 from app.domain.trading.service import TradingService
 from app.store.analysis_store import AnalysisStore
 from app.store.collection_store import CollectionStore
 from app.store.db import create_db_engine
+from app.store.scheduler_store import SchedulerStore
 from app.store.scoring_store import ScoringStore
 from app.store.trading_store import TradingStore
 
@@ -101,8 +106,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 trading = getattr(app.state, "trading", None)
                 return trading is not None and trading.is_running()
 
+            app.state.collection_store = CollectionStore(app.state.engine)
             app.state.collection = CollectionService(
-                app.state.broker, CollectionStore(app.state.engine),
+                app.state.broker, app.state.collection_store,
                 conflict_check=lambda: (app.state.scoring.is_running()
                                         or _trading_running()))
             app.state.scoring_store = ScoringStore(app.state.engine)
@@ -131,7 +137,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # AnalysisConfig()를 새로 만들어 두 설정이 서로 다른 인스턴스가
             # 되고, 실제 LLM 호출 설정과 DB에 남는 config 스냅샷/감사 기록이
             # 드리프트될 수 있다.
-            analysis_store = AnalysisStore(app.state.engine)
+            app.state.analysis_store = AnalysisStore(app.state.engine)
+            analysis_store = app.state.analysis_store
             app.state.analysis = AnalysisService(
                 analysis_store, app.state.llm, app.state.news,
                 config=analysis_cfg)
@@ -207,9 +214,56 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "게이트: TRADE_MAX_SINGLE_ORDER_KRW/TRADE_MAX_DAILY_ORDERS/"
                     "TRADE_MAX_DAILY_ORDER_KRW/TRADE_MIN_AVG_TRADING_VALUE_KRW "
                     "4종 전부 설정 필요)")
+
+            # ── P6 스케줄러(결정 #37·#39 — 데일리 타임라인 자동화) ──
+            # 기동 게이트(스펙 §5): ① 리플레이 프로필은 무조건 미기동(env보다
+            # 우선 — 재생 시계와 실시계 트리거 혼합 방지, 리플레이 런은
+            # 수동이 정의상 옳다), ② SCHEDULER_ENABLED=false(영속 off).
+            app.state.scheduler = None
+            app.state.scheduler_store = None
+            # 미기동 사유는 **게이트 판정 시점에 기록**하고 /schedule/status는
+            # 조회만 한다(아키텍트 T6 Important — 조건식을 API에서 재계산하면
+            # 게이트 추가 시 두 파일이 조용히 어긋난다. 재계산 금지, 기록된
+            # 사실 조회). 값은 고정 리터럴만.
+            app.state.scheduler_disabled_reason = None
+            if settings.run_environment == "replay":
+                app.state.scheduler_disabled_reason = "replay_profile"
+                logger.info("scheduler disabled: replay profile "
+                            "(재생 시계·실시계 트리거 혼합 방지 — 스펙 §5)")
+            elif not settings.scheduler_enabled:
+                app.state.scheduler_disabled_reason = "disabled_by_env"
+                logger.info("scheduler disabled: SCHEDULER_ENABLED=false")
+            else:
+                app.state.scheduler_store = SchedulerStore(
+                    app.state.engine, app.state.collection_store,
+                    app.state.scoring_store, analysis_store,
+                    app.state.trading_store,
+                    run_environment=settings.run_environment)
+                app.state.scheduler = SchedulerService(
+                    {Job.COLLECT: app.state.collection,
+                     Job.SCORE: app.state.scoring,
+                     Job.ANALYZE: app.state.analysis,
+                     Job.TRADE: app.state.trading},
+                    app.state.scheduler_store, ScheduleConfig(),
+                    market_calendar)
+                app.state.scheduler.start()
+                logger.info(
+                    "scheduler enabled — daily timeline automation active "
+                    "(collect 19:00 → score → analyze 08:20 → trade 09:00, "
+                    "decisions #37-#40)")
             try:
                 yield
             finally:
+                # 셧다운 순서(스펙 §8): **스케줄러 최우선 취소·await 완료**
+                # — 정리 중인 서비스에 start()를 재호출하거나 dispose된
+                # 엔진에 질의하는 경합 차단. 그 후 4-서비스 정리.
+                scheduler = app.state.scheduler
+                if scheduler is not None:
+                    task = scheduler.current_task()
+                    if task is not None and not task.done():
+                        task.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await task
                 services = [app.state.scoring, app.state.collection,
                             app.state.analysis]
                 if app.state.trading is not None:
@@ -251,4 +305,5 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(score_router)
     app.include_router(analyze_router)
     app.include_router(trade_router)
+    app.include_router(schedule_router)
     return app

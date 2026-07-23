@@ -10,6 +10,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.domain.broker import Candle
 from app.domain.scoring.engine import ScoringResult
+from app.store.kst_time import as_aware_utc
 from app.store.models import (CandleRow, InstrumentRow, ScoreDetailRow,
                               ScoreRow, ScoreRunRow, ScoreSectorRow,
                               SectorMembershipRow, SectorRow)
@@ -180,4 +181,4 @@ class ScoringStore:
                 .where(ScoreRunRow.status == "failed",
                        ScoreRunRow.reference_date == reference_date,
                        ScoreRunRow.finished_at.is_not(None))).all()
-        return max(stamps, default=None)
+        return max((as_aware_utc(s) for s in stamps), default=None)

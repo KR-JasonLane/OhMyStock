@@ -59,6 +59,14 @@ class Settings(BaseSettings):
     # 기본값은 호스트 네이티브 Electron 렌더러의 로컬 dev 서버.
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
 
+    # P6 스케줄러 온오프(스펙 §5 — env 노출은 이것 하나뿐, 시각류는
+    # ScheduleConfig 코드 기본값). false는 **영속 off**(pause는 인메모리 —
+    # 재기동 시 enabled 복귀, §10-3). 리플레이 프로필에서는 이 값과 무관하게
+    # 미기동(§5 기동 게이트 — 재생 시계와 실시계 트리거 혼합 방지).
+    # 테스트 부팅은 conftest autouse가 false를 기본 주입(보안 계획 리뷰 —
+    # lifespan 테스트가 실물 스케줄러를 띄우지 않게).
+    scheduler_enabled: bool = True
+
     # ── 리플레이 프로필(스펙 §4-1 — 자동 전환 없음, 명시적 env+재기동) ──
     # 설정되면 키움 어댑터가 mock/real URL 대신 이 값을 쓴다(로컬 리플레이
     # 목 서버 전용 — 아래 validator가 루프백/replay 서비스명 외 전부 거부).

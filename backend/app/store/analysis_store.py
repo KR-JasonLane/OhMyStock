@@ -12,7 +12,8 @@ from sqlalchemy.orm import sessionmaker
 from app.domain.analysis.graph import AnalysisResult
 from app.domain.analysis.ports import (CandidateInput, Headline,
                                        MarketSnapshot, StrategyDetailInput)
-from app.store.kst_time import coarse_utc_bounds, within_kst_day
+from app.store.kst_time import (as_aware_utc, coarse_utc_bounds,
+                                within_kst_day)
 from app.store.models import (ANALYSIS_NEWS_TITLE_MAX_LEN,
                               ANALYSIS_NEWS_URL_MAX_LEN, AnalysisNewsRow,
                               AnalysisRunRow, AnalysisVerdictRow,
@@ -316,7 +317,7 @@ class AnalysisStore:
                 .where(AnalysisRunRow.status == "failed",
                        AnalysisRunRow.started_at >= lo,
                        AnalysisRunRow.started_at <= hi)).all()
-        stamps = [finished for started, finished in rows
+        stamps = [as_aware_utc(finished) for started, finished in rows
                   if finished is not None
                   and within_kst_day(started, reference_date)]
         return max(stamps, default=None)

@@ -21,6 +21,16 @@ def coarse_utc_bounds(day: date) -> tuple[datetime, datetime]:
             (start_kst + timedelta(days=2)).astimezone(timezone.utc))
 
 
+def as_aware_utc(dt: datetime) -> datetime:
+    """naive → aware UTC 정규화. 스토어가 밖(도메인 평가기 등)으로 돌려주는
+    타임스탬프는 항상 aware여야 한다 — naive가 새어 나가면 timeline의
+    datetime 비교가 TypeError로 죽는다(프로덕션 Postgres는 aware UTC,
+    naive는 sqlite 테스트 경로뿐)."""
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
 def within_kst_day(dt: datetime | None, day: date) -> bool:
     """타임스탬프가 해당 KST 날짜에 속하는지 정확 판정. naive는 UTC 벽시계로
     간주(프로덕션 Postgres는 aware UTC — naive는 sqlite 테스트 경로뿐)."""
