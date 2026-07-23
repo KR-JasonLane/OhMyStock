@@ -56,6 +56,9 @@ SYMBOLS = [
     "005935",  # 삼성전자우 (우선주)
     "012510",  # 더존비즈온 — P2 degenerate 캔들 전례 종목(결함 응답 커버리지)
     "028300",  # HLB (코스닥)
+    "001067",  # JW중외제약2우B — 저유동 대체(일평균 거래대금 ~1백만원 실측,
+               # 2026-07-23 DB 20일 평균. 012510 degenerate로 저유동 카테고리
+               # 공백 — R1 잔여 보강)
 ]
 
 # 후보 요청 바디(1부에서 실측 확정). tic_scope "1"=1분.
@@ -183,6 +186,14 @@ async def main() -> None:
             print(f"\n=== 2부: 수집 (list key={key}) ===")
             started = time.monotonic()
             for code in SYMBOLS:
+                have = conn.execute(
+                    "SELECT count(*) FROM minute_raw WHERE symbol=?",
+                    (code,)).fetchone()[0]
+                if have:
+                    # 재실행 스킵(신규 심볼 보강 시 기존 12종 재수집 ~20분
+                    # 회피 — 전량 갱신이 필요하면 sqlite에서 심볼 행 삭제)
+                    print(f"  [{code}] skip (rows={have})")
+                    continue
                 count, oldest = await collect_symbol(client, template, key,
                                                      code, conn)
                 print(f"  [{code}] rows={count} oldest~={oldest}")
