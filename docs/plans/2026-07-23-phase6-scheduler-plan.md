@@ -295,6 +295,10 @@ lifespan 회귀.
   stopped는 당일 스코프 — **다음 거래일 09:00 무통지 자동 재개**됨을 경고,
   지속 정지 절차(`SCHEDULER_ENABLED=false` 원칙, `/schedule/pause`는
   비영속 보조)와 함께 기록. 단일 인스턴스 전제(§10-4)도 운영 문서에 병기.
+  추가 2건(T4·T5 패널 이월): ① "재시작=트레이딩 자동 재개 vs 킬스위치=
+  수동 재개" 구분 명시(트레이더 T4 — 오인 방지), ② 실전 전환 게이트에
+  "스케줄러 dead 상태 능동 알림(텔레그램/모니터링)" 항목 등재(트레이더
+  T5 — dead는 로그+status 표시뿐이라 방치 위험).
 - [ ] STATUS.md 갱신 후 전체 스위트 녹색 재확인(코드 변경은 compose뿐).
 
 **커밋(제안):** `feat(ops): compose restart policy + scheduler ops notes (panel)`
