@@ -24,7 +24,7 @@ def test_고정_슬롯_사이징_분모는_max_positions():
     # 가용 1,000만 × 50% ÷ 5슬롯 = 슬롯당 100만. 후보가 1개여도 100만만 배정
     # (트레이더 v1 Critical — 후보 수로 나누면 결정 #30 분산 붕괴)
     plans = select_entries([cand()], held_symbols=set(),
-                           available_krw=10_000_000, config=CFG)
+                           available_krw=10_000_000, config=CFG).plans
     assert len(plans) == 1
     assert plans[0].budget_krw == 1_000_000
     # 수량 = 100만 × (1−0.0035) ÷ 100,000 = 9.965 → 내림 9주(수수료 버퍼)
@@ -34,14 +34,16 @@ def test_고정_슬롯_사이징_분모는_max_positions():
 def test_잔여_슬롯만큼만_선정하고_순서_유지():
     cands = [cand(f"A{i}") for i in range(5)]
     plans = select_entries(cands, held_symbols={"H1", "H2", "H3"},
-                           available_krw=100_000_000, config=CFG)
+                           available_krw=100_000_000, config=CFG).plans
     assert len(plans) == 2  # 5슬롯 − 보유 3 = 잔여 2
     assert [p.symbol for p in plans] == ["A0", "A1"]  # pick rank 유지
 
 
 def test_슬롯_가득이면_빈_리스트():
-    assert select_entries([cand()], held_symbols={"A", "B", "C", "D", "E"},
-                          available_krw=100_000_000, config=CFG) == []
+    result = select_entries([cand()], held_symbols={"A", "B", "C", "D", "E"},
+                            available_krw=100_000_000, config=CFG)
+    assert result.plans == ()
+    assert result.dropped[0].reason.startswith("no free slots")
 
 
 def test_갭_가드_양방향():
@@ -49,7 +51,7 @@ def test_갭_가드_양방향():
     up = cand("UP", signal=100_000, current=103_100)
     down = cand("DN", signal=100_000, current=96_900)
     ok = cand("OK", signal=100_000, current=102_900)
-    plans = select_entries([up, down, ok], set(), 100_000_000, CFG)
+    plans = select_entries([up, down, ok], set(), 100_000_000, CFG).plans
     assert [p.symbol for p in plans] == ["OK"]
 
 
@@ -61,44 +63,46 @@ def test_갭_가드_정확_경계는_통과():
     over = cand("OV", signal=100_000, current=103_001)       # +3.001% — 제외
     under = cand("UN", signal=100_000, current=102_999)      # +2.999% — 통과
     plans = select_entries([edge_up, edge_dn, over, under],
-                           set(), 100_000_000, CFG)
+                           set(), 100_000_000, CFG).plans
     assert [p.symbol for p in plans] == ["EU", "ED", "UN"]
 
 
 def test_유니버스_필터_거래정지_관리종목_제외():
     halted = cand("HALT", state="증거금100%|거래정지")
     admin = cand("ADM", audit="관리종목")
-    plans = select_entries([halted, admin, cand("OK")], set(), 100_000_000, CFG)
+    plans = select_entries([halted, admin, cand("OK")], set(), 100_000_000, CFG).plans
     assert [p.symbol for p in plans] == ["OK"]
 
 
 def test_유동성_필터():
     thin = cand("THIN", liquidity=500_000_000)  # 임계 10억 미만
-    plans = select_entries([thin, cand("OK")], set(), 100_000_000, CFG)
+    plans = select_entries([thin, cand("OK")], set(), 100_000_000, CFG).plans
     assert [p.symbol for p in plans] == ["OK"]
 
 
 def test_보유_중복_제외():
     plans = select_entries([cand("HELD"), cand("NEW")], held_symbols={"HELD"},
-                           available_krw=100_000_000, config=CFG)
+                           available_krw=100_000_000, config=CFG).plans
     assert [p.symbol for p in plans] == ["NEW"]
 
 
 def test_고가주_0주면_스킵():
     # 슬롯 100만으로 200만짜리 1주도 못 삼 → 스킵하고 다음 후보
     pricey = cand("BIG", signal=2_000_000, current=2_000_000)
-    plans = select_entries([pricey, cand("OK")], set(), 10_000_000, CFG)
+    plans = select_entries([pricey, cand("OK")], set(), 10_000_000, CFG).plans
     assert [p.symbol for p in plans] == ["OK"]
 
 
 def test_가격_결측_후보는_제외():
     plans = select_entries([cand("BAD", current=0), cand("OK")],
-                           set(), 100_000_000, CFG)
+                           set(), 100_000_000, CFG).plans
     assert [p.symbol for p in plans] == ["OK"]
 
 
 def test_가용자금_0이면_빈_리스트_음수는_에러():
-    assert select_entries([cand()], set(), 0, CFG) == []
+    result = select_entries([cand()], set(), 0, CFG)
+    assert result.plans == ()
+    assert "available_krw is 0" in result.dropped[0].reason
     with pytest.raises(ValueError, match="available_krw"):
         select_entries([cand()], set(), -1, CFG)
 
@@ -108,4 +112,30 @@ def test_유동성_임계_0은_필터_비활성():
                         max_daily_order_krw=50_000_000,
                         min_avg_trading_value_krw=0)
     thin = cand("THIN", liquidity=0)
-    assert len(select_entries([thin], set(), 100_000_000, cfg)) == 1
+    assert len(select_entries([thin], set(), 100_000_000, cfg).plans) == 1
+
+
+def test_탈락_사유는_실측값을_포함해_반환된다():
+    """Task 8 라이브 결함 회귀 — 갭 가드 탈락이 침묵이면 '왜 안 사는가'를
+    운영 로그로 판별할 수 없다(2026-07-23 실측: 40분 무설명 무진입).
+    사유 문자열에 실측값(현재가/신호가/괴리율)이 포함되어야 한다."""
+    gapped = cand("GAP", signal=260_500, current=273_500)   # +4.99%
+    thin = cand("THIN", liquidity=500_000_000)
+    result = select_entries([gapped, thin, cand("OK")], set(),
+                            100_000_000, CFG)
+    assert [p.symbol for p in result.plans] == ["OK"]
+    reasons = {d.symbol: d.reason for d in result.dropped}
+    assert "gap guard" in reasons["GAP"]
+    assert "273,500" in reasons["GAP"] and "260,500" in reasons["GAP"]
+    assert "+4.99%" in reasons["GAP"]
+    assert "liquidity" in reasons["THIN"]
+
+
+def test_슬롯예산_0_사유에_계좌_잔액_원값이_없다():
+    """보안 R-패치 회귀 — /trade/status는 무인증(§8-2 이월): 사유 문자열에
+    available_krw 원값이 echo되면 잔액 유출이다. 고정 문구 정확 일치로
+    고정(원값이 다시 섞이면 즉시 실패)."""
+    result = select_entries([cand()], set(), available_krw=7, config=CFG)
+    assert result.plans == ()
+    assert result.dropped[0].reason == \
+        "slot budget is 0 — available funds below one slot"

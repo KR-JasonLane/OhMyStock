@@ -372,8 +372,16 @@ class TradingService(BackgroundRunService):
             self._warnings.append(f"{symbol}: reentry cooldown — skipped")
         candidates = [c for c in candidates if c.symbol not in cooldown]
 
-        plans = select_entries(candidates, held, deposit.available,
-                               self._config)
+        selection = select_entries(candidates, held, deposit.available,
+                                   self._config)
+        # 탈락 사유 표면화(Task 8 라이브 결함 수정 — 침묵 드랍이 "왜 안
+        # 사는가"를 40분간 가렸다): warnings(API 노출) + 상세 로그(결정 #36)
+        for drop in selection.dropped:
+            self._warnings.append(
+                f"{drop.symbol}: entry dropped — {drop.reason}")
+            logger.warning("entry candidate dropped: %s — %s",
+                           drop.symbol, drop.reason)
+        plans = selection.plans
         for plan in plans:
             if self.stop_requested() is not None:
                 return  # 정지 신호 — 신규 진입 중단(진행 주문은 없음)

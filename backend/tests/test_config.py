@@ -132,3 +132,35 @@ def test_naver_키가_있으면_로드된다(monkeypatch):
     s = Settings(_env_file=None)
     assert s.naver_client_id.get_secret_value() == "nid"
     assert s.naver_client_secret.get_secret_value() == "nsec"
+
+
+def test_빈_문자열_옵셔널은_None으로_정규화(monkeypatch):
+    """실사고 회귀(2026-07-22 야간) — 빈 값("NAVER_CLIENT_ID=")이
+    SecretStr("")로 살아남으면 `is not None` 분기가 빈 키로 네이버
+    클라이언트를 조립해 뉴스 호출 전부 401. env_ignore_empty=True가
+    빈 값=미설정을 전역 보장(공백만 있는 값은 한계 — config 주석)."""
+    _set_env(monkeypatch)
+    monkeypatch.setenv("NAVER_CLIENT_ID", "")
+    monkeypatch.setenv("NAVER_CLIENT_SECRET", "")
+    monkeypatch.setenv("API_WRITE_TOKEN", "")
+    monkeypatch.setenv("KIWOOM_BASE_URL_OVERRIDE", "")
+    s = Settings(_env_file=None)
+    assert s.naver_client_id is None
+    assert s.naver_client_secret is None
+    assert s.api_write_token is None
+    assert s.kiwoom_base_url_override is None
+    assert s.run_environment == "mock"   # 빈 override는 리플레이 아님
+
+
+def test_필수_시크릿의_빈_문자열도_즉시_실패(monkeypatch):
+    """아키텍트 R-패치 — 빈 KIWOOM_APP_KEY=""가 SecretStr("")로 기동을
+    통과하면 첫 실호출(빈 Bearer)에서야 터진다(옵셔널 사고와 동일 클래스).
+    빈 값 → None → 필수 누락 ValidationError(fail-fast 계약 복원)."""
+    _set_env(monkeypatch)
+    monkeypatch.setenv("KIWOOM_APP_KEY", "")
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)
+    _set_env(monkeypatch)
+    monkeypatch.setenv("DATABASE_URL", "")
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)

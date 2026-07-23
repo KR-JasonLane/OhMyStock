@@ -14,7 +14,15 @@ _OVERRIDE_ALLOWED_HOSTS = ("127.0.0.1", "localhost", "replay")
 class Settings(BaseSettings):
     """환경변수 기반 설정. 필수값 누락 시 ValidationError로 즉시 실패(fail fast)."""
 
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    # env_ignore_empty: 빈 env 값("VAR=")을 "미설정"으로 취급(라이브러리
+    # 내장 — 수동 field_validator 목록 유지보수 불필요, 개발자 R-패치).
+    # 옵셔널은 None으로, **필수(kiwoom 키·database_url)는 missing으로
+    # 기동 실패** — 빈 SecretStr("")가 `is not None` 분기를 타고 빈 키로
+    # 네이버 클라이언트가 조립되던 실사고(2026-07-22 야간)와, 빈 Bearer/
+    # DSN이 기동을 통과해 첫 실호출에서야 터지는 동일 클래스의 근원 차단.
+    # 한계: 공백만 있는 값("VAR=  ")은 비어있지 않은 것으로 취급된다.
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore",
+                                      env_ignore_empty=True)
 
     kiwoom_app_key: SecretStr
     kiwoom_secret_key: SecretStr

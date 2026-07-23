@@ -44,9 +44,37 @@ class EntryPlan:
     budget_krw: int        # 이 종목에 배정된 슬롯 예산(감사용)
 
 
+@dataclass(frozen=True)
+class DroppedCandidate:
+    """탈락 후보 — 사유는 실측값 포함(사후 "왜 안 샀나" 재구성 가능해야).
+    Phase 8(텔레그램)/7(대시보드)이 이 표면을 소비할 수 있어 명명 필드로
+    노출한다(익명 튜플 금지 — 개발자 R-패치)."""
+    symbol: str
+    reason: str
+
+
+@dataclass(frozen=True)
+class SelectionResult:
+    """select_entries 결과 — plans + 탈락 사유(Task 8 라이브 결함 수정:
+    갭 가드 탈락이 침묵이라 40분간 '왜 안 사는가'를 로그로 판별 불가 —
+    침묵 금지 + 결정 #36). 표면화(warnings/로그)는 호출자(Task 7) 책임."""
+    plans: tuple[EntryPlan, ...]
+    dropped: tuple[DroppedCandidate, ...]
+
+
+def _all_dropped(candidates: list[EntryCandidate],
+                 reason: str) -> SelectionResult:
+    """전역 조기 종료 — 후보 전원에게 동일 사유(빈 결과도 '왜'를 남긴다)."""
+    return SelectionResult(
+        plans=(), dropped=tuple(
+            DroppedCandidate(c.symbol, reason) for c in candidates))
+
+
 def select_entries(candidates: list[EntryCandidate], held_symbols: set[str],
-                   available_krw: int, config: TradingConfig) -> list[EntryPlan]:
-    """진입 계획 산출. 반환 순서 = 입력 순서(pick rank 유지).
+                   available_krw: int, config: TradingConfig) -> SelectionResult:
+    """진입 계획 산출. plans 순서 = 입력 순서(pick rank 유지), 탈락 후보는
+    dropped에 (symbol, 실측값 포함 사유)로 반환(침묵 드랍 금지 — Task 8
+    라이브 결함 수정).
 
     사이징(§6-3.4, 결정 #26/#30 — 트레이더 v1 Critical 수정 반영):
       슬롯 예산 = available × max_capital_pct ÷ **max_positions(고정 분모)**.
@@ -69,40 +97,72 @@ def select_entries(candidates: list[EntryCandidate], held_symbols: set[str],
     if available_krw < 0:
         raise ValueError(f"available_krw must be >= 0: {available_krw}")
 
+    dropped: list[DroppedCandidate] = []
     free_slots = config.max_positions - len(held_symbols)
     if free_slots <= 0 or available_krw == 0:
-        return []
+        return _all_dropped(candidates, (
+            f"no free slots (held {len(held_symbols)}/{config.max_positions})"
+            if free_slots <= 0 else "available_krw is 0"))
 
     # 슬롯 예산 — 분모는 고정 max_positions(잔여 슬롯 수 아님): 이미 보유한
     # 슬롯의 예산을 신규 후보에 재배분하면 종목당 비중이 커진다.
     slot_krw = int(available_krw * config.max_capital_pct / 100) // config.max_positions
     if slot_krw <= 0:
-        return []
+        # ⚠️ 계좌 잔액 원값을 사유에 넣지 않는다(보안 R-패치 Important:
+        # /trade/status는 무인증(§8-2 이월) — 원값 echo는 잔액 유출)
+        return _all_dropped(candidates,
+                            "slot budget is 0 — available funds below "
+                            "one slot")
     buffer = 1 - config.commission_buy_pct / 100
 
     plans: list[EntryPlan] = []
     for cand in candidates:
         if len(plans) >= free_slots:
-            break
+            # break가 아니라 continue — 잔여 후보 전원에게 사유를 남기기
+            # 위함(plans 결과는 동일: 이 분기가 첫 판정이라 추가 평가 없음)
+            dropped.append(DroppedCandidate(
+                cand.symbol, f"free slots exhausted ({free_slots})"))
+            continue
         if cand.symbol in held_symbols:
-            continue  # 보유 중복 제외(§6-3.3)
+            dropped.append(DroppedCandidate(cand.symbol,
+                                            "already held (§6-3.3)"))
+            continue
         if cand.signal_price <= 0 or cand.current_price <= 0:
-            continue  # 가격 결측 — 판정 불가 후보는 보수적으로 제외
+            dropped.append(DroppedCandidate(
+                            cand.symbol, f"price missing (signal {cand.signal_price:,}, "
+                            f"current {cand.current_price:,})"))
+            continue
         # 갭 가드 — 정수 bp 교차곱셈(exit_rules와 동일 원칙): float 나눗셈은
         # 정확한 경계(+3.00%)에서 3.0000000000000027 > 3.0으로 정상 후보를
         # 오제외한다(개발자 패널 Critical 실측 재현). 경계는 포함(<=허용).
         guard_bp = round(config.signal_gap_guard_pct * 100)
         if abs(cand.current_price - cand.signal_price) * 10_000 > \
                 cand.signal_price * guard_bp:
-            continue  # 갭 가드 — 신호 전제 훼손(양방향, §11-3 보수 해석)
+            gap_pct = (cand.current_price - cand.signal_price) \
+                / cand.signal_price * 100
+            dropped.append(DroppedCandidate(
+                            cand.symbol, f"gap guard: current {cand.current_price:,} vs "
+                            f"signal {cand.signal_price:,} ({gap_pct:+.2f}% "
+                            f"> ±{config.signal_gap_guard_pct:.2f}%)"))
+            continue
         if not passes_universe(cand.audit_info, cand.state):
-            continue  # 거래정지/관리종목 등
+            dropped.append(DroppedCandidate(
+                            cand.symbol, f"universe filter: audit={cand.audit_info!r} "
+                            f"state={cand.state!r}"))
+            continue
         if cand.avg_trading_value_krw < config.min_avg_trading_value_krw:
-            continue  # 유동성 부족 — 시장가 폴백 슬리피지 위험
+            dropped.append(DroppedCandidate(
+                            cand.symbol, f"liquidity: avg value "
+                            f"{cand.avg_trading_value_krw:,} < "
+                            f"{config.min_avg_trading_value_krw:,}"))
+            continue
         quantity = int(slot_krw * buffer) // cand.current_price
         if quantity <= 0:
-            continue  # 슬롯 예산으로 1주도 못 사는 고가주 스킵(§6-3.5)
+            dropped.append(DroppedCandidate(
+                            cand.symbol, f"slot budget {slot_krw:,} buys 0 shares at "
+                            f"{cand.current_price:,}"))
+            continue
         plans.append(EntryPlan(symbol=cand.symbol, name=cand.name,
                                market=cand.market, quantity=quantity,
                                budget_krw=slot_krw))
-    return plans
+    return SelectionResult(plans=tuple(plans), dropped=tuple(dropped))
