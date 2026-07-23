@@ -191,15 +191,21 @@ class CollectionStore:
     # ---------- P6 스케줄러 판정 헬퍼 (read-only, 스펙 §6) ----------
 
     def has_completed_run(self, reference_date: date) -> bool:
-        """해당 KST 날짜에 시작한 succeeded run 존재 — 스케줄러 "몫 완료"
-        판정. 4개 스토어 공통 시그니처(P6 계획 Task 4 — build_facts 합성이
+        """해당 KST 날짜에 시작한 완료 run 존재 — 스케줄러 "몫 완료" 판정.
+        4개 스토어 공통 시그니처(P6 계획 Task 4 — build_facts 합성이
         분기 없이 대칭 호출). 날짜 판정은 KST 변환 후(kst_time 모듈 —
-        UTC DATE() 비교는 아침 런을 전날로 오분류, 개발자 Critical)."""
+        UTC DATE() 비교는 아침 런을 전날로 오분류, 개발자 Critical).
+
+        ⚠️ 수집의 완료 리터럴은 **"done"** — 타 서비스("succeeded")와 다른
+        P2 유래 리터럴이다(`CollectionService._run` 실코드가 단일 출처).
+        "succeeded"로 가정했다가 성공한 수집을 스케줄러가 3분마다 무한
+        재트리거한 실사고(2026-07-23 7b 관찰에서 발견 — run 49개 누적)의
+        재발 방지: 리터럴 변경 시 이 판정·아래 테스트를 함께 갱신할 것."""
         lo, hi = coarse_utc_bounds(reference_date)
         with self._sessions() as session:
             rows = session.scalars(
                 select(CollectionRunRow.started_at)
-                .where(CollectionRunRow.status == "succeeded",
+                .where(CollectionRunRow.status == "done",
                        CollectionRunRow.started_at >= lo,
                        CollectionRunRow.started_at <= hi)).all()
         return any(within_kst_day(dt, reference_date) for dt in rows)

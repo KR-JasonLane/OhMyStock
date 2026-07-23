@@ -161,14 +161,25 @@ def _eval_collect(kst: datetime, facts: TimelineFacts, config: ScheduleConfig,
 
 def _eval_score(kst: datetime, facts: TimelineFacts, config: ScheduleConfig,
                 calendar) -> Decision:
-    """스코어링 몫 R(=facts.score_reference_date)의 창은 시각이 아니라
-    "수집(R) 완료 직후 ~ R 다음 거래일 score_until"(스펙 §4-b — 자정을
-    넘고 주말은 휴면 없이 그대로 흐른다: 마감시각 비교가 날짜를 포함하므로
-    비거래일 저녁에도 잔여 재시도가 가능하다. 수집과 달리 8초짜리 경량
-    작업이라 장중·비거래일 제약이 없다)."""
+    """스코어링 몫 R(=facts.score_reference_date)의 창:
+    **R 다음 날 자정(00:00) ~ R 다음 거래일 score_until**.
+
+    ⚠️ 창 시작이 "수집 완료 직후(저녁)"가 아니라 자정인 이유(스펙 §4-b
+    정정, 2026-07-23 7b 실사고): ScoringService의 기준일은
+    `scoring_reference_date` = "오늘 **이전** 마지막 평일"(P3 자정 배치
+    의미론 — market_calendar 독스트링)이라, R일 저녁에 실행하면 run이
+    reference=R-1로 기록된다 → ① 스케줄러 몫 판정(reference==R)과 영구
+    불일치 = 성공한 스코어링을 30초마다 무한 재트리거(실측: 2분에 4 run),
+    ② 그 결과로 아침 분석 signal_date=R-1이 되어 다음 날 진입 신선도
+    가드에서 전부 거부(자동매매 무력화). 자정 이후 실행이면
+    scoring_reference_date == R로 일치한다. 주말은 휴면 없이 흐른다
+    (금 수집 → 토 00:00 스코어링, 마감은 다음 거래일 월 08:50)."""
     gate = _common_gate(facts.score, facts.paused)
     if gate is not None:
         return Decision(Job.SCORE, Action.WAIT, gate)
+    if kst.date() <= facts.score_reference_date:
+        # R일 당일(저녁 포함)은 창 미개장 — 자정을 넘어야 기준일 정합
+        return Decision(Job.SCORE, Action.WAIT, Reason.WINDOW_NOT_OPEN)
     deadline_day = _next_trading_day(facts.score_reference_date, calendar)
     deadline = datetime.combine(deadline_day, config.score_until,
                                 tzinfo=kst.tzinfo)

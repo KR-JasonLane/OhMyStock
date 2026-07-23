@@ -122,15 +122,20 @@ def test_수집_백오프_600초():
 # ── 스코어링: 선행·자정 경계·주말 통과 ──────────────────────────────────
 
 def test_스코어링_선행_미충족은_대기():
-    d = _eval(_dt(WED, 20, 0), _facts(), Job.SCORE)
+    d = _eval(_dt(THU, 0, 30), _facts(), Job.SCORE)
     assert (d.action, d.reason) == (Action.WAIT, Reason.PREREQUISITE_MISSING)
 
 
-def test_스코어링_수집_완료시_즉시_트리거_자정_넘어도_계속():
+def test_스코어링_창은_자정부터_R일_저녁은_미개장():
+    """§4-b 정정(2026-07-23 7b 실사고): R일 저녁 실행은 scoring_reference_
+    date 의미론상 reference=R-1로 기록돼 무한 재트리거+아침 신선도 거부 —
+    자정을 넘어야 창이 열린다."""
     facts = _facts(collect=JobFacts(completed=True), reference=WED)
-    assert _eval(_dt(WED, 20, 30), facts, Job.SCORE).action is Action.TRIGGER
-    # 자정 경계 — D몫이 다음 날 새벽에도 유효(마감 = 다음 거래일 08:50)
-    assert _eval(_dt(THU, 0, 30), facts, Job.SCORE).action is Action.TRIGGER
+    evening = _eval(_dt(WED, 20, 30), facts, Job.SCORE)
+    assert (evening.action, evening.reason) == (Action.WAIT,
+                                                Reason.WINDOW_NOT_OPEN)
+    # 자정 직후부터 트리거(마감 = 다음 거래일 08:50)
+    assert _eval(_dt(THU, 0, 0, 30), facts, Job.SCORE).action is Action.TRIGGER
     assert _eval(_dt(THU, 8, 49, 59), facts,
                  Job.SCORE).action is Action.TRIGGER
     closed = _eval(_dt(THU, 8, 50, 0), facts, Job.SCORE)
@@ -142,12 +147,12 @@ def test_스코어링_백오프_600초():
     """잡별 백오프 전수의 4번째(개발자 T3 — score_retry_backoff_s 배선
     자체를 고정하는 유일한 지점)."""
     facts = _facts(collect=JobFacts(completed=True),
-                   score=JobFacts(last_failure_at=_dt(WED, 20, 0)),
+                   score=JobFacts(last_failure_at=_dt(THU, 0, 20)),
                    reference=WED)
-    waiting = _eval(_dt(WED, 20, 9, 59), facts, Job.SCORE)
+    waiting = _eval(_dt(THU, 0, 29, 59), facts, Job.SCORE)
     assert (waiting.action, waiting.reason) == (Action.WAIT,
                                                 Reason.RETRY_BACKOFF)
-    retry = _eval(_dt(WED, 20, 10, 0), facts, Job.SCORE)
+    retry = _eval(_dt(THU, 0, 30, 0), facts, Job.SCORE)
     assert (retry.action, retry.reason) == (Action.RETRY,
                                             Reason.AFTER_FAILURE)
 
@@ -161,7 +166,8 @@ def test_결함_calendar는_30일_상한에서_실패한다():
 
     facts = _facts(collect=JobFacts(completed=True), reference=WED)
     with pytest.raises(ValueError, match="calendar defective"):
-        evaluate(_dt(WED, 20, 0), facts, CFG, DeadCal())
+        # 자정 이후(창 개장 — §4-b 정정)라야 마감 계산 경로에 도달한다
+        evaluate(_dt(THU, 0, 30), facts, CFG, DeadCal())
 
 
 def test_스코어링_금요일_몫은_주말에도_재시도_가능_월요일_아침_마감():

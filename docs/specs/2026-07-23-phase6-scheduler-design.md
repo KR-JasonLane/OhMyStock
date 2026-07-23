@@ -68,8 +68,8 @@ api/schedule.py            # GET /schedule/status, POST /schedule/{pause,resume}
 
 | 잡 | 트리거 창 | 선행조건 | 완료 판정 (DB) |
 |---|---|---|---|
-| 수집 | 거래일 D 19:00 ~ 23:55 | — | D일 시작한 succeeded collection_run 존재 |
-| 스코어링 | 수집(D) 완료 직후 ~ 다음 거래일 08:50 | 수집(D) succeeded | reference_date=D인 succeeded score_run 존재 |
+| 수집 | 거래일 D 19:00 ~ 23:55 | — | D일 시작한 status=**"done"** collection_run 존재 (⚠️ 수집만 P2 유래 리터럴 — "succeeded" 아님. 정정 2026-07-23 7b: 이 표의 원 문구 "succeeded"를 구현이 그대로 따라가 무한 재트리거 실사고) |
+| 스코어링 | **D 다음 날 자정(00:00)** ~ 다음 거래일 08:50 (정정 2026-07-23 — §4-b) | 수집(D) succeeded | reference_date=D인 succeeded score_run 존재 |
 | 분석 | 거래일 E 08:20 ~ 09:20 | (연쇄 신선도 게이트가 자체 검증 — 스케줄러는 재검증 안 함) | E일 시작한 succeeded analysis_run 존재 |
 | 트레이딩 | 거래일 E 09:00 ~ 15:20 | 엔진 조립됨(TRADE_* 설정) | E일 trade_run이 running이거나, `status='succeeded'`, 또는 **`status='stopped'` AND `stopped_by_kill_switch=true`** |
 
@@ -77,10 +77,15 @@ api/schedule.py            # GET /schedule/status, POST /schedule/{pause,resume}
 
 - **(a) 수집 19:00**: 당일봉 확정 지연 리스크(P2 운영 노트 — 장 마감 직후는
   미확정 가능). 창 상한 23:55는 자정 넘김 방지(D일 몫 판정 단순화).
-- **(b) 스코어링 창이 자정을 넘는 이유**: 수집이 최대 67분(풀 수집)이라 완료
-  시각이 가변 — "완료 직후 체인"으로 두되, 실패 재시도가 다음 날 아침까지
-  이어질 수 있게 상한을 분석 창 시작 여유 전(08:50)에 둔다. 신선도 게이트가
-  낡은 데이터를 자체 거부하므로 시간대와 무관하게 안전.
+- **(b) 스코어링 창 [정정 2026-07-23 — 7b 실사고]**: 원안("수집 완료 직후
+  저녁 체인")은 ScoringService의 기준일 의미론(`scoring_reference_date` =
+  "오늘 **이전** 마지막 평일" — P3 자정 배치 설계)과 충돌한다: D일 저녁
+  실행은 run을 reference=D-1로 기록해 ① 스케줄러 몫 판정(reference==D)과
+  영구 불일치 → 성공한 스코어링을 30초마다 무한 재트리거(실측: 2분에 4
+  run), ② 아침 분석 signal_date=D-1 → 익일 진입 신선도 가드 전부 거부
+  (자동매매 무력화). **창 시작 = D 다음 날 자정** — 자정 이후엔
+  scoring_reference_date == D로 정합. 상한은 분석 창 시작 여유 전(다음
+  거래일 08:50), 주말은 휴면 없이 흐른다(금 수집 → 토 00:00 스코어링).
 - **(c) 분석 창 상한 09:20과 진입의 관계**: 진입 창(09:05~09:30,
   TradingConfig)이 끝난 뒤의 분석은 그날 진입에 쓰이지 못하므로 09:20 이후
   캐치업은 스킵하고 사유를 이벤트로 남긴다. 분석이 실패/부재여도 **트레이딩

@@ -189,7 +189,9 @@ Modify `store/models.py` + 4개 소유 스토어; Test `tests/`(store).
   **공통 시그니처 통일**(개발자 — build_facts 합성이 분기투성이 되지 않게):
   `has_completed_run(reference_date: date) -> bool` /
   `last_failed_finished_at(reference_date: date) -> datetime | None`.
-  - CollectionStore·AnalysisStore: 해당 날짜 시작 succeeded run 존재
+  - CollectionStore: 해당 날짜 시작 **status="done"** run 존재(⚠️ 수집만
+    P2 유래 리터럴 — 정정 2026-07-23 7b: "succeeded" 가정이 실사고).
+    AnalysisStore: 해당 날짜 시작 succeeded run 존재
   - ScoringStore: reference_date=D succeeded run 존재
   - TradingStore: **`succeeded OR (stopped AND stopped_by_kill_switch)` OR
     running** 판정(스펙 §4-d — 셧다운 stopped는 미완료; 시그니처는 동일)

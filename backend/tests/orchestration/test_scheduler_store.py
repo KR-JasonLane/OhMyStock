@@ -75,6 +75,9 @@ def test_수집런_KST_경계와_실패_시각(stores):
     clock.t = THU_0820_KST_AS_UTC + timedelta(minutes=5)
     collection.finish_run(run_id, "failed", 0, 0, 0)
     assert collection.has_completed_run(THU) is False
+    done = collection.create_run()
+    collection.finish_run(done, "done", 10, 10, 0)   # 실서비스 완료 리터럴
+    assert collection.has_completed_run(THU) is True
     stamp = collection.last_failed_finished_at(THU)
     if stamp.tzinfo is None:      # sqlite는 naive 저장(프로덕션은 aware UTC)
         stamp = stamp.replace(tzinfo=timezone.utc)
@@ -138,7 +141,10 @@ def test_build_job_facts는_R과_today를_분리해_합성(stores):
     """collect/score 몫=R(수), analyze/trade 몫=today(목) — §4-b 계약."""
     scheduler, collection, scoring, analysis, trading, clock = stores
     run = collection.create_run()
-    collection.finish_run(run, "succeeded", 10, 10, 0)     # 수요일(UTC 11시)
+    # 수집 완료 리터럴은 "done"(P2 유래 — 타 서비스 "succeeded"와 다름).
+    # "succeeded"로 가정한 원 테스트가 실사고(무한 재트리거)를 못 잡았다 —
+    # 실서비스 리터럴로 고정(2026-07-23 7b 발견 회귀).
+    collection.finish_run(run, "done", 10, 10, 0)          # 수요일(UTC 11시)
     score_run = scoring.create_run(WED, "{}")
     scoring.finish_run(score_run, "succeeded")
     clock.t = THU_0820_KST_AS_UTC
