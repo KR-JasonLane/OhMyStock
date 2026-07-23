@@ -372,8 +372,17 @@ Measured live during Phase 4 acceptance (2026-07-18); see
 | 4 | AI multi-agent analysis (LangGraph + Ollama: economist + trader → filter) | 2,3 |
 | 5 | Trading engine (signal entry + client-side TP/SL/Stop monitor) | 1 |
 | 6 | Scheduler / orchestrator (daily timeline) | 2–5 |
-| 7 | React/Electron dashboard | 1–6 |
 | 8 | Telegram bot | 1–6 |
+| 7 | React/Electron dashboard — **deferred to LAST** (user decision 2026-07-23) | 1–6,8 |
+
+> **Phase-7 deferral (user decision, 2026-07-23):** trading logic comes
+> first; the server is operated over CLI/SSH only, so the dashboard adds
+> little value now. In its place, two standing requirements apply to all
+> trading-path work: (1) **detailed, greppable logs** for every trading
+> decision and defense-line activation, and (2) **trading data persisted
+> in an analysis-friendly form** (orders/fills/position snapshots/audit
+> columns queryable by SQL later). These already largely hold (P5 audit
+> design); keep honoring them in Phase 6/8 work.
 
 ## 7. Repository layout
 ```
