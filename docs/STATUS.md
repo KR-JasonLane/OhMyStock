@@ -11,15 +11,17 @@
 
 ## ▶ 여기서 재개 (다음 액션)
 
-**Phase 6(스케줄러) 스펙 작성 완료(2026-07-23) —
-`docs/specs/2026-07-23-phase6-scheduler-design.md` v2, 4-에이전트 패널
-전원 승인(1라운드 Critical 2·Important 10 → 델타 4/4 승인). 브레인스토밍
-결정 #37~#40 확정(내장 asyncio 스케줄러/분석 장전 아침/완전 자동매매/
-restart+캐치업). 스펙에 P5 정정 2건 편입(§4-c `_entries_done` 래치,
-§5-1 OrderCaps 일일 한도 시딩 — 둘 다 실코드 대조로 확인된 실결함).
-다음: 사용자 스펙 승인 → 커밋 → 구현 계획서(docs/plans/) 작성 + 패널
-계획 리뷰 → 태스크별 구현. 순서: 6→8(텔레그램)→실전 게이트→7(대시보드,
-결정 #36). Task 0 G4는 사용자 지시 대기 유지.**
+**Phase 6(스케줄러) 스펙+계획서 확정(2026-07-23) — 둘 다 4-에이전트 패널
+전원 승인. 스펙 `docs/specs/2026-07-23-phase6-scheduler-design.md` v2
+(결정 #37~#40, 커밋 233ce98), 계획서
+`docs/plans/2026-07-23-phase6-scheduler-plan.md` v2(Task 1~6·7a 코드 +
+7b·8 검증 — 계획 리뷰 1라운드 Critical 1(Task 4 UTC/KST 날짜 경계)·
+Important 8 반영 → 델타 4/4 승인). 스펙·계획에 P5 정정 2건 편입(§4-c
+`_entries_done` 래치, §5-1 OrderCaps 일일 한도 시딩 — 실코드 대조로
+확인된 실결함, 스케줄러 활성화보다 선행 머지 강제).
+다음: 계획서 커밋 → Task 1(일일 한도 DB 시딩)부터 태스크별 구현+패널.
+순서: 6→8(텔레그램)→실전 게이트→7(대시보드, 결정 #36). Task 0 G4는
+사용자 지시 대기 유지.**
 
 > **▶▶ 2026-07-23 실행 결과(장중 — 상세는 회고록 §5·evidence 참조):**
 > - **Task 8 라이브(오전)**: 갭 가드가 mock 일봉↔실시간 +5% 괴리를 정확
@@ -482,6 +484,7 @@ G2 주문TR 3종+레이트리밋 버킷, G3 kt00018 행단위(기존 #1), G4 모
 | `docs/specs/2026-07-21-phase5-trading-engine-design.md` | Phase 5 트레이딩 엔진 설계 스펙 (v3.1, 결정 #25~#35, PRE-GATE G1~G4) |
 | `docs/plans/2026-07-22-phase5-trading-engine-plan.md` | Phase 5 트레이딩 엔진 구현 계획서 (v1.2, Task 0~8, 6분할) |
 | `docs/specs/2026-07-23-phase6-scheduler-design.md` | Phase 6 스케줄러 설계 스펙 (v2, 결정 #37~#40, 4패널 승인) |
+| `docs/plans/2026-07-23-phase6-scheduler-plan.md` | Phase 6 스케줄러 구현 계획서 (v2, Task 1~8, 4패널 승인) |
 | `docs/retrospectives/` | 작업별 회고록 (규칙 4) |
 
 ## 세션 연속성 작동 방식
