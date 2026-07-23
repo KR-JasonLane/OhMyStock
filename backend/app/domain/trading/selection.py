@@ -12,6 +12,7 @@
 (계획서 — 순수 함수의 입력 경로 명시)."""
 
 from dataclasses import dataclass
+from enum import Enum
 
 from app.domain.scoring.universe import passes_universe
 from app.domain.trading.config import TradingConfig
@@ -44,13 +45,28 @@ class EntryPlan:
     budget_krw: int        # 이 종목에 배정된 슬롯 예산(감사용)
 
 
+class DropKind(Enum):
+    """드롭 분류(P6 §4-c — P5 정정): 래치 판정이 문자열 prefix 매칭이
+    아니라 이 구조화 필드만 읽는다(P6 계획 리뷰 개발자 #3 — 사유 문구는
+    사람용, 분류는 기계용으로 분리. enum은 models의 PositionState 등 닫힌
+    집합 컨벤션과 일관 — P6-T2 개발자 Minor).
+
+    STRATEGIC — 판정이 성립한 탈락(갭 가드·유니버스·유동성·슬롯/예산·보유
+                중복·쿨다운): 재시도해도 같은 결론 → 진입 배치 래치 유지.
+    TECHNICAL — 판정 재료 자체가 없던 탈락(시세/컨텍스트 부재): 판정
+                미성립 → 진입 창 내 재시도 대상."""
+    STRATEGIC = "strategic"
+    TECHNICAL = "technical"
+
+
 @dataclass(frozen=True)
 class DroppedCandidate:
     """탈락 후보 — 사유는 실측값 포함(사후 "왜 안 샀나" 재구성 가능해야).
     Phase 8(텔레그램)/7(대시보드)이 이 표면을 소비할 수 있어 명명 필드로
-    노출한다(익명 튜플 금지 — 개발자 R-패치)."""
+    노출한다(익명 튜플 금지 — 개발자 R-패치). kind는 래치 판정 입력."""
     symbol: str
     reason: str
+    kind: DropKind = DropKind.STRATEGIC
 
 
 @dataclass(frozen=True)
@@ -128,9 +144,12 @@ def select_entries(candidates: list[EntryCandidate], held_symbols: set[str],
                                             "already held (§6-3.3)"))
             continue
         if cand.signal_price <= 0 or cand.current_price <= 0:
+            # 가격 결측 = 판정 재료 부재(기술적) — 일시적 빈 quote/결측 봉이
+            # 원인일 수 있어 재시도 대상(P6 §4-c ③, degenerate quote 전례)
             dropped.append(DroppedCandidate(
                             cand.symbol, f"price missing (signal {cand.signal_price:,}, "
-                            f"current {cand.current_price:,})"))
+                            f"current {cand.current_price:,})",
+                            kind=DropKind.TECHNICAL))
             continue
         # 갭 가드 — 정수 bp 교차곱셈(exit_rules와 동일 원칙): float 나눗셈은
         # 정확한 경계(+3.00%)에서 3.0000000000000027 > 3.0으로 정상 후보를

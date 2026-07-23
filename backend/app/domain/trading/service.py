@@ -40,7 +40,8 @@ from app.domain.trading.models import PositionState, TradePosition
 from app.domain.trading.monitor import ExitAction, PositionMonitor
 from app.domain.trading.reconcile import (DbPosition, ReconcileKind,
                                           apply_reconcile, reconcile_decide)
-from app.domain.trading.selection import (EntryCandidate, EntryPlan,
+from app.domain.trading.selection import (DropKind, DroppedCandidate,
+                                          EntryCandidate, EntryPlan,
                                           select_entries)
 
 logger = logging.getLogger(__name__)
@@ -253,8 +254,12 @@ class TradingService(BackgroundRunService):
             if (mode is None and not self._entries_done
                     and not self._caps.buy_blocked
                     and self._in_entry_window(now)):
-                self._entries_done = True  # 진입은 run당 1회 배치(§6-3)
-                await self._enter_positions(now)
+                # 진입은 run당 1회 "판정 성립" 배치(§6-3, P6 §4-c 정정) —
+                # 판정이 미성립(신선 분석 부재/전 후보 기술 드롭)이면 래치를
+                # 걸지 않고 진입 창 내 다음 사이클에 재시도한다. 종전에는
+                # 호출 전 무조건 래치라 09:05에 분석이 없으면 09:10 분석
+                # 완료에도 그날 진입이 영구 스킵됐다(조용한 기회 상실).
+                self._entries_done = await self._enter_positions(now)
             positions = await asyncio.to_thread(self._load_entered)
             actions = await self._monitor.poll_once(positions, now)
             await self._post_actions(actions)
@@ -379,11 +384,31 @@ class TradingService(BackgroundRunService):
 
     # ── 진입 (§6-3) ─────────────────────────────────────────────────────
 
-    async def _enter_positions(self, now: datetime) -> None:
+    def _warn_once(self, message: str) -> None:
+        """재시도 사이클에서 반복되는 경고의 중복 억제 — 진입 재시도(P6
+        §4-c)는 창 내 매 사이클 재평가라, 무조건 append하면 25분 창 동안
+        같은 문구가 수백 건 쌓여 /trade/status를 오염한다."""
+        if message not in self._warnings:
+            self._warnings.append(message)
+
+    async def _enter_positions(self, now: datetime) -> bool:
+        """진입 배치 1회 시도. 반환 = **판정 성립 여부**(P6 §4-c — P5 정정):
+        True면 호출자가 _entries_done 래치, False면 진입 창 내 재시도.
+
+        - 분석 결과 부재/신호일 불일치 → False (아침 분석의 늦은 도착 대기)
+        - 픽 0 → **True** (신선한 분석의 정상 판정 — 재시도해도 픽은 안 생김)
+        - 전 후보가 기술적 드롭(시세/컨텍스트 부재)뿐 → False (판정 미성립)
+        - 그 외(발주 진행·전략 탈락·쿨다운·혼합) → True
+
+        재시도 자체 백오프는 미도입(트레이더 Minor 판단 근거): 폴링 주기
+        (recommended_delay)가 자연 간격이고, quote TR은 주문과 별도 레이트
+        리밋 버킷(CLAUDE.md §5)이며, 창 상한(entry_window_end)이 재시도
+        횟수를 이미 제한한다."""
         latest = await asyncio.to_thread(self._analysis_latest)
-        if not latest or not latest.get("picks"):
-            self._warnings.append("no analysis picks — entries skipped")
-            return
+        if not latest:
+            self._warn_once("no analysis result yet — will retry within "
+                            "entry window")
+            return False
         signal_date = date.fromisoformat(latest["score_reference_date"])
         expected = self._last_trading_day_before(now)
         if signal_date != expected:
@@ -391,10 +416,19 @@ class TradingService(BackgroundRunService):
             # 앵커가 과거일 때 실시계 분석 픽이 통과하면 재생 시점에 존재
             # 하지 않던 정보로 진입하는 look-ahead. 프로덕션에서도 미래
             # 신호는 데이터 손상 신호다). 양방향 정확 일치만 통과.
-            self._warnings.append(
+            # 낡음은 "신선한 분석 부재"와 동치 — 아침 분석이 아직 안 끝난
+            # 경우가 대표 경로라 재시도한다(P6 §4-c ①). 미래 신호도 같은
+            # 분기로 재시도(진입 안 함 — 안전 방향)하되 문구에 이상 신호
+            # 가능성을 병기해 사후 디버깅을 돕는다(트레이더 T2 Minor).
+            self._warn_once(
                 f"analysis signal date mismatch (signal {signal_date}, "
-                f"expected {expected}) — entries skipped")
-            return
+                f"expected {expected}) — stale or future/look-ahead signal; "
+                f"will retry within entry window")
+            return False
+        if not latest.get("picks"):
+            # 신선한 분석이 픽 0을 판정(예: risk_off) — 판정은 성립했다.
+            self._warn_once("analysis picks empty — no entries today")
+            return True
         symbols = [p["symbol"] for p in latest["picks"]]
         context = await asyncio.to_thread(self._store.entry_context, symbols,
                                           signal_date)
@@ -403,12 +437,18 @@ class TradingService(BackgroundRunService):
         deposit = await self._account.get_deposit()
         held = set(self._pos_ids)
         candidates = []
+        # select_entries 밖에서 확정되는 드롭(사전 필터·쿨다운)도 전부
+        # DroppedCandidate로 수렴 — 래치 판정이 분류 필드만 읽는다(계획
+        # Task 2, 트레이더 T2 Minor: 쿨다운의 암묵 우회 경로 제거)
+        pre_drops = []
         for symbol in symbols:  # pick rank 순서 유지
             ctx = context.get(symbol)
             md = quotes.get(symbol)
             if ctx is None or md is None:
-                self._warnings.append(
-                    f"{symbol}: pick missing context/quote — skipped")
+                # 판정 재료 부재(기술적 — P6 §4-c ③(a))
+                pre_drops.append(DroppedCandidate(
+                    symbol, "pick missing context/quote",
+                    kind=DropKind.TECHNICAL))
                 continue
             candidates.append(EntryCandidate(
                 symbol=symbol, name=ctx.name, market=ctx.market,
@@ -422,22 +462,43 @@ class TradingService(BackgroundRunService):
         cooldown = await asyncio.to_thread(self._store.recent_closed_symbols,
                                            cutoff)
         for symbol in sorted(cooldown & {c.symbol for c in candidates}):
-            self._warnings.append(f"{symbol}: reentry cooldown — skipped")
+            # 쿨다운 = 성립한 판정(strategic — 기본 쿨다운 30분 > 진입 창
+            # 25분이라 창 내 만료 불가. 운영자가 창보다 짧게 설정하면 창 내
+            # 만료를 재평가하지 않는 수용 트레이드오프 — 슬롯 재개방과 동일
+            # 클래스). 표면화는 아래 all_drops 공통 경로(warn_once)로.
+            pre_drops.append(DroppedCandidate(
+                symbol, "reentry cooldown (recently closed)"))
         candidates = [c for c in candidates if c.symbol not in cooldown]
 
         selection = select_entries(candidates, held, deposit.available,
                                    self._config)
         # 탈락 사유 표면화(Task 8 라이브 결함 수정 — 침묵 드랍이 "왜 안
-        # 사는가"를 40분간 가렸다): warnings(API 노출) + 상세 로그(결정 #36)
-        for drop in selection.dropped:
-            self._warnings.append(
+        # 사는가"를 40분간 가렸다): warnings(API 노출) + 상세 로그(결정 #36).
+        # warn_once — 기술 드롭 재시도 사이클의 동일 문구 중복 억제.
+        all_drops = pre_drops + list(selection.dropped)
+        for drop in all_drops:
+            self._warn_once(
                 f"{drop.symbol}: entry dropped — {drop.reason}")
-            logger.warning("entry candidate dropped: %s — %s",
-                           drop.symbol, drop.reason)
+            logger.warning("entry candidate dropped: %s — %s (%s)",
+                           drop.symbol, drop.reason, drop.kind.value)
         plans = selection.plans
+        if not plans:
+            if all_drops and all(d.kind is DropKind.TECHNICAL
+                                 for d in all_drops):
+                # 전 후보가 판정 재료 부재로만 탈락(P6 §4-c ③) — 판정
+                # 미성립, 창 내 재시도. ⚠️ 알려진 잔여 케이스(§4-c 수용
+                # 트레이드오프): 전략 탈락(예: 슬롯 소진)으로 래치된 뒤
+                # 창 내 청산으로 슬롯이 다시 열려도 재평가하지 않는다.
+                self._warn_once("all candidates dropped for technical "
+                                "reasons — will retry within entry window")
+                return False
+            # 전략 탈락/쿨다운/보유 중복 = 성립한 판정(재시도해도 동일)
+            return True
         for plan in plans:
             if self.stop_requested() is not None:
-                return  # 정지 신호 — 신규 진입 중단(진행 주문은 없음)
+                # 정지 신호 — 신규 진입 중단(진행 주문은 없음). 배치는
+                # 착수됐고 정지 모드가 이후 진입을 차단하므로 래치 True.
+                return True
             # 발주 직전 시세 재조회(트레이더 I4) — 선순위 후보의 체결 대기
             # (최대 ~2분)로 배치 초 스냅샷이 낡는다. 실패 시 스냅샷 폴백.
             md = quotes[plan.symbol]
@@ -471,15 +532,16 @@ class TradingService(BackgroundRunService):
                 del self._pos_ids[plan.symbol]
                 continue
             except DailyCapExceeded as exc:
-                # 전역 소진(§8-1) — 신규 진입 배치 중단
+                # 전역 소진(§8-1) — 신규 진입 배치 중단(판정 성립 — 래치)
                 self._warnings.append(f"entry batch stopped by daily cap: "
                                       f"{exc}")
                 await asyncio.to_thread(
                     self._store.update_position, pos_id,
                     state=PositionState.ENTRY_FAILED)
                 del self._pos_ids[plan.symbol]
-                return
+                return True
             await self._apply_entry_outcome(plan, pos_id, outcome)
+        return True
 
     async def _apply_entry_outcome(self, plan: EntryPlan, pos_id: int,
                                    outcome: EntryOutcome) -> None:
