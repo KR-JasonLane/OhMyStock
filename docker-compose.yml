@@ -1,6 +1,11 @@
 services:
   db:
     image: postgres:16
+    # 재부팅 무인 복귀(P6 결정 #40). ⚠️ 재부팅 시 dockerd는 depends_on을
+    # 재평가하지 않는다 — backend가 db보다 먼저 뜨면 alembic 연결 실패로
+    # 종료 → Docker 재시작 백오프로 수렴(최악 수 분, 의도된 회복 경로 —
+    # P6 스펙 §10-2. 전제: dockerd가 OS 부팅 시 자동 시작(systemd enable)).
+    restart: unless-stopped
     environment:
       POSTGRES_USER: ohmystock
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ohmystock}
@@ -19,6 +24,7 @@ services:
     build:
       context: ./backend
       target: app   # 다중 스테이지(리플레이 분리 — §4-2): 프로덕션 대상 명시
+    restart: unless-stopped   # 재부팅 수렴 — db 서비스의 주석 참조(§10-2)
     env_file: .env
     extra_hosts:
       # 리눅스 네이티브 도커는 host.docker.internal을 기본 제공하지 않는다
