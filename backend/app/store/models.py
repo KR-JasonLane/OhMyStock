@@ -3,7 +3,7 @@
 from datetime import date, datetime
 
 from sqlalchemy import (BigInteger, Boolean, Date, DateTime, Float, ForeignKey,
-                        Integer, String, Text, literal)
+                        Index, Integer, String, Text, literal)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 # instruments.state / instruments.audit_info 칼럼 길이 — 모델과 store의 절단
@@ -243,6 +243,10 @@ class TradePositionRow(Base):
 
 class TradeOrderRow(Base):
     __tablename__ = "trade_orders"
+    # 마이그레이션 0010과 동시 선언(프로젝트 관례 — order_no의 index=True와
+    # 동일): create_all 기반 테스트 스키마에도 인덱스가 존재하게 한다.
+    __table_args__ = (
+        Index("ix_trade_orders_run_created", "trade_run_id", "created_at"),)
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     trade_run_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("trade_runs.id"))
@@ -257,6 +261,11 @@ class TradeOrderRow(Base):
     order_style: Mapped[str] = mapped_column(String(8))  # limit|market
     req_price: Mapped[int] = mapped_column(Integer)     # 시장가면 0
     req_qty: Mapped[int] = mapped_column(Integer)
+    # 발주 시점 한도(caps.check) 추정 금액(P6-T1 트레이더 Critical) — 시장가는
+    # req_price=0이고 record_fill이 미배선이라, 이 값이 없으면 재기동 시딩
+    # (daily_order_usage)에서 시장가 주문 금액이 전부 0으로 빠진다.
+    est_krw: Mapped[int] = mapped_column(BigInteger, default=0,
+                                         server_default="0")
     status: Mapped[str] = mapped_column(String(16))
     # 응답 **바디만**(JSON 텍스트) — Authorization 헤더/토큰은 어느 계층에도
     # 저장·로그 금지(§9 보안 C1)

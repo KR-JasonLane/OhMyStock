@@ -124,6 +124,11 @@ class OrderRequest:
     style: OrderStyle
     quantity: int
     limit_price: int = 0   # LIMIT일 때만 사용(양수 필수), MARKET이면 0
+    # MARKET 전용 발주 시점 참조가(P6-T1 트레이더 Critical) — 브로커로
+    # 전송되지 않는 감사·한도 시딩용 메타데이터. 시장가는 req_price=0이라
+    # 이 값이 없으면 재기동 시딩(daily_order_usage)에서 금액이 0으로 빠진다.
+    # caps.check에 넘긴 추정가와 동일 값을 넣는 것이 계약.
+    ref_price: int = 0
 
     def __post_init__(self) -> None:
         validate_symbol(self.symbol)  # 실주문 경로 — 형식 오류는 발주 전 차단
@@ -133,6 +138,11 @@ class OrderRequest:
             raise ValueError("limit order requires positive limit_price")
         if self.style is OrderStyle.MARKET and self.limit_price != 0:
             raise ValueError("market order must not carry limit_price")
+        if self.ref_price < 0:
+            raise ValueError(f"ref_price must be >= 0: {self.ref_price}")
+        if self.style is OrderStyle.LIMIT and self.ref_price != 0:
+            # 지정가는 limit_price가 유일한 가격 — 중복 가격 필드 금지
+            raise ValueError("limit order must not carry ref_price")
 
 
 @dataclass(frozen=True)

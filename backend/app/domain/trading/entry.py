@@ -194,7 +194,8 @@ class EntryExecutor:
         self._check_caps(fresh_ask * plan.quantity, OrderSide.BUY)
         market_req = OrderRequest(symbol=plan.symbol, side=OrderSide.BUY,
                                   style=OrderStyle.MARKET,
-                                  quantity=plan.quantity)
+                                  quantity=plan.quantity,
+                                  ref_price=fresh_ask)  # caps 추정가와 동일(감사·시딩)
         market_ack = await self._submit(EntryPhase.MARKET_SUBMITTED, market_req)
 
         unfilled = await self._poll_unfilled(market_ack.order_no,

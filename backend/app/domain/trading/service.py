@@ -62,11 +62,13 @@ class _StoreLike(Protocol):
     def open_positions(self, run_environment: str | None = None): ...
     def submitted_order_nos(self, position_id: int) -> tuple[str, ...]: ...
     def record_order(self, run_id, position_id, order_no, symbol, side,
-                     order_style, req_price, req_qty, status, resp_body): ...
+                     order_style, req_price, req_qty, status, resp_body,
+                     est_krw=0): ...
     def entry_context(self, symbols, signal_date): ...
     def instrument_state(self, symbol: str) -> str | None: ...
     def get_position(self, position_id: int) -> TradePosition | None: ...
     def recent_closed_symbols(self, cutoff: datetime) -> set[str]: ...
+    def daily_order_usage(self, day: date, run_environment: str): ...
 
 
 class SingleOrderCapExceeded(ValueError):
@@ -97,6 +99,13 @@ class OrderCaps:
         self.order_krw = 0
         self.buy_blocked = False
 
+    def exceeds_daily(self, count: int, krw: int) -> bool:
+        """일일 상한 초과 판정(부수효과 없음, strict >) — check()와 재기동
+        시딩(_seed_daily_caps)이 **공유**한다(P6-T1 개발자 #2: 판정식을
+        리터럴로 복제하면 한쪽만 수정될 때 래치 경계가 조용히 어긋난다)."""
+        return (count > self._config.max_daily_orders
+                or krw > self._config.max_daily_order_krw)
+
     def check(self, amount_krw: int, side: OrderSide) -> None:
         self.order_count += 1
         self.order_krw += amount_krw
@@ -109,8 +118,7 @@ class OrderCaps:
             raise SingleOrderCapExceeded(
                 f"single order cap exceeded: {amount_krw} > "
                 f"{self._config.max_single_order_krw}")
-        if (self.order_count > self._config.max_daily_orders
-                or self.order_krw > self._config.max_daily_order_krw):
+        if self.exceeds_daily(self.order_count, self.order_krw):
             self.buy_blocked = True
             raise DailyCapExceeded(
                 "daily order cap exceeded — new entries stopped")
@@ -204,6 +212,7 @@ class TradingService(BackgroundRunService):
             self._run_environment)
         status, failure = "succeeded", None
         try:
+            await self._seed_daily_caps()
             await self._reconcile_startup()
             await self._trading_loop()
             if self.stop_requested() is not None:
@@ -250,6 +259,50 @@ class TradingService(BackgroundRunService):
             actions = await self._monitor.poll_once(positions, now)
             await self._post_actions(actions)
             await self._sleep(self._monitor.recommended_delay(now))
+
+    async def _seed_daily_caps(self) -> None:
+        """같은 날 재기동 시 일일 한도·진입 게이트 복원(P6 스펙 §5-1 — P5
+        정정). OrderCaps는 run 단위 인메모리(§8-1)라 재기동이 "일일" 한도를
+        리셋한다 — DB 당일 주문 집계(매수·매도 무구분, check() 누적 의미론과
+        동일)로 시딩한다. DB 시딩은 `_on_accepted`가 아니라 여기다 —
+        `_on_accepted`는 베이스 계약상 동기·무예외·필드 대입 전용
+        (background_service 독스트링, P6 계획 리뷰 개발자 #4).
+
+        buy_blocked는 임계값과 **직접 비교해 명시 복원**한다(개발자 #3 —
+        check() 부수효과 재트리거에 맡기면 재기동 직후 진입 게이트가 열린
+        것으로 읽혀 불필요한 후보 선정을 한 번 거친다). 판정은 check()와
+        동일하게 strict `>` — 정확히 상한에 도달한 상태는 live 연속
+        실행에서도 아직 래치 전이다(다음 매수 check가 래치).
+
+        당일 매수 발주가 이미 있으면 진입 배치도 게이트(_entries_done —
+        이중 진입 방지 1차, 재진입 쿨다운·보유 중 제외는 2차). ⚠️ 알려진
+        한계(§5-1 수용 트레이드오프): 진입 배치 도중 크래시(N개 중 1개만
+        발주)면 잔여 후보는 그날 스킵된다 — 이중 매수 방지 우선."""
+        day = self._clock().astimezone(self._calendar.KST).date()
+        usage = await asyncio.to_thread(
+            self._store.daily_order_usage, day, self._run_environment)
+        if usage.order_count == 0:
+            return
+        self._caps.order_count = usage.order_count
+        # count 단독 초과는 구조적으로 미도달(초과를 유발한 매수는 발주 전
+        # 차단돼 DB에 없다 — 트레이더 Minor)이나, 매도발 KRW 초과는 실재하는
+        # 경로다(매도는 상한 무시 누적) — exceeds_daily 공유로 대칭 유지.
+        self._caps.order_krw = usage.order_krw
+        self._caps.buy_blocked = self._caps.exceeds_daily(
+            usage.order_count, usage.order_krw)
+        if usage.has_buy:
+            # 전제: BUY 발주는 진입 배치(entry.py) 경로뿐이다 — 물타기/추가
+            # 매수 경로가 생기면 이 게이트는 분류 재검토 필요(개발자 Minor).
+            self._entries_done = True
+        # 금액 원값은 warnings(무인증 /trade/status)에 넣지 않는다 — 건수는
+        # 이미 daily_order_count로 노출되는 수준(§8-2 노출 최소 관례)
+        self._warnings.append(
+            f"daily caps seeded from earlier runs today "
+            f"({usage.order_count} orders counted)")
+        logger.info(
+            "daily caps seeded from db: day=%s orders=%d krw=%d "
+            "buy_blocked=%s entries_done=%s", day, usage.order_count,
+            usage.order_krw, self._caps.buy_blocked, self._entries_done)
 
     # ── 재기동 reconcile (§6-6) ─────────────────────────────────────────
 
@@ -604,12 +657,16 @@ class TradingService(BackgroundRunService):
 
     def _record_order_for(self, pos_id: int | None):
         def record(ack, req, status: str) -> None:
+            # est_krw = caps.check에 넘긴 발주 시점 추정 금액(지정가=limit,
+            # 시장가=ref_price — P6-T1 트레이더 Critical: record_fill 미배선
+            # 상태에서 시장가 금액의 유일한 시딩 원천)
             self._store.record_order(
                 self._run_id, pos_id, order_no=ack.order_no,
                 symbol=req.symbol, side=req.side.value,
                 order_style=req.style.value, req_price=req.limit_price,
                 req_qty=req.quantity, status=status,
-                resp_body={"ord_no": ack.order_no, "return_msg": ack.message})
+                resp_body={"ord_no": ack.order_no, "return_msg": ack.message},
+                est_krw=(req.limit_price or req.ref_price) * req.quantity)
         return record
 
     def _record_order_by_symbol(self, ack, req, status: str) -> None:

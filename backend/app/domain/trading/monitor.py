@@ -323,7 +323,8 @@ class PositionMonitor:
         exiting = replace(pos, state=PositionState.EXITING, exit_reason=reason,
                           exit_phase=None)
         req = OrderRequest(symbol=pos.symbol, side=OrderSide.SELL,
-                           style=OrderStyle.MARKET, quantity=pos.quantity)
+                           style=OrderStyle.MARKET, quantity=pos.quantity,
+                           ref_price=est_price)  # caps 추정가와 동일(감사·시딩)
         ack = await self._submit_exit(exiting, req, est_price)
         if ack is None:
             return self._submit_failed_action(pos, reason, now)
@@ -384,7 +385,8 @@ class PositionMonitor:
         # 아니라 잔고(kt00018) ground truth로 수량을 재확정한다(아키텍트 #2).
         market_pos = replace(exiting, exit_phase=ExitPhase.MARKET_SUBMITTED)
         market_req = OrderRequest(symbol=pos.symbol, side=OrderSide.SELL,
-                                  style=OrderStyle.MARKET, quantity=remaining)
+                                  style=OrderStyle.MARKET, quantity=remaining,
+                                  ref_price=limit_price)  # caps 추정가와 동일
         # 폴백 발주 실패 시 복원 스냅샷: 체결분이 이미 팔렸으므로 원 수량이
         # 아니라 **잔량**으로 ENTERED 복원(트레이더 C1 — 원 수량 복원은 다음
         # 사이클에서 이미 판 수량의 초과 매도를 유발). caps 추정가는

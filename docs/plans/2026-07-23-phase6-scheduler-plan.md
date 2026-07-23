@@ -12,7 +12,7 @@
 
 **Architecture:** 판정은 순수 평가기(`timeline.py` — 잡별 서브평가기), 부수효과는
 `SchedulerService`(틱 루프, Protocol 주입 서비스의 `start()` 직접 호출),
-facts/이벤트는 `scheduler_store`(insert-only 0010 + 소유 스토어 판정 헬퍼 위임).
+facts/이벤트는 `scheduler_store`(insert-only 0011 + 소유 스토어 판정 헬퍼 위임).
 BackgroundRunService 비상속(상주 루프 — 모델이 다름). P5 정정 2건(§4-c 진입
 래치, §5-1 일일 한도 시딩)을 스케줄러 활성화보다 **선행** 구현한다.
 
@@ -71,7 +71,7 @@ backend/app/
   core/config.py   # 수정(Task 6): scheduler_enabled (기본 true)
   main.py          # 수정(Task 6): SchedulerService 조립·기동 게이트(replay 미기동)·셧다운 순서(스케줄러 최우선 취소)
 backend/alembic/versions/
-  0010_scheduler_events.py     # 신규(Task 4)
+  0011_scheduler_events.py     # 신규(Task 4 — 0010은 Task 1 est_krw+인덱스가 선점)
 backend/tests/
   conftest.py      # 수정(Task 6): autouse SCHEDULER_ENABLED=false
   orchestration/   # 신규: test_timeline.py, test_scheduler_service.py, test_schedule_api.py
@@ -174,11 +174,11 @@ Test `tests/orchestration/test_timeline.py`.
 
 ---
 
-### Task 4: 저장소 — 0010 + scheduler_store + 소유 스토어 판정 헬퍼 (스펙 §6)
+### Task 4: 저장소 — 0011 + scheduler_store + 소유 스토어 판정 헬퍼 (스펙 §6)
 
 **목적:** TimelineFacts의 DB 구성과 이벤트 적재(결정 #36 — SQL 복기 가능).
 
-**Files:** New `store/scheduler_store.py`, `alembic/versions/0010_scheduler_events.py`;
+**Files:** New `store/scheduler_store.py`, `alembic/versions/0011_scheduler_events.py`;
 Modify `store/models.py` + 4개 소유 스토어; Test `tests/`(store).
 
 - [ ] `scheduler_events` 테이블(스펙 §6): id/ts/job/action/reason/run_id.
@@ -200,11 +200,11 @@ Modify `store/models.py` + 4개 소유 스토어; Test `tests/`(store).
   오염). `started_at.astimezone(market_calendar.KST).date()` 관례
   (`trading/service.py`의 `_in_entry_window` 선례)를 store 질의에 적용.
 - [ ] `SchedulerStore.build_facts(today)` — 위 헬퍼 합성 + `record_event()`.
-- [ ] 테스트: 0010 왕복, 판정 질의 상태 조합(특히 stopped_by_kill_switch
+- [ ] 테스트: 0011 왕복, 판정 질의 상태 조합(특히 stopped_by_kill_switch
   3분기, 자정 경계 날짜 산정), **08:20~09:00 KST 시작 런이 올바른 거래일로
   판정되는 UTC 경계 케이스(전 스토어)**, 이벤트 insert.
 
-**커밋(제안):** `feat(sched): scheduler_events (0010) + per-store completion queries (panel)`
+**커밋(제안):** `feat(sched): scheduler_events (0011) + per-store completion queries (panel)`
 
 ---
 
@@ -352,7 +352,7 @@ lifespan 회귀.
 | §5 | 틱 루프·재시도(창 내 백오프)·pause·기동 게이트 | 3·5·6 |
 | §5-1 | P5 정정: 한도 시딩·진입 게이트·릴리스 순서 | **1** (순서 제약 Global) |
 | §5-2 | ScheduleConfig 1:1 | 3 |
-| §6 | 0010·reason 리터럴·소유 스토어 헬퍼·로그 형식 | 4·5 |
+| §6 | 0011·reason 리터럴·소유 스토어 헬퍼·로그 형식 | 4·5 |
 | §7 | API 3종·인증 스코프·노출 한정 | 6 |
 | §8 | 예외 생존·재기동 예산 1회·셧다운 순서·stale_gate | 5·6 |
 | §9 | 테스트 전략 전 항목(통합 테스트 포함) | 각 태스크 + 6·8 |
