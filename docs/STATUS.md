@@ -11,15 +11,19 @@
 
 ## ▶ 여기서 재개 (다음 액션)
 
-**Phase 8(텔레그램 봇) Task 1~5 커밋 완료, Task 6 구현·5인 패널 최종
-승인 완료(미커밋). 전체 996 passed, 11 live tests deselected.**
+**Phase 8(텔레그램 봇) Task 1~6 커밋 완료, Task 7 구현·4인 패널 최종
+승인 완료(미커밋). 전체 1013 passed, 11 live tests deselected.**
 
 **▶ 다음 작업(우선순위 순)**
-1. **Phase 8(텔레그램 봇) Task 6 변경 커밋 후 Task 7 구현 착수** — 스펙
+1. **Phase 8(텔레그램 봇) Task 7 변경 커밋 후 Task 8 구현 착수** — 스펙
    `docs/specs/2026-07-24-phase8-telegram-bot-design.md`와 계획서
    `docs/plans/2026-07-24-phase8-telegram-bot-plan.md` 모두 작성 및
    리뷰 패널 승인 완료. Task 1~3 커밋은 각각 `30059f7`, `ca50c24`,
-   `79b0aa0`, `d16e522`, `70a713c`. Task 6은 append-only operational
+   `79b0aa0`, `d16e522`, `70a713c`, `df140bd`. Task 7은 lease/version
+   fence 기반 durable sender, 429·일시·영구 오류 상태 전이, 지연 표시,
+   조각별 재시도와 민감 payload scrub, projector delivery materialization을
+   구현했으며 4인 패널 Critical/Important 0으로 최종 승인했다.
+   Task 6은 append-only operational
    event, 원자 projector, 체결 누적·잔량·정확도, 재기동 주문 복구,
    수동·전략 동일종목 ownership 격리와 scheduler-dead/kill-switch 사건을
    구현했으며 5인 패널 Critical/Important 0으로 최종 승인했다.
@@ -29,7 +33,8 @@
    상태·예수금·총자산·손익 조회, pause/stop과 확인형
    resume/liquidate_all. 구현 순서: Task 1 순수 알림 모델·파서·인증·포맷
    → Task 2 설정/Bot API → Task 3 영속 기반 → Task 4 공용 제어 →
-   Task 5 durable 명령 → Task 6 운영 이벤트(완료) → **Task 7 sender(다음)** →
+   Task 5 durable 명령 → Task 6 운영 이벤트 → Task 7 sender(완료) →
+   **Task 8 다이제스트(다음)** →
    Task 8 다이제스트 → Task 9 lifespan → Task 10 수용·회고.
 2. **7b-⑤ 재부팅 캐치업 검증**(비거래일 가능 — 아래 절차). 세션이
    끊기므로 여유 있을 때.

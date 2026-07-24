@@ -629,3 +629,43 @@ Task 4는 REST와 Telegram이 공유할 OperationsControl 및 managed liquidatio
 - 최종 동일 구현 diff는 senior-developer, senior-trader,
   architecture-expert, security-expert, broker-api-expert가 독립 재검토해
   모두 Critical 0건, Important 0건으로 승인했다.
+
+## Task 7 — durable outbox sender와 bounded retry
+
+### 요청과 기존 상태
+
+Task 6은 append-only operational event와 outbox 원천을 만들었지만 실제
+Telegram delivery sender가 없었다. 초기 점검에서 projector가 outbox payload만
+생성해 child delivery가 없는 실제 사건은 영구 pending으로 남는 단절도 함께
+확인했다.
+
+### 설계 판단과 변경 위치
+
+- `core/telegram_service.py`의 `OutboxSender`는 한 delivery씩 90초 lease로
+  claim한다. Bot API 35초 timeout보다 긴 lease이며 batch가 긴급 사건을
+  점유하지 않는다. 429는 서버 `retry_after`, 5xx/transport는 bounded
+  exponential backoff+jitter, 영구 오류/10회/24시간은 parent와 미전송
+  sibling을 한 transaction에서 dead-letter로 끝낸다.
+- `notification_store.py`는 parent lock, active sibling 및 earlier unsent
+  `NOT EXISTS` 조건으로 같은 outbox 조각의 동시 전송과 backoff 중 조각이
+  뒤의 긴급 outbox를 막는 starvation을 막는다. 성공한 민감 조각 body와
+  payload는 즉시 NULL 처리한다.
+- 5분 지난 CRITICAL은 `[지연 알림]`과 KST 실제 발생 시각을 첫 제목에
+  붙인다. CRITICAL body는 이 제목을 예약한 4,032자 상한으로 생성 시점에
+  검증해 최초의 상관 ID·`n/N` 고정 조각을 재시도 중 바꾸지 않는다.
+- projector는 kind별 허용 scalar fact만 plain text로 렌더한다. token,
+  account-like key, vendor error 원문 등 알려지지 않은 payload 값은 Telegram
+  body로 승격하지 않는다. outbox/cursor/delivery는 한 transaction이며,
+  Task 6 시점의 zero-child pending operational outbox는 parent lock 아래
+  제한 batch로 backfill한다.
+
+### 검증과 패널
+
+- RED: sender 부재, 상태 전이, 지연 경계, legacy outbox, 민감 facts 누출
+  회귀가 각 기능 부재 상태에서 실패함을 확인했다.
+- focused 54건과 전체 1013 passed/11 deselected, compileall, diff check를
+  확인했다. 기존 StarletteDeprecationWarning 1건만 남았다.
+- 네 전문 관점의 반복 독립 검토에서 발생시각, lease, sibling race,
+  critical body 경계, transaction backfill, 민감 렌더 경계를 보완했다.
+  키움 경로는 변경하지 않아 broker-api-expert는 사용하지 않았다.
+- 실제 Telegram/키움 API와 운영 DB는 호출하지 않았다.

@@ -198,14 +198,17 @@ def test_부분성공_뒤_미전송_chunk만_claim하고_완료시_purge(stores)
     claimed = notifications.claim_deliveries("w")
     assert notifications.finish_delivery(
         claimed[0].id, "w", claimed[0].version, telegram_message_id=99)
-    for delivery in claimed[1:]:
-        assert notifications.retry_delivery(
-            delivery.id, "w", delivery.version, "timeout", None)
+    assert notifications.load_payload(oid) is None
+    assert notifications.load_delivery_bodies(oid) == [None, "2", "3"]
     remaining = notifications.claim_deliveries("w2")
-    assert [item.part_index for item in remaining] == [2, 3]
+    assert [item.part_index for item in remaining] == [2]
     for item in remaining:
         assert notifications.finish_delivery(
             item.id, "w2", item.version, telegram_message_id=100 + item.part_index)
+    final = notifications.claim_deliveries("w3")
+    assert [item.part_index for item in final] == [3]
+    assert notifications.finish_delivery(
+        final[0].id, "w3", final[0].version, telegram_message_id=103)
     assert notifications.load_payload(oid) is None
     assert notifications.load_delivery_bodies(oid) == [None, None, None]
 
@@ -213,12 +216,52 @@ def test_부분성공_뒤_미전송_chunk만_claim하고_완료시_purge(stores)
 def test_delivery_stale_worker와_조각별_retry예산(stores):
     _, _, notifications, _ = stores
     oid = notifications.enqueue_parts("parts", ["1", "2"])
-    first, second = notifications.claim_deliveries("w")
-    assert notifications.retry_delivery(second.id, "w", second.version, "timeout", None)
+    first = notifications.claim_deliveries("w")[0]
+    assert notifications.retry_delivery(first.id, "w", first.version, "timeout", None)
     assert not notifications.finish_delivery(
-        second.id, "w", second.version, telegram_message_id=9)
+        first.id, "w", first.version, telegram_message_id=9)
     rows = notifications.load_deliveries(oid)
-    assert rows[0].attempt_count == 0 and rows[1].attempt_count == 1
+    assert rows[0].attempt_count == 1 and rows[1].attempt_count == 0
+
+
+def test_delivery_dead_letter는_lease_fence와_부모종결을_원자보장한다(stores):
+    _, _, notifications, _ = stores
+    oid = notifications.enqueue_parts("dead-fence", ["one", "two"])
+    first = notifications.claim_deliveries("w")[0]
+
+    assert not notifications.dead_letter_delivery(
+        first.id, "other", first.version, "http_400", 400)
+    assert notifications.dead_letter_delivery(
+        first.id, "w", first.version, "http_400", 400)
+    assert [row.status for row in notifications.load_deliveries(oid)] == [
+        "dead_letter", "dead_letter"]
+
+
+def test_같은_outbox는_다음조각하나만_lease해_영구실패와_경합하지않는다(stores):
+    _, _, notifications, _ = stores
+    oid = notifications.enqueue_parts("serialized", ["one", "two"])
+
+    first = notifications.claim_deliveries("first", limit=20, lease_s=60)
+    assert [row.part_index for row in first] == [1]
+    assert notifications.claim_deliveries("second", limit=20, lease_s=60) == []
+    assert notifications.finish_delivery(
+        first[0].id, "first", first[0].version, telegram_message_id=1)
+    second = notifications.claim_deliveries("second", limit=20, lease_s=60)
+    assert [row.part_index for row in second] == [2]
+
+
+def test_backoff중_앞조각이_다른_outbox의_긴급claim을_막지않는다(stores):
+    _, _, notifications, clock = stores
+    blocked = notifications.enqueue_parts("blocked", ["one", "two"], priority=0)
+    first = notifications.claim_deliveries("first", limit=1)[0]
+    assert notifications.retry_delivery(
+        first.id, "first", first.version, "timeout", None,
+        next_attempt_at=clock.value + timedelta(minutes=1))
+    ready = notifications.enqueue_parts("ready", ["stop-loss"], priority=0)
+
+    claimed = notifications.claim_deliveries("second", limit=1)
+    assert [row.outbox_id for row in claimed] == [ready]
+    assert claimed[0].outbox_id != blocked
 
 
 def test_delivery는_priority_occurred_part순으로_claim한다(stores):
@@ -228,7 +271,12 @@ def test_delivery는_priority_occurred_part순으로_claim한다(stores):
     notifications.enqueue_parts(
         "critical", ["c1", "c2"], priority=0, occurred_at=NOW)
     claimed = notifications.claim_deliveries("w")
-    assert [item.body for item in claimed] == ["c1", "c2", "n"]
+    assert [item.body for item in claimed] == ["c1", "n"]
+    critical = claimed[0]
+    assert notifications.finish_delivery(
+        critical.id, "w", critical.version, telegram_message_id=1)
+    next_critical = notifications.claim_deliveries("w")
+    assert [item.body for item in next_critical] == ["c2"]
 
 
 def test_서로다른원천의_같은숫자버전은_충돌하지않는다(stores):
