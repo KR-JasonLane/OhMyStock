@@ -7,6 +7,7 @@
   이쪽 절반 — 반대쪽은 collect.py/score.py가 트레이딩 실행을 거부)."""
 
 import logging
+import secrets
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
@@ -63,7 +64,14 @@ async def stop_trading(request: Request, body: dict | None = None) -> dict:
             detail=f"unknown stop mode {raw!r} — one of {sorted(_STOP_MODES)}")
     # durable 진입점: 인메모리 정지 + 요청 의도 DB 영속(응답 전 커밋 보장 —
     # 협조적 정지 대기 중 크래시해도 킬스위치가 무효화되지 않는다, P6-T7d)
-    await service.request_stop_durable(mode)
+    control = getattr(request.app.state, "operations_control", None)
+    if control is not None and mode is StopMode.STOP_NEW_ENTRIES:
+        # REST 요청에는 durable command execution ID가 아직 없으므로 요청
+        # 상관 ID를 사용한다. LIQUIDATE_ALL은 기존 REST의 현재-run 전량
+        # 청산 계약을 유지하고, Telegram 확인 경로만 target snapshot을 쓴다.
+        await control.stop_new_entries(f"rest-{secrets.token_hex(16)}")
+    else:
+        await service.request_stop_durable(mode)
     logger.warning("trading stop requested: mode=%s", mode.value)
     return {"stopping": True, "mode": mode.value}
 

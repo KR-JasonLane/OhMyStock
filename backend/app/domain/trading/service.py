@@ -28,6 +28,8 @@ store를 만난다(Global Constraints — store 통짜 주입 금지).
 
 import asyncio
 import logging
+import re
+from collections import OrderedDict, defaultdict
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from typing import Protocol
@@ -36,7 +38,9 @@ from app.core.background_service import BackgroundRunService, StopMode
 from app.domain.broker import BrokerPort, OrderPort, OrderSide
 from app.domain.trading.config import TradingConfig
 from app.domain.trading.entry import EntryExecutor, EntryOutcome
-from app.domain.trading.models import PositionState, TradePosition
+from app.domain.trading.models import (LiquidationResult, LiquidationTarget,
+                                       PositionState, StopRequestResult,
+                                       TradePosition)
 from app.domain.trading.monitor import ExitAction, PositionMonitor
 from app.domain.trading.reconcile import (DbPosition, ReconcileKind,
                                           apply_reconcile, reconcile_decide)
@@ -72,6 +76,8 @@ class _StoreLike(Protocol):
     def recent_closed_symbols(self, cutoff: datetime) -> set[str]: ...
     def daily_order_usage(self, day: date, run_environment: str): ...
     def record_stop_request(self, run_id: int, mode: str) -> None: ...
+    def open_positions_by_ids(self, position_ids: list[int],
+                              run_environment: str): ...
 
 
 class SingleOrderCapExceeded(ValueError):
@@ -172,6 +178,11 @@ class TradingService(BackgroundRunService):
         self._warnings: list[str] = []
         self._entries_done = False
         self._final_status = "idle"
+        self._control_intents: dict[str, StopMode] = {}
+        self._control_intent_lock = asyncio.Lock()
+        self._managed_liquidation_intent: str | None = None
+        self._managed_liquidation_targets: dict[int, LiquidationTarget] = {}
+        self._managed_results: OrderedDict[str, LiquidationResult] = OrderedDict()
 
     # ── 상태 노출 ───────────────────────────────────────────────────────
 
@@ -190,7 +201,7 @@ class TradingService(BackgroundRunService):
             daily_order_krw=caps.order_krw if caps else 0,
             kill_switch=mode.value if mode else None)
 
-    async def request_stop_durable(self, mode: StopMode) -> None:
+    async def request_stop_durable(self, mode: StopMode) -> StopRequestResult:
         """킬스위치 요청(API 진입점) — 인메모리 플래그 + **DB 영속**.
 
         왜 별도 비동기 진입점인가: 베이스 `request_stop`은 **동기** 계약이라
@@ -209,18 +220,249 @@ class TradingService(BackgroundRunService):
 
         DB 실패는 격리한다(fail-open): 킬스위치가 저장 실패로 막히면
         "리스크 축소 주문이 자기 안전장치에 막히는" 역설(§8-1 C2와 동일
-        클래스)이 된다 — 인메모리 플래그는 이미 세팅됐고 정상 종료 경로의
-        finish_run이 최종 기록을 남긴다."""
-        self.request_stop(mode)          # 베이스: 인메모리 플래그(즉시 유효)
-        if self._run_id is None:
-            return
+        클래스)이 된다. 일반 stop은 기존 계약대로 영속 await 전에 인메모리
+        플래그를 세우고 구조화 결과로 두 상태를 분리한다. managed caller는
+        persistence-only helper 뒤 scope와 mode를 await 없이 설치해 broad
+        청산 경합을 별도로 막는다."""
+        # 기존 REST 계약: DB가 느리거나 실패해도 호출 즉시 협조적 stop이
+        # 보인다. managed liquidation은 아래 persistence-only helper를 써서
+        # scope 없는 broad flag 경합을 별도로 피한다.
+        self.request_stop(mode)
+        persisted = await self._persist_stop_request(mode, self._run_id)
+        return StopRequestResult(
+            True, persisted.persisted, persisted.warning)
+
+    async def _persist_stop_request(
+            self, mode: StopMode,
+            expected_run_id: int | None) -> StopRequestResult:
+        """인메모리 mode를 건드리지 않고 kill-switch 의도만 영속한다."""
+        if expected_run_id is None:
+            return StopRequestResult(False, False, "no active run to persist")
         try:
             await asyncio.to_thread(self._store.record_stop_request,
-                                    self._run_id, mode.value)
+                                    expected_run_id, mode.value)
         except Exception:  # noqa: BLE001
             logger.exception(
-                "kill switch persist failed for run %s — in-memory stop is "
-                "still in effect", self._run_id)
+                "kill switch persist failed for run %s",
+                expected_run_id)
+            return StopRequestResult(
+                False, False, "kill switch persistence failed")
+        return StopRequestResult(False, True)
+
+    async def _await_persist_terminal(self, task) -> tuple[StopRequestResult, bool]:
+        """반복 cancellation에도 persistence task terminal을 끝까지 회수한다."""
+        cancelled = False
+        while not task.done():
+            try:
+                return await asyncio.shield(task), cancelled
+            except asyncio.CancelledError:
+                cancelled = True
+                current = asyncio.current_task()
+                if current is not None:
+                    current.uncancel()
+        return task.result(), cancelled
+
+    async def request_stop_once(self, intent_id: str, mode: StopMode) -> bool:
+        """실행 수명 보조 멱등 가드. durable SSOT는 command execution store다."""
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", intent_id):
+            raise ValueError("invalid intent_id")
+        async with self._control_intent_lock:
+            previous = self._control_intents.get(intent_id)
+            if previous is not None:
+                if previous is not mode:
+                    raise ValueError("intent_id already used for another mode")
+                return True
+            # side effect가 성공한 뒤에만 applied로 기록한다. 취소/예외는
+            # 재시도 가능하며 pending을 성공으로 가장하지 않는다.
+            result = await self.request_stop_durable(mode)
+            if not result.persisted:
+                return False
+            if len(self._control_intents) >= 256:
+                self._control_intents.pop(next(iter(self._control_intents)))
+            self._control_intents[intent_id] = mode
+            return True
+
+    async def request_managed_liquidation(
+            self, intent_id: str,
+            targets: tuple[LiquidationTarget, ...]) -> LiquidationResult:
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", intent_id):
+            raise ValueError("invalid intent_id")
+        completed = self._managed_results.get(intent_id)
+        if completed is not None:
+            return completed
+        if not targets:
+            return LiquidationResult(
+                "succeeded", False, "no managed liquidation targets; no-op")
+        async with self._control_intent_lock:
+            expected_run_id = self._run_id
+            prior_mode = self._control_intents.get(intent_id)
+            if prior_mode is not None and prior_mode is not StopMode.LIQUIDATE_ALL:
+                raise ValueError("intent_id already used for another mode")
+            if self._managed_liquidation_intent == intent_id:
+                return LiquidationResult(
+                    "in_progress", False, "managed liquidation already accepted")
+            if self._managed_liquidation_intent is not None:
+                return LiquidationResult(
+                    "needs_attention", False,
+                    "another managed liquidation intent is active")
+            if not self.is_running():
+                return LiquidationResult(
+                    "needs_attention", False,
+                    "trading is idle; no liquidation side effect started")
+            failure = await self._managed_preflight(targets)
+            if failure is not None:
+                return failure
+            if (not self.is_running()
+                    or self._run_id != expected_run_id):
+                result = LiquidationResult(
+                    "needs_attention", False,
+                    "run changed/ended before liquidation persistence")
+                self._remember_managed_result(intent_id, result)
+                return result
+            persist_task = asyncio.create_task(
+                self._persist_stop_request(
+                    StopMode.LIQUIDATE_ALL, expected_run_id))
+            stop, cancelled = await self._await_persist_terminal(persist_task)
+            if not stop.persisted:
+                result = LiquidationResult(
+                    "needs_attention", False,
+                    f"{stop.warning}; managed liquidation not started")
+                if cancelled:
+                    raise asyncio.CancelledError
+                return result
+            if (not self.is_running()
+                    or self._run_id != expected_run_id):
+                result = LiquidationResult(
+                    "needs_attention", False,
+                    "run changed/ended before liquidation started")
+                self._remember_managed_result(intent_id, result)
+                if cancelled:
+                    raise asyncio.CancelledError
+                return result
+            self._managed_liquidation_intent = intent_id
+            self._managed_liquidation_targets = {
+                target.position_id: target for target in targets}
+            self._control_intents[intent_id] = StopMode.LIQUIDATE_ALL
+            # scope/target 설치와 broad flag 사이에는 await가 없다.
+            self.request_stop(StopMode.LIQUIDATE_ALL)
+            if cancelled:
+                raise asyncio.CancelledError
+            return LiquidationResult(
+                "accepted", False, "managed liquidation accepted")
+
+    async def _managed_preflight(
+            self, targets: tuple[LiquidationTarget, ...]
+            ) -> LiquidationResult | None:
+        now = self._clock()
+        if (not self._calendar.is_trading_day(
+                now.astimezone(self._calendar.KST).date())
+                or not self._calendar.is_market_hours(now)):
+            return LiquidationResult(
+                "needs_attention", False,
+                "market is closed; no sell order placed; manual action required")
+        try:
+            current, balance, open_orders = await asyncio.gather(
+                asyncio.to_thread(
+                    self._store.open_positions_by_ids,
+                    [target.position_id for target in targets],
+                    self._run_environment),
+                self._account.get_balance(), self._orders.get_open_orders())
+        except Exception as exc:  # noqa: BLE001
+            return LiquidationResult(
+                "needs_attention", False,
+                f"preflight reconciliation failed ({type(exc).__name__}); "
+                "no sell order placed")
+        current_facts = {(pid, pos.symbol, pos.quantity)
+                         for pid, pos in current}
+        target_facts = {(target.position_id, target.symbol, target.quantity)
+                        for target in targets}
+        if current_facts != target_facts:
+            return LiquidationResult(
+                "needs_attention", False,
+                "confirmed target state changed; no sell order placed")
+        held: defaultdict[str, int] = defaultdict(int)
+        for position in balance.positions:
+            if position.quantity > 0:
+                held[position.symbol] += position.quantity
+        db_qty: defaultdict[str, int] = defaultdict(int)
+        for target in targets:
+            db_qty[target.symbol] += target.quantity
+        for symbol, quantity in db_qty.items():
+            if held.get(symbol, 0) != quantity:
+                return LiquidationResult(
+                    "needs_attention", False,
+                    f"{symbol}: DB수량={quantity}, broker수량="
+                    f"{held.get(symbol, 0)} 불일치; no sell order placed")
+        target_symbols = set(db_qty)
+        pending: defaultdict[str, int] = defaultdict(int)
+        pending_orders: defaultdict[str, list[str]] = defaultdict(list)
+        for order in open_orders:
+            if (order.side is OrderSide.SELL and order.unfilled_qty > 0
+                    and order.symbol in target_symbols):
+                pending[order.symbol] += order.unfilled_qty
+                pending_orders[order.symbol].append(order.order_no)
+        if pending:
+            facts = ", ".join(
+                f"{symbol}: 주문번호={','.join(pending_orders[symbol])}, "
+                f"잔량={pending[symbol]}"
+                for symbol in sorted(pending))
+            return LiquidationResult(
+                "needs_attention", False,
+                f"target sell open orders ({facts}); ownership unknown; "
+                "no duplicate sell; inspect manually")
+        for target in targets:
+            state = await asyncio.to_thread(
+                self._store.instrument_state, target.symbol)
+            if state and "거래정지" in state:
+                return LiquidationResult(
+                    "needs_attention", False,
+                    f"{target.symbol}: 거래정지; no sell order placed; "
+                    "manual action required")
+        return None
+
+    async def reconcile_control_intent(self, intent_id: str) -> LiquidationResult:
+        completed = self._managed_results.get(intent_id)
+        if completed is not None:
+            return completed
+        if intent_id != self._managed_liquidation_intent:
+            return LiquidationResult(
+                "needs_attention", False, "unknown liquidation intent")
+        try:
+            balance, open_orders = await asyncio.gather(
+                self._account.get_balance(), self._orders.get_open_orders())
+        except Exception as exc:  # noqa: BLE001
+            return LiquidationResult(
+                "needs_attention", False,
+                f"broker reconciliation failed ({type(exc).__name__}); "
+                "inspect balance and open sell orders manually")
+        held = {position.symbol: position.quantity
+                for position in balance.positions if position.quantity > 0}
+        pending = {order.symbol: order.unfilled_qty for order in open_orders
+                   if order.side is OrderSide.SELL and order.unfilled_qty > 0}
+        rows = await asyncio.to_thread(
+            self._store.open_positions_by_ids,
+            list(self._managed_liquidation_targets), self._run_environment)
+        states = {pid: pos.state for pid, pos in rows}
+        details = []
+        for pid, target in self._managed_liquidation_targets.items():
+            qty = held.get(target.symbol, 0)
+            unfilled = pending.get(target.symbol, 0)
+            state = states.get(pid)
+            if qty or unfilled or state not in {None, PositionState.CLOSED}:
+                details.append(
+                    f"{target.symbol}: 잔량={qty}, 미체결={unfilled}, "
+                    f"DB상태={state.value if state else 'closed'}; "
+                    "잔고·미체결 확인 후 수동 조치")
+        if details:
+            return LiquidationResult(
+                "needs_attention", not held, "; ".join(details))
+        return LiquidationResult("succeeded", not held, None)
+
+    def _remember_managed_result(
+            self, intent_id: str, result: LiquidationResult) -> None:
+        if len(self._managed_results) >= 256:
+            self._managed_results.popitem(last=False)
+        self._managed_results[intent_id] = result
 
     def _all_warnings(self) -> tuple[str, ...]:
         """경고 두 출처 합성 — 서비스 누적(self._warnings)과 monitor의 상시
@@ -252,6 +494,8 @@ class TradingService(BackgroundRunService):
         self._warnings = []
         self._entries_done = False
         self._final_status = "running"
+        self._managed_liquidation_intent = None
+        self._managed_liquidation_targets = {}
         self._caps = OrderCaps(self._config)
         # run당 새 인스턴스(P5-T6b 아키텍트 #5 — 거래일 경계 재사용 금지)
         self._monitor = PositionMonitor(
@@ -764,8 +1008,17 @@ class TradingService(BackgroundRunService):
         first = True
         while True:
             now = self._clock()
-            entered = await asyncio.to_thread(self._load_entered)
+            if self._managed_liquidation_intent is not None:
+                entered = await asyncio.to_thread(
+                    self._load_managed_entered, first)
+            else:
+                entered = await asyncio.to_thread(self._load_entered)
             if not entered and not self._monitor.has_pending:
+                if self._managed_liquidation_intent is not None:
+                    result = await self.reconcile_control_intent(
+                        self._managed_liquidation_intent)
+                    self._remember_managed_result(
+                        self._managed_liquidation_intent, result)
                 return  # 전 포지션 종결
             if not first and not self._calendar.is_market_hours(now):
                 # 장 마감 — pending은 poll_once(_check_pending)가 EXIT_FAILED
@@ -781,6 +1034,33 @@ class TradingService(BackgroundRunService):
                     self._warn_once(
                         f"{pos.symbol}: liquidation incomplete at market "
                         "close — EXIT_FAILED (still held)")
+                if self._managed_liquidation_intent is not None:
+                    try:
+                        balance = await self._account.get_balance()
+                        held = defaultdict(int)
+                        for broker_pos in balance.positions:
+                            if broker_pos.quantity > 0:
+                                held[broker_pos.symbol] += broker_pos.quantity
+                        for pid, target in self._managed_liquidation_targets.items():
+                            if held.get(target.symbol, 0) <= 0:
+                                continue
+                            current = await asyncio.to_thread(
+                                self._store.get_position, pid)
+                            if current is not None:
+                                await asyncio.to_thread(
+                                    self._store.save_position_snapshot, pid,
+                                    replace(current,
+                                            state=PositionState.EXIT_FAILED,
+                                            quantity=held[target.symbol]))
+                    except Exception:  # noqa: BLE001
+                        logger.exception(
+                            "managed market-close balance reconciliation failed")
+                    details = ", ".join(
+                        f"{target.symbol}: 장마감 미종결, 수동 잔고·미체결 확인"
+                        for target in self._managed_liquidation_targets.values())
+                    self._remember_managed_result(
+                        self._managed_liquidation_intent,
+                        LiquidationResult("needs_attention", False, details))
                 return
             first = False
             # ENTERED 잔여(최초 전량 + 이후 발주 실패 재시도분)는 재청산 지시
@@ -882,6 +1162,21 @@ class TradingService(BackgroundRunService):
 
     def _load_entered(self) -> list[TradePosition]:
         rows, _corrupted = self._store.open_positions(self._run_environment)
+        self._pos_ids.update({pos.symbol: pid for pid, pos in rows})
+        return [pos for _pid, pos in rows
+                if pos.state is PositionState.ENTERED]
+
+    def _load_managed_entered(self, require_all: bool = True) -> list[TradePosition]:
+        rows = self._store.open_positions_by_ids(
+            list(self._managed_liquidation_targets), self._run_environment)
+        expected = {(target.position_id, target.symbol, target.quantity)
+                    for target in self._managed_liquidation_targets.values()}
+        actual = {(pid, pos.symbol, pos.quantity) for pid, pos in rows}
+        expected_by_id = {pid: (symbol, qty) for pid, symbol, qty in expected}
+        if (require_all and actual != expected) or any(
+                expected_by_id.get(pid) != (symbol, qty)
+                for pid, symbol, qty in actual):
+            raise RuntimeError("managed liquidation target changed before order")
         self._pos_ids.update({pos.symbol: pid for pid, pos in rows})
         return [pos for _pid, pos in rows
                 if pos.state is PositionState.ENTERED]

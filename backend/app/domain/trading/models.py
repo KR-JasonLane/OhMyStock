@@ -21,6 +21,30 @@ from datetime import datetime
 from app.domain.broker import OrderSide, OrderStyle  # noqa: F401
 
 
+@dataclass(frozen=True)
+class LiquidationTarget:
+    """운영자 확인 시점의 관리 포지션 스냅샷."""
+    position_id: int
+    symbol: str
+    quantity: int
+
+
+@dataclass(frozen=True)
+class LiquidationResult:
+    """청산 command 결과. 불확실성은 succeeded로 축약하지 않는다."""
+    status: str
+    account_fully_empty: bool
+    warning: str | None = None
+
+
+@dataclass(frozen=True)
+class StopRequestResult:
+    """인메모리 정지와 durable 감사 영속의 분리된 결과."""
+    applied: bool
+    persisted: bool
+    warning: str | None = None
+
+
 class PositionState(enum.Enum):
     """포지션 수명주기(스펙 §6-1). EXIT_FAILED는 절대 조용히 넘기지 않는다 —
     재시도 소진 시 명시적 실패로 고정하고 상태 API에 노출(알람 대상)."""

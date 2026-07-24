@@ -21,6 +21,7 @@ from app.api.trade import router as trade_router
 from app.api.ws import router as ws_router
 from app.core import market_calendar
 from app.core.config import Settings, get_settings
+from app.core.operations_control import OperationsControl
 from app.core.replay_clock import make_replay_clock
 from app.core.sensitive_logging import configure_sensitive_http_logging
 from app.domain.analysis.config import AnalysisConfig
@@ -275,6 +276,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "scheduler enabled — daily timeline automation active "
                     "(collect 19:00 → score → analyze 08:20 → trade 09:00, "
                     "decisions #37-#40)")
+            # REST와 Telegram은 프로세스 수명 동안 같은 single-flight/cache와
+            # 제어 의미론을 공유한다. 요청별 조립은 중복 broker 조회를 만든다.
+            app.state.operations_control = OperationsControl(
+                app.state.scheduler, app.state.trading,
+                app.state.trading_store, app.state.broker, market_calendar,
+                settings.run_environment, now=trading_now)
             try:
                 yield
             finally:

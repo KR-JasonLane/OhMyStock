@@ -9,7 +9,7 @@ open_positions()는 reconcile(§6-6)의 입력 — 재기동 시 미종결 포�
 import json
 import logging
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from dataclasses import dataclass
 from datetime import date
@@ -520,6 +520,44 @@ class TradingStore:
                         "from reconcile input, manual inspection required",
                         row.id, type(exc).__name__, exc)
         return good, corrupted
+
+    def open_positions_by_ids(
+            self, position_ids: list[int],
+            run_environment: str) -> list[tuple[int, TradePosition]]:
+        """확인된 관리 청산 target의 현재 상태를 환경까지 포함해 재조회한다."""
+        if not position_ids:
+            return []
+        with self._sessions() as session:
+            rows = session.scalars(
+                select(TradePositionRow)
+                .join(TradeRunRow)
+                .where(TradePositionRow.id.in_(position_ids),
+                       TradePositionRow.state.in_(_OPEN_STATES),
+                       TradeRunRow.run_environment == run_environment)
+                .order_by(TradePositionRow.id)).all()
+            return [(row.id, _row_to_position(row)) for row in rows]
+
+    def realized_pnl_today(
+            self, run_environment: str,
+            now: datetime) -> tuple[int, str]:
+        """현재 환경의 KST 귀속일 실현손익.
+
+        브로커의 체결 손익 대사 표식이 아직 없으므로 정확도는 estimated다.
+        """
+        day = now.astimezone(timezone(timedelta(hours=9))).date()
+        lo, hi = coarse_utc_bounds(day)
+        with self._sessions() as session:
+            rows = session.execute(
+                select(TradePositionRow.realized_pnl,
+                       TradePositionRow.closed_at)
+                .join(TradeRunRow)
+                .where(TradeRunRow.run_environment == run_environment,
+                       TradePositionRow.realized_pnl.is_not(None),
+                       TradePositionRow.closed_at >= lo,
+                       TradePositionRow.closed_at < hi)).all()
+        total = sum(pnl for pnl, closed_at in rows
+                    if within_kst_day(closed_at, day))
+        return total, "estimated"
 
     # ---------- 주문/체결 (insert-only) ----------
 

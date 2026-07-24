@@ -53,7 +53,10 @@ def test_lifespan_enabled면_기동되고_셧다운에_정리된다(tmp_path):
         database_url=f"sqlite+pysqlite:///{tmp_path / 's.db'}"))
     with TestClient(app):
         scheduler = app.state.scheduler
+        control = app.state.operations_control
         assert scheduler is not None
+        assert control.scheduler is scheduler
+        assert control is app.state.operations_control
         task = scheduler.current_task()
         assert task is not None and not task.done()
     assert task.done()               # 셧다운 — 스케줄러 태스크 정리 완료
@@ -108,6 +111,8 @@ def _mount_real_scheduler(app, tmp_path):
         now=lambda: datetime(2026, 7, 23, 9, 30, tzinfo=KST))
     app.state.scheduler = scheduler
     app.state.scheduler_store = store
+    # lifespan에서 단일 생성된 공용 control도 같은 scheduler를 보게 한다.
+    app.state.operations_control.scheduler = scheduler
     return scheduler
 
 

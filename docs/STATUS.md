@@ -4,29 +4,31 @@
 > 새 세션에서 재개할 때 이 문서를 가장 먼저 읽으세요. 매 작업 세션이 끝날 때마다
 > 이 문서를 갱신합니다(핸드오프 문서).
 
-- **최종 수정:** 2026-07-23
+- **최종 수정:** 2026-07-24
 - **프로젝트:** OhMyStock — 한국 주식 자동매매 시스템
 
 ---
 
 ## ▶ 여기서 재개 (다음 액션)
 
-**Phase 6(스케줄러) 코드 전 태스크 완료(2026-07-24) — Task 1~6·7a·7c·
-7d·8 전부 4-에이전트 패널 전원 승인·커밋. 스케줄러 프로덕션 가동 중
-(마이그레이션 0012 적용). 전체 782 passed.**
+**Phase 8(텔레그램 봇) Task 1~3 커밋 완료, Task 4 구현·5인 패널 최종
+승인 완료(미커밋). 전체 909 passed, 11 deselected.**
 
 **▶ 다음 작업(우선순위 순)**
-1. **Phase 8(텔레그램 봇) Task 1 구현 착수** — 스펙
+1. **Phase 8(텔레그램 봇) Task 4 변경 커밋 후 Task 5 구현 착수** — 스펙
    `docs/specs/2026-07-24-phase8-telegram-bot-design.md`와 계획서
    `docs/plans/2026-07-24-phase8-telegram-bot-plan.md` 모두 작성 및
-   4인 리뷰 패널 최종 승인 완료(2026-07-24, Critical/Important 0).
+   리뷰 패널 승인 완료. Task 1~3 커밋은 각각 `30059f7`, `ca50c24`,
+   `79b0aa0`. Task 4는 공용 `OperationsControl`, 계좌 요약, 관리 포지션
+   확인 청산, REST 공용 배선과 경합 방어를 구현했으며 5인 패널
+   Critical/Important 0으로 최종 승인했다.
    확정 범위: 공식 Bot API 직접 호출, 백엔드 내장 서비스, 단일 운영자
    인증(복수 확장 가능), durable inbox/command intent/outbox,
    append-only operational events, 즉시 알림+16:10 다이제스트,
    상태·예수금·총자산·손익 조회, pause/stop과 확인형
    resume/liquidate_all. 구현 순서: Task 1 순수 알림 모델·파서·인증·포맷
-   → Task 2 설정/Bot API → Task 3 영속 기반 → Task 4 공용 제어 →
-   Task 5 durable 명령 → Task 6 운영 이벤트 → Task 7 sender →
+   → Task 2 설정/Bot API → Task 3 영속 기반 → Task 4 공용 제어(완료) →
+   **Task 5 durable 명령(다음)** → Task 6 운영 이벤트 → Task 7 sender →
    Task 8 다이제스트 → Task 9 lifespan → Task 10 수용·회고.
 2. **7b-⑤ 재부팅 캐치업 검증**(비거래일 가능 — 아래 절차). 세션이
    끊기므로 여유 있을 때.

@@ -5,6 +5,7 @@
 fake(conftest.FakeOrderPortBase)의 fail-loud와 다른 계약(문서화)."""
 
 import asyncio
+import threading
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
@@ -15,10 +16,11 @@ from app.core.background_service import StopMode
 from app.domain.broker import (Balance, Deposit, MarketData, OpenOrder,
                                OrderAck, OrderSide, Position, Quote)
 from app.domain.trading.config import TradingConfig
-from app.domain.trading.models import ExitReason, PositionState, TradePosition
+from app.domain.trading.models import (ExitReason, PositionState,
+                                       StopRequestResult, TradePosition)
 from app.domain.trading.monitor import ExitAction
 from app.domain.trading.service import OrderCaps, TradingService
-from app.store.models import Base
+from app.store.models import Base, TradeRunRow
 from app.store.trading_store import EntryContext, TradingStore
 
 KST = timezone(timedelta(hours=9))
@@ -133,6 +135,440 @@ class StoreForTest(TradingStore):
 
 async def _yield_sleep(_):
     await asyncio.sleep(0)
+
+
+@pytest.mark.anyio
+async def test_stop_once는_예외후재시도와_mode충돌을_구분한다(store):
+    service = _service(FakeBroker(), store)
+    calls = 0
+
+    async def flaky(_mode):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("persist down")
+        return StopRequestResult(True, True)
+
+    service.request_stop_durable = flaky
+    with pytest.raises(RuntimeError):
+        await service.request_stop_once("intent_retry", StopMode.STOP_NEW_ENTRIES)
+    assert await service.request_stop_once(
+        "intent_retry", StopMode.STOP_NEW_ENTRIES) is True
+    with pytest.raises(ValueError, match="another mode"):
+        await service.request_stop_once("intent_retry", StopMode.LIQUIDATE_ALL)
+
+
+@pytest.mark.anyio
+async def test_managed_empty는_noop이고_동시intent는_overwrite하지않는다(store):
+    broker = FakeBroker(balances=[Balance((_bpos(qty=9),), 900_000, 0)])
+    service = _service(broker, store, Cal([True]))
+    assert (await service.request_managed_liquidation(
+        "empty", ())).status == "succeeded"
+    run_id = store.create_run(CFG.to_json(), "mock")
+    pos = TradePosition("005930", "삼성전자", "kospi",
+                        PositionState.ENTERED, 100_050, 9, 100_050, False,
+                        entered_at=T0)
+    pos_id = store.create_position(run_id, pos)
+    service._run_id = run_id
+    service.is_running = lambda: True
+    from app.domain.trading.models import LiquidationTarget
+    target = LiquidationTarget(pos_id, "005930", 9)
+    first = await service.request_managed_liquidation("intent_a", (target,))
+    second = await service.request_managed_liquidation("intent_b", (target,))
+    assert first.status == "accepted"
+    assert second.status == "needs_attention"
+    assert service._managed_liquidation_intent == "intent_a"
+
+
+@pytest.mark.anyio
+async def test_managed는_broker수량불일치와_장외를_발주없이거부한다(store):
+    run_id = store.create_run(CFG.to_json(), "mock")
+    pos = TradePosition("005930", "삼성전자", "kospi",
+                        PositionState.ENTERED, 100_050, 9, 100_050, False,
+                        entered_at=T0)
+    pos_id = store.create_position(run_id, pos)
+    from app.domain.trading.models import LiquidationTarget
+    target = LiquidationTarget(pos_id, "005930", 9)
+    broker = FakeBroker(balances=[Balance((_bpos(qty=8),), 800_000, 0)])
+    service = _service(broker, store, Cal([True]))
+    service._run_id = run_id
+    service.is_running = lambda: True
+    mismatch = await service.request_managed_liquidation("mismatch", (target,))
+    assert mismatch.status == "needs_attention"
+    assert broker.placed == []
+
+    closed = _service(FakeBroker(), store, Cal([False]))
+    closed._run_id = run_id
+    closed.is_running = lambda: True
+    result = await closed.request_managed_liquidation("closed", (target,))
+    assert result.status == "needs_attention"
+    assert "market is closed" in result.warning
+
+
+@pytest.mark.anyio
+async def test_managed는_기존SELL미체결을_합산하고_중복매도하지않는다(store):
+    run_id = store.create_run(CFG.to_json(), "mock")
+    pos = TradePosition("005930", "삼성전자", "kospi",
+                        PositionState.ENTERED, 100_050, 9, 100_050, False,
+                        entered_at=T0)
+    pos_id = store.create_position(run_id, pos)
+
+    class ExistingSellBroker(FakeBroker):
+        async def get_open_orders(self):
+            return [
+                OpenOrder("S1", "005930", OrderSide.SELL, 2, 2, 0, "접수"),
+                OpenOrder("S2", "005930", OrderSide.SELL, 3, 3, 0, "접수"),
+            ]
+
+    broker = ExistingSellBroker(
+        balances=[Balance((_bpos(qty=9),), 900_000, 0)])
+    service = _service(broker, store, Cal([True]))
+    service._run_id = run_id
+    service.is_running = lambda: True
+    from app.domain.trading.models import LiquidationTarget
+    result = await service.request_managed_liquidation(
+        "existing_sell", (LiquidationTarget(pos_id, "005930", 9),))
+    assert result.status == "needs_attention"
+    assert "잔량=5" in result.warning
+    assert "S1,S2" in result.warning
+    assert broker.placed == []
+
+
+@pytest.mark.anyio
+async def test_managed는_비대상SELL미체결을_차단하지않는다(store):
+    run_id = store.create_run(CFG.to_json(), "mock")
+    pos = TradePosition("005930", "삼성전자", "kospi",
+                        PositionState.ENTERED, 100_050, 9, 100_050, False,
+                        entered_at=T0)
+    pos_id = store.create_position(run_id, pos)
+
+    class OtherSellBroker(FakeBroker):
+        async def get_open_orders(self):
+            return [OpenOrder("OTHER", "000660", OrderSide.SELL,
+                              3, 3, 0, "접수")]
+
+    broker = OtherSellBroker(
+        balances=[Balance((_bpos(qty=9),), 900_000, 0)])
+    service = _service(broker, store, Cal([True]))
+    service._run_id = run_id
+    service.is_running = lambda: True
+    from app.domain.trading.models import LiquidationTarget
+    result = await service.request_managed_liquidation(
+        "other_sell", (LiquidationTarget(pos_id, "005930", 9),))
+    assert result.status == "accepted"
+
+
+@pytest.mark.anyio
+async def test_managed_stop영속실패는_scope를남기거나_broad청산하지않는다(store):
+    run_id = store.create_run(CFG.to_json(), "mock")
+    pos = TradePosition("005930", "삼성전자", "kospi",
+                        PositionState.ENTERED, 100_050, 9, 100_050, False,
+                        entered_at=T0)
+    pos_id = store.create_position(run_id, pos)
+    broker = FakeBroker(balances=[Balance((_bpos(qty=9),), 900_000, 0)])
+    service = _service(broker, store, Cal([True]))
+    service._run_id = run_id
+    service.is_running = lambda: True
+    service._store.record_stop_request = lambda *_args: (
+        (_ for _ in ()).throw(RuntimeError("db down")))
+    from app.domain.trading.models import LiquidationTarget
+    result = await service.request_managed_liquidation(
+        "persist_fail", (LiquidationTarget(pos_id, "005930", 9),))
+    assert result.status == "needs_attention"
+    assert service._managed_liquidation_intent is None
+    assert service.stop_requested() is None
+    assert broker.placed == []
+
+
+@pytest.mark.anyio
+async def test_일반stop은_느린DB보다_먼저_인메모리flag를설정한다(store):
+    service = _service(FakeBroker(), store)
+    service._run_id = store.create_run("{}", "mock")
+    entered, release = threading.Event(), threading.Event()
+
+    def slow_persist(*_args):
+        entered.set()
+        release.wait(timeout=2)
+
+    service._store.record_stop_request = slow_persist
+    task = asyncio.create_task(
+        service.request_stop_durable(StopMode.STOP_NEW_ENTRIES))
+    for _ in range(300):
+        if entered.is_set():
+            break
+        await asyncio.sleep(0.001)
+    assert entered.is_set()
+    assert service.stop_requested() is StopMode.STOP_NEW_ENTRIES
+    assert not task.done()
+    release.set()
+    result = await task
+    assert result.persisted is True
+
+
+@pytest.mark.anyio
+async def test_managed는_느린DB동안_scope없는_broad_flag를노출하지않는다(store):
+    run_id = store.create_run("{}", "mock")
+    pos = TradePosition("005930", "삼성전자", "kospi",
+                        PositionState.ENTERED, 100_050, 9, 100_050, False,
+                        entered_at=T0)
+    pos_id = store.create_position(run_id, pos)
+    broker = FakeBroker(balances=[Balance((_bpos(qty=9),), 900_000, 0)])
+    service = _service(broker, store, Cal([True]))
+    service._run_id = run_id
+    service.is_running = lambda: True
+    entered, release = threading.Event(), threading.Event()
+
+    def slow_persist(*_args):
+        entered.set()
+        release.wait(timeout=2)
+
+    service._store.record_stop_request = slow_persist
+    from app.domain.trading.models import LiquidationTarget
+    task = asyncio.create_task(service.request_managed_liquidation(
+        "slow_managed", (LiquidationTarget(pos_id, "005930", 9),)))
+    for _ in range(300):
+        if entered.is_set():
+            break
+        await asyncio.sleep(0.001)
+    assert entered.is_set()
+    assert service._managed_liquidation_intent is None
+    assert service.stop_requested() is None
+    release.set()
+    result = await task
+    assert result.status == "accepted"
+    assert service._managed_liquidation_intent == "slow_managed"
+    assert service.stop_requested() is StopMode.LIQUIDATE_ALL
+
+
+@pytest.mark.anyio
+async def test_managed_persistence대기중취소는_DB결과회수후_scope와mode를맞춘다(store):
+    run_id = store.create_run("{}", "mock")
+    pos = TradePosition("005930", "삼성전자", "kospi",
+                        PositionState.ENTERED, 100_050, 9, 100_050, False,
+                        entered_at=T0)
+    pos_id = store.create_position(run_id, pos)
+    broker = FakeBroker(balances=[Balance((_bpos(qty=9),), 900_000, 0)])
+    service = _service(broker, store, Cal([True]))
+    service._run_id = run_id
+    service.is_running = lambda: True
+    entered, release = threading.Event(), threading.Event()
+
+    original_persist = service._store.record_stop_request
+
+    def slow_persist(*args):
+        entered.set()
+        release.wait(timeout=2)
+        original_persist(*args)
+
+    service._store.record_stop_request = slow_persist
+    from app.domain.trading.models import LiquidationTarget
+    task = asyncio.create_task(service.request_managed_liquidation(
+        "cancel_managed", (LiquidationTarget(pos_id, "005930", 9),)))
+    for _ in range(300):
+        if entered.is_set():
+            break
+        await asyncio.sleep(0.001)
+    assert entered.is_set()
+    task.cancel()
+    await asyncio.sleep(0)
+    task.cancel()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert service._managed_liquidation_intent == "cancel_managed"
+    assert service.stop_requested() is StopMode.LIQUIDATE_ALL
+    assert store.latest_run()["kill_switch_mode"] == "liquidate_all"
+
+
+@pytest.mark.anyio
+async def test_managed_double_cancel_DB실패는_scope_mode없이결과를회수한다(store):
+    run_id = store.create_run("{}", "mock")
+    pos = TradePosition("005930", "삼성전자", "kospi",
+                        PositionState.ENTERED, 100_050, 9, 100_050, False,
+                        entered_at=T0)
+    pos_id = store.create_position(run_id, pos)
+    broker = FakeBroker(balances=[Balance((_bpos(qty=9),), 900_000, 0)])
+    service = _service(broker, store, Cal([True]))
+    service._run_id = run_id
+    service.is_running = lambda: True
+    entered, release = threading.Event(), threading.Event()
+
+    def slow_failure(*_args):
+        entered.set()
+        release.wait(timeout=2)
+        raise RuntimeError("db down")
+
+    service._store.record_stop_request = slow_failure
+    from app.domain.trading.models import LiquidationTarget
+    task = asyncio.create_task(service.request_managed_liquidation(
+        "double_fail", (LiquidationTarget(pos_id, "005930", 9),)))
+    for _ in range(300):
+        if entered.is_set():
+            break
+        await asyncio.sleep(0.001)
+    assert entered.is_set()
+    task.cancel()
+    await asyncio.sleep(0)
+    task.cancel()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert service._managed_liquidation_intent is None
+    assert service.stop_requested() is None
+    assert store.latest_run()["kill_switch_mode"] is None
+
+
+@pytest.mark.anyio
+async def test_managed_ABA는_A에만영속하고_B에scope_flag를게시하지않는다(store):
+    run_a = store.create_run("{}", "mock")
+    pos = TradePosition("005930", "삼성전자", "kospi",
+                        PositionState.ENTERED, 100_050, 9, 100_050, False,
+                        entered_at=T0)
+    pos_id = store.create_position(run_a, pos)
+    run_b = store.create_run("{}", "mock")
+    broker = FakeBroker(balances=[Balance((_bpos(qty=9),), 900_000, 0)])
+    service = _service(broker, store, Cal([True]))
+    service._run_id = run_a
+    service.is_running = lambda: True
+    entered, release = threading.Event(), threading.Event()
+    original_persist = service._store.record_stop_request
+
+    def slow_persist(*args):
+        entered.set()
+        release.wait(timeout=2)
+        original_persist(*args)
+
+    service._store.record_stop_request = slow_persist
+    from app.domain.trading.models import LiquidationTarget
+    task = asyncio.create_task(service.request_managed_liquidation(
+        "aba_intent", (LiquidationTarget(pos_id, "005930", 9),)))
+    for _ in range(300):
+        if entered.is_set():
+            break
+        await asyncio.sleep(0.001)
+    assert entered.is_set()
+    service._run_id = run_b
+    release.set()
+    result = await task
+    assert result.status == "needs_attention"
+    assert "changed/ended" in result.warning
+    assert service._managed_liquidation_intent is None
+    assert service.stop_requested() is None
+    with store._sessions() as session:
+        assert session.get(TradeRunRow, run_a).kill_switch_mode == "liquidate_all"
+        assert session.get(TradeRunRow, run_b).kill_switch_mode is None
+
+
+@pytest.mark.anyio
+async def test_managed_DB대기중_run종료면_terminal만기억한다(store):
+    run_id = store.create_run("{}", "mock")
+    pos = TradePosition("005930", "삼성전자", "kospi",
+                        PositionState.ENTERED, 100_050, 9, 100_050, False,
+                        entered_at=T0)
+    pos_id = store.create_position(run_id, pos)
+    broker = FakeBroker(balances=[Balance((_bpos(qty=9),), 900_000, 0)])
+    service = _service(broker, store, Cal([True]))
+    service._run_id = run_id
+    running = True
+    service.is_running = lambda: running
+    entered, release = threading.Event(), threading.Event()
+    original_persist = service._store.record_stop_request
+
+    def slow_persist(*args):
+        entered.set()
+        release.wait(timeout=2)
+        original_persist(*args)
+
+    service._store.record_stop_request = slow_persist
+    from app.domain.trading.models import LiquidationTarget
+    target = LiquidationTarget(pos_id, "005930", 9)
+    task = asyncio.create_task(service.request_managed_liquidation(
+        "ended_managed", (target,)))
+    for _ in range(300):
+        if entered.is_set():
+            break
+        await asyncio.sleep(0.001)
+    assert entered.is_set()
+    running = False
+    release.set()
+    result = await task
+    assert result.status == "needs_attention"
+    assert "changed/ended" in result.warning
+    assert service._managed_liquidation_intent is None
+    assert service.stop_requested() is None
+    assert await service.request_managed_liquidation(
+        "ended_managed", (target,)) == result
+
+
+@pytest.mark.anyio
+async def test_managed취소와_run종료경합도_terminal저장후_cancel전파한다(store):
+    run_id = store.create_run("{}", "mock")
+    pos = TradePosition("005930", "삼성전자", "kospi",
+                        PositionState.ENTERED, 100_050, 9, 100_050, False,
+                        entered_at=T0)
+    pos_id = store.create_position(run_id, pos)
+    broker = FakeBroker(balances=[Balance((_bpos(qty=9),), 900_000, 0)])
+    service = _service(broker, store, Cal([True]))
+    service._run_id = run_id
+    running = True
+    service.is_running = lambda: running
+    entered, release = threading.Event(), threading.Event()
+    original_persist = service._store.record_stop_request
+
+    def slow_persist(*args):
+        entered.set()
+        release.wait(timeout=2)
+        original_persist(*args)
+
+    service._store.record_stop_request = slow_persist
+    from app.domain.trading.models import LiquidationTarget
+    target = LiquidationTarget(pos_id, "005930", 9)
+    task = asyncio.create_task(service.request_managed_liquidation(
+        "cancel_ended", (target,)))
+    for _ in range(300):
+        if entered.is_set():
+            break
+        await asyncio.sleep(0.001)
+    assert entered.is_set()
+    running = False
+    task.cancel()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    cached = await service.request_managed_liquidation(
+        "cancel_ended", (target,))
+    assert cached.status == "needs_attention"
+    assert service._managed_liquidation_intent is None
+    assert service.stop_requested() is None
+
+
+@pytest.mark.anyio
+async def test_managed는_거래정지와_TOCTOU수량변화를_주문전차단한다(store):
+    run_id = store.create_run(CFG.to_json(), "mock")
+    pos = TradePosition("005930", "삼성전자", "kospi",
+                        PositionState.ENTERED, 100_050, 9, 100_050, False,
+                        entered_at=T0)
+    pos_id = store.create_position(run_id, pos)
+    broker = FakeBroker(balances=[Balance((_bpos(qty=9),), 900_000, 0)])
+    halted = _service(broker, store, Cal([True]))
+    halted._run_id = run_id
+    halted.is_running = lambda: True
+    halted._store.instrument_state = lambda _symbol: "거래정지"
+    from app.domain.trading.models import LiquidationTarget
+    target = LiquidationTarget(pos_id, "005930", 9)
+    result = await halted.request_managed_liquidation("halted", (target,))
+    assert result.status == "needs_attention"
+    assert broker.placed == []
+
+    store.instrument_state = lambda _symbol: None
+    changed = _service(broker, store, Cal([True]))
+    changed._managed_liquidation_targets = {pos_id: target}
+    store.save_position_snapshot(
+        pos_id, TradePosition("005930", "삼성전자", "kospi",
+                              PositionState.ENTERED, 100_050, 8, 100_050,
+                              False, entered_at=T0))
+    with pytest.raises(RuntimeError, match="target changed"):
+        changed._load_managed_entered()
 
 
 @pytest.fixture
@@ -350,6 +786,80 @@ async def test_킬스위치는_미체결_청산을_종결까지_추적한다(sto
     rows, _ = store.open_positions()
     assert rows == []  # CLOSED 종결 후에만 반환
     assert store.latest_run()["status"] == "stopped"
+
+
+@pytest.mark.anyio
+async def test_managed청산은_첫SELL후_preflight재호출없이_pending을_terminal까지_추적한다(
+        store):
+    run_id = store.create_run("{}")
+    pos = TradePosition("005930", "삼성전자", "kospi",
+                        PositionState.ENTERED, 100_000, 9, 100_000, False,
+                        entered_at=T0)
+    pos_id = store.create_position(run_id, pos)
+    broker = FakeBroker(
+        open_orders=[9, 9, None],
+        balances=[Balance((), 0, 0)])
+    service = _service(broker, store, calendar=Cal([True] * 20), latest=None)
+    service._on_accepted()
+    service._run_id = run_id
+    from app.domain.trading.models import LiquidationTarget
+    service._managed_liquidation_intent = "managed_terminal"
+    service._managed_liquidation_targets = {
+        pos_id: LiquidationTarget(pos_id, "005930", 9)}
+    await service._liquidate_all(T0)
+    sells = [order for order in broker.placed
+             if order.side is OrderSide.SELL]
+    assert len(sells) == 1
+    result = await service.reconcile_control_intent("managed_terminal")
+    assert result.status == "succeeded"
+    cached = await service.request_managed_liquidation(
+        "managed_terminal",
+        tuple(service._managed_liquidation_targets.values()))
+    assert cached == result
+
+
+@pytest.mark.anyio
+async def test_managed청산은_장마감잔량을_EXIT_FAILED와_terminal결과로남긴다(store):
+    run_id = store.create_run("{}")
+    pos = TradePosition("005930", "삼성전자", "kospi",
+                        PositionState.ENTERED, 100_000, 9, 100_000, False,
+                        entered_at=T0)
+    pos_id = store.create_position(run_id, pos)
+    broker = FakeBroker(open_orders=[9, 9, 9],
+                        balances=[Balance((_bpos(qty=9),), 0, 0)])
+    service = _service(broker, store, calendar=Cal([False]), latest=None)
+    service._on_accepted()
+    service._run_id = run_id
+    from app.domain.trading.models import LiquidationTarget
+    service._managed_liquidation_intent = "managed_close"
+    service._managed_liquidation_targets = {
+        pos_id: LiquidationTarget(pos_id, "005930", 9)}
+    await service._liquidate_all(T0)
+    result = await service.reconcile_control_intent("managed_close")
+    assert result.status == "needs_attention"
+    persisted = store.get_position(pos_id)
+    assert persisted.state is PositionState.EXIT_FAILED
+
+
+def test_새run은_managed_scope만_clear하고_REST_broad는_전체를읽는다(store):
+    run_id = store.create_run("{}")
+    first = TradePosition("005930", "삼성전자", "kospi",
+                          PositionState.ENTERED, 100_000, 3, 100_000, False,
+                          entered_at=T0)
+    second = TradePosition("000660", "SK하이닉스", "kospi",
+                           PositionState.ENTERED, 200_000, 2, 200_000, False,
+                           entered_at=T0)
+    first_id = store.create_position(run_id, first)
+    store.create_position(run_id, second)
+    service = _service(FakeBroker(), store)
+    from app.domain.trading.models import LiquidationTarget
+    service._managed_liquidation_intent = "old"
+    service._managed_liquidation_targets = {
+        first_id: LiquidationTarget(first_id, "005930", 3)}
+    service._on_accepted()
+    assert service._managed_liquidation_intent is None
+    assert {pos.symbol for pos in service._load_entered()} == {
+        "005930", "000660"}
 
 
 @pytest.mark.anyio

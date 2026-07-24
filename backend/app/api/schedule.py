@@ -22,6 +22,16 @@ def _require_scheduler(request: Request):
     return scheduler
 
 
+def _control(request: Request):
+    control = getattr(request.app.state, "operations_control", None)
+    if control is None:
+        raise HTTPException(status_code=503,
+                            detail="operations control is unavailable")
+    if control.scheduler is None:
+        raise HTTPException(status_code=503, detail="scheduler is disabled")
+    return control
+
+
 @router.get("/schedule/status")
 async def schedule_status(request: Request) -> dict:
     scheduler = getattr(request.app.state, "scheduler", None)
@@ -41,13 +51,11 @@ async def schedule_status(request: Request) -> dict:
 
 @router.post("/schedule/pause", dependencies=[Depends(require_trade_token)])
 async def schedule_pause(request: Request) -> dict:
-    scheduler = _require_scheduler(request)
-    scheduler.pause()
+    await _control(request).pause_scheduler()
     return {"paused": True}
 
 
 @router.post("/schedule/resume", dependencies=[Depends(require_trade_token)])
 async def schedule_resume(request: Request) -> dict:
-    scheduler = _require_scheduler(request)
-    scheduler.resume()
+    await _control(request).resume_scheduler()
     return {"paused": False}

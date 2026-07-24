@@ -231,3 +231,177 @@ Task 1의 `InboundMessage`로 변환하거나 Bot API 실패를 안전하게 분
   correlation/owner는 `[A-Za-z0-9_-]{1,64}`로 통일했다.
 - timezone-aware 검증은 `telegram_common.py`로 이동해 세 저장소가 같은
   fail-fast 계약을 사용한다.
+
+## Task 4 — REST·Telegram 공용 OperationsControl과 계좌 snapshot
+
+### 요청과 기존 상태
+
+REST 라우터 안에 있던 scheduler 제어와 trading 정지 진입점을 Telegram도
+HTTP 자기 호출 없이 재사용할 수 있는 공용 유스케이스로 분리했다. 기존에는
+계좌 예수금과 잔고를 하나의 기준 시각으로 조회하거나, 당일 실현손익의
+KST 귀속일·정확도·부분 실패를 함께 표현하는 계약이 없었다.
+
+### 설계 판단
+
+- `OperationsControl`은 FastAPI와 HTTP 예외를 알지 않는다. scheduler 상태
+  지문, pause/resume, 계좌·포지션 snapshot, 멱등 stop, 확인된 관리 포지션
+  청산만 조정한다. `/resume`은 scheduler의 인메모리 pause만 해제하며
+  trading kill-switch에는 접근하지 않는다.
+- 예수금과 잔고는 `asyncio.gather`로 병렬 조회한다. 같은 명령의 진행 중
+  task와 10초 캐시를 공유하며, digest는 5초 timeout을 적용한다. 일부 소스
+  실패는 `failed_fields`에 남기고 성공한 필드를 폐기하지 않는다. 총
+  수익률은 검증된 분모가 없으므로 항상 `None`이다. 실현손익은 현재 run
+  environment와 KST 거래일로 집계하며, broker 체결 대사 표식이 아직 없어
+  `estimated`로 반환한다.
+- `LiquidationTarget`과 `LiquidationResult`는 trading domain이 소유한다.
+  확인 시점의 `(position_id, symbol, quantity)`와 실행 직전 DB snapshot이
+  다르면 발주하지 않고 `needs_attention`을 반환한다. 실행 수명 동안
+  `intent_id`를 보조 멱등 가드로 쓰며, durable SSOT는 Task 5 command
+  execution이다. broker 잔고·미체결 조회 실패나 잔량·미체결·미종결 DB
+  상태는 종목과 수동 조치를 포함한 `needs_attention`으로 보존한다.
+- target-confirmed 청산에서는 `_load_entered()`를 target ID로 제한한다.
+  미관리 broker 잔고는 청산 대상에 넣지 않고 `account_fully_empty=False`
+  및 경고로 노출한다. 기존 REST `mode=liquidate_all`은 현재 run
+  environment의 엔진 관리 포지션 전부를 대상으로 하는 기존 계약을
+  유지한다. Telegram 확인 경로만 고정 target snapshot을 사용한다.
+
+### 변경 위치
+
+- `backend/app/core/operations_control.py`: 공용 상태·계좌·제어 유스케이스
+- `backend/app/domain/trading/models.py`: 청산 target/result 값 객체
+- `backend/app/domain/trading/service.py`: intent 보조 가드, target 검증·대사
+- `backend/app/store/trading_store.py`: ID/환경 포지션 조회, KST 당일 실현손익
+- `backend/app/api/schedule.py`, `backend/app/api/trade.py`: 공용 제어 호출과
+  기존 REST 응답·상태 계약 보존
+- `backend/tests/test_operations_control.py`: resume, 병렬 계좌 부분 성공,
+  관리·미관리 preview 계약
+
+### 검증 결과
+
+- RED: `uv run pytest tests/test_operations_control.py -q`가
+  `ModuleNotFoundError: app.core.operations_control`로 실패함을 확인했다.
+- focused: operations/schedule/trade/trading service 45건 통과.
+- 전체: `uv run pytest -q` 결과 888 passed, 11 deselected, 기존
+  StarletteDeprecationWarning 1건이다.
+- 실제 broker·키움 API와 운영 DB는 호출하지 않았다.
+
+### 공식 패널 수정
+
+- 빈 target은 성공 no-op으로 종결해 broad `LIQUIDATE_ALL`로 승격되지 않게
+  했다. 일반 `_load_entered()`의 managed 필터를 제거하고 명령 전용
+  `_load_managed_entered()`로 격리했다. 새 run 수락 시 이전 scope를 지워
+  이후 정상 감시와 기존 REST broad 청산에 영향이 남지 않는다.
+- managed 청산은 실행 중 run, 거래일·장중, 종목 거래정지, 확인 target의
+  ID·symbol·quantity, broker 잔고 수량을 발주 전에 검사한다. DB와 broker
+  수량은 symbol별로 합산해 정확히 같아야 하며, 동일 symbol 수동 잔고가
+  섞였다고 의심되면 보수적으로 거부한다. 기존 SELL 미체결도 symbol별
+  잔량을 합산하고 하나라도 있으면 `in_progress`로 반환해 중복 매도하지
+  않는다. 주문 직전 같은 preflight와 전용 loader가 TOCTOU 수량 변화를
+  다시 차단한다.
+- managed 요청은 협조적 stop 직후 terminal 실패로 오판하지 않고
+  `accepted`를 반환한다. idle, 장외, 거래정지, 대사 실패는 주문 0건과
+  구체적 `needs_attention`이다. 동시에 다른 intent가 active scope를
+  덮어쓰지 못한다.
+- intent ID는 1~64자 안전 문법과 256개 상한을 적용했다. async lock 아래
+  mode 충돌을 fail-loud로 판정하고 side effect 성공 뒤에만 applied map에
+  남긴다. 예외·취소 전 applied로 오기록하지 않아 같은 intent 재시도가
+  가능하다. REST 임시 intent도 객체 메모리 주소 대신 난수 128비트를 쓴다.
+- lifespan이 `OperationsControl`을 한 번만 만들고 REST와 후속 Telegram이
+  같은 cache/single-flight를 공유한다. 라우터 요청별 fallback은 제거했고
+  조립 누락은 503이다. digest는 fresh cache 또는 이미 실행 중인 interactive
+  조회만 공유하며 스스로 새 broker 호출을 시작하지 않는다.
+- `/trade/status`와 `/trade/positions` 무인증 계약은 Phase 7 배포 게이트의
+  기존 비범위 결정이다. Task 4는 응답 필드·인증 범위를 바꾸거나 계좌
+  snapshot을 이 두 endpoint에 추가하지 않았다. 기존 API 계약 테스트를
+  그대로 통과시켜 노출 확대가 없음을 확인했다.
+- 공식 패널 수정 후 focused 53건, 전체 896건 통과, 11건 live deselect와
+  기존 Starlette deprecation warning 1건이다.
+
+### 공식 패널 재검토 수정
+
+- full managed preflight는 자체 첫 SELL 전에 한 번만 수행한다. 청산 loop는
+  이후 full preflight를 반복하지 않고 monitor가 소유한 pending을
+  `CLOSED`/`EXIT_FAILED`까지 poll한다. 따라서 첫 자체 SELL이 다음 loop의
+  “기존 SELL” 검사에 걸려 감시가 조기 종료되지 않으며, 부분 terminal target이
+  생겨도 남은 target/pending을 계속 처리한다.
+- 최초 기존 SELL은 target symbol만 검사한다. 비대상 symbol의 SELL은 이
+  명령을 막지 않는다. target SELL은 이 프로세스가 소유한 주문이라는 durable
+  근거가 없으므로 `in_progress`로 가장하지 않고 주문번호와 symbol별 합산
+  잔량을 포함한 terminal `needs_attention`으로 반환하며 신규 주문은 0건이다.
+- `request_stop_durable()`은 `StopRequestResult(applied, persisted,
+  warning)`을 반환한다. DB 영속 실패를 삼키더라도 인메모리 stop이 적용됐고
+  durable 감사는 실패했다는 두 사실을 분리한다. 기존 호출자는 반환값을
+  무시할 수 있어 호환되며, 공용 제어/후속 worker는 `persisted=False`를
+  unknown/needs_attention 근거로 쓸 수 있다. managed 경로는 persistence
+  실패 시 scope/intent를 commit하지 않고 같은 event-loop turn에서
+  `STOP_NEW_ENTRIES`로 downgrade해 broad 청산 유출을 막는다.
+- active managed scope는 stop 영속 성공 뒤에만 commit한다. 완료 결과는
+  intent별 bounded(256) 메모리 map에 보존해 새 run이 active scope를
+  clear한 뒤에도 `reconcile_control_intent()`가 Task 5 worker에 terminal
+  결과를 넘길 수 있다. 프로세스 재기동 뒤에는 Task 5의 durable target과
+  broker 잔고·미체결·DB 상태로 재대사해야 하며, 이 태스크는 DB command
+  execution write를 추가하지 않는다.
+- managed 통합 테스트는 첫 SELL 1건, 다음 loop의 미체결 반복, 신규 SELL
+  없음, 후속 CLOSED terminal을 검증한다. 별도 장마감 시나리오는 broker
+  잔량을 `EXIT_FAILED`로 보정하고 terminal `needs_attention`을 보존한다.
+  새 run이 managed scope만 clear한 뒤 기존 REST broad loader가 두 관리
+  포지션 모두를 반환하는 회귀도 고정했다.
+- 재검토 수정 후 focused 58건, 전체 901건 통과, 11건 live deselect와 기존
+  warning 1건이다.
+
+### 마지막 Important 수정
+
+- 같은 managed intent의 terminal 결과가 bounded cache에 있으면 active
+  scope 판정보다 먼저 반환한다. 따라서 Task 5 worker와
+  `OperationsControl.liquidate_managed()`의 재조회가 다음 run에서도
+  `unknown`/`in_progress`로 퇴행하지 않고 기존 terminal을 받는다.
+- 일반 `request_stop_durable()`은 기존 계약대로 DB await 전에 인메모리
+  stop을 즉시 적용한다. 느린 store barrier 테스트에서 persistence task가
+  대기 중이어도 `STOP_NEW_ENTRIES`가 보임을 확인했다.
+- managed는 `_persist_stop_request()`로 DB만 먼저 영속한다. 성공 뒤 같은
+  event-loop turn에서 scope/targets를 설치하고 마지막에
+  `request_stop(LIQUIDATE_ALL)`을 호출한다. 따라서 느린 DB 동안 scope 없는
+  broad flag가 없고, 영속 실패·await 취소 시 scope와 mode가 모두 비어 있다.
+  다만 `asyncio.to_thread` 취소는 이미 시작된 DB thread 자체를 중단하지
+  못하므로 DB에는 의도가 기록됐지만 caller는 결과를 못 받은 ambiguity가
+  가능하다. 이 경우 Task 5 durable command target과 broker 주문·잔고·DB
+  상태를 대사한 뒤에만 재실행한다.
+- 마지막 수정 후 focused 62건, 전체 905건 통과, 11건 live deselect와 기존
+  warning 1건이다.
+
+### 취소·run 종료 경합 최종 수정
+
+- managed persistence를 별도 asyncio task로 만들고 shield한다. caller가
+  취소돼도 이미 시작된 `to_thread`의 성공/실패 결과를 lock 안에서 끝까지
+  회수한다. 영속 성공이고 run이 살아 있으면 먼저 scope/targets를 게시하고
+  마지막에 `LIQUIDATE_ALL` flag를 await 없이 설정한 뒤 cancellation을 다시
+  전파한다. 영속 실패면 scope/mode 없이 취소를 전파한다.
+- persistence barrier 동안 run이 자연 종료될 수 있으므로 영속 성공 직후
+  `is_running()`을 다시 확인한다. 종료됐다면 active scope와 liquidation
+  flag를 게시하지 않고 `run ended before liquidation started` terminal
+  `needs_attention`을 bounded 결과에 저장한다. 정상 반환과 caller 취소
+  양쪽에서 이후 동일 intent 조회가 이 terminal을 받는다.
+- barrier 테스트는 DB 행의 `kill_switch_mode`까지 확인한다. 취소+DB 성공+
+  run 생존은 DB와 active scope/mode가 함께 존재하고, run 종료는 DB 의도만
+  남되 active scope/mode 없이 terminal cache가 존재한다. 이는 확인과
+  실행 사이 run 수명 경합을 성공으로 가장하지 않는 계약이다.
+- 최종 focused 64건, 전체 907건 통과, 11건 live deselect와 기존 warning
+  1건이다.
+
+### ABA·반복 취소 최종 수정
+
+- managed lock 진입 때 `expected_run_id`를 캡처한다. preflight 뒤와 DB 결과
+  회수 뒤 모두 `is_running()` 및 현재 run ID 동일성을 검사한다. persistence
+  helper도 현재 필드를 다시 읽지 않고 캡처한 ID를 명시적으로 받는다.
+  A persistence 대기 중 A가 끝나고 B가 시작되면 DB 의도는 A에만 기록되고,
+  B에는 scope·flag를 게시하지 않으며 terminal `run changed/ended`
+  needs_attention을 cache한다.
+- shielded persistence를 기다리는 동안 두 번째 이상의 cancellation이 와도
+  `Task.uncancel()`로 각 요청을 명시적으로 소진하고 shield loop를 반복한다.
+  DB task가 terminal이 된 뒤 성공/실패 및 run identity에 맞게 메모리 상태를
+  확정하고, cancellation 발생 사실이 있으면 마지막에 한 번 다시 전파한다.
+- double-cancel 성공 테스트는 A의 DB mode와 active managed scope/mode가 함께
+  게시됐음을, 실패 테스트는 DB mode·scope·mode가 모두 없음을 확인한다.
+  ABA barrier 테스트는 A 행만 `liquidate_all`, B 행은 NULL임을 직접 검증한다.
+- 최종 focused 66건, 전체 909건 통과, 11건 live deselect와 기존 warning
+  1건이다.
