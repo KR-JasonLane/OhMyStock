@@ -16,15 +16,18 @@
 (마이그레이션 0012 적용). 전체 782 passed.**
 
 **▶ 다음 작업(우선순위 순)**
-1. **Phase 8(텔레그램 봇) 구현 계획서 작성** — 스펙
-   `docs/specs/2026-07-24-phase8-telegram-bot-design.md` 작성 및 4인
-   리뷰 패널 최종 승인 완료(2026-07-24, Critical/Important 0).
+1. **Phase 8(텔레그램 봇) Task 1 구현 착수** — 스펙
+   `docs/specs/2026-07-24-phase8-telegram-bot-design.md`와 계획서
+   `docs/plans/2026-07-24-phase8-telegram-bot-plan.md` 모두 작성 및
+   4인 리뷰 패널 최종 승인 완료(2026-07-24, Critical/Important 0).
    확정 범위: 공식 Bot API 직접 호출, 백엔드 내장 서비스, 단일 운영자
    인증(복수 확장 가능), durable inbox/command intent/outbox,
    append-only operational events, 즉시 알림+16:10 다이제스트,
    상태·예수금·총자산·손익 조회, pause/stop과 확인형
-   resume/liquidate_all. 다음 절차: 계획서 → 4패널 → 태스크별
-   구현+회고+패널.
+   resume/liquidate_all. 구현 순서: Task 1 순수 알림 모델·파서·인증·포맷
+   → Task 2 설정/Bot API → Task 3 영속 기반 → Task 4 공용 제어 →
+   Task 5 durable 명령 → Task 6 운영 이벤트 → Task 7 sender →
+   Task 8 다이제스트 → Task 9 lifespan → Task 10 수용·회고.
 2. **7b-⑤ 재부팅 캐치업 검증**(비거래일 가능 — 아래 절차). 세션이
    끊기므로 여유 있을 때.
 3. Phase 6 회고록 §3 7b 절 마무리 → Phase 6 종결.
