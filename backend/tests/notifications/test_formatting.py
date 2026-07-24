@@ -23,8 +23,11 @@ def test_헤더를_담을수없는_길이한도는_거부한다(limit: int):
         render_parts("message", "correlation", limit=limit)
 
 
-@pytest.mark.parametrize("correlation_id", ["", "event\nforged", "event\rforged"])
-def test_상관ID는_빈값이나_헤더를_변조하는_개행을_허용하지_않는다(
+@pytest.mark.parametrize(
+    "correlation_id",
+    ["", "event\nforged", "event\rforged", "event:7", "x" * 65],
+)
+def test_상관ID는_안전문자와_64자_범위만_허용한다(
     correlation_id: str,
 ):
     with pytest.raises(ValueError, match="correlation_id"):

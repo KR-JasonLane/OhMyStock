@@ -1,5 +1,7 @@
 """동적 알림 내용을 Telegram 마크업 없이 안전하게 분할한다."""
 
+import re
+
 from app.domain.notifications.models import RenderedPart
 
 
@@ -7,8 +9,8 @@ def render_parts(
     message: str, correlation_id: str, limit: int = 4000
 ) -> tuple[RenderedPart, ...]:
     """각 조각에 안정적인 상관 ID와 순번을 붙여 plain text로 반환한다."""
-    if not correlation_id or "\n" in correlation_id or "\r" in correlation_id:
-        raise ValueError("correlation_id must be non-empty and single-line")
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", correlation_id):
+        raise ValueError("correlation_id must contain 1 to 64 safe characters")
 
     total = 1
     while True:

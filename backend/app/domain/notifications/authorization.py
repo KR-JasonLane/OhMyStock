@@ -10,7 +10,7 @@ def is_authorized(
 ) -> bool:
     return (
         message.chat_type == "private"
-        and not message.forwarded
+        and message.forwarded is False
         and any(
             operator.user_id == message.user_id and operator.chat_id == message.chat_id
             for operator in operators
