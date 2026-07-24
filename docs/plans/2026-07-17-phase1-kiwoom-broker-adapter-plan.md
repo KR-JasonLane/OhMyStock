@@ -25,7 +25,7 @@ respx(HTTP 모킹, dev 추가) + tzdata(KST, 신규 추가).
 - 라이브 스모크는 기본 실행에서 제외(`addopts -m "not live"`), 명시 실행만
   (`uv run pytest -m live`). 모의서버(`KIWOOM_MOCK=true`) 대상으로만 실행.
 - 태스크 완료 후 **4-에이전트 리뷰 패널**(senior-developer, senior-trader,
-  architecture-expert, security-expert — `.claude/agents/`) 전원 통과 필수 (코디네이터가
+  architecture-expert, security-expert — `.codex/agents/`) 전원 통과 필수 (코디네이터가
   디스패치; 구현자는 신경 쓰지 않는다).
 - 커밋 메시지는 각 태스크 명시된 것 그대로, 트레일러/AI 흔적 금지.
 - Phase 0 테스트 9개 회귀 유지 — 전체 스위트는 항상 그린.
@@ -1472,7 +1472,7 @@ git commit -m "feat(backend): broker lifecycle in app lifespan"
 ### Task 9: 실측 팩트 반영 + 회고록 + STATUS 핸드오프
 
 **Files:**
-- Modify: `CLAUDE.md` §5 (라이브 스모크로 실측 확인/정정된 팩트 반영)
+- Modify: `docs/reference/project-context.md` §5 (라이브 스모크로 실측 확인/정정된 팩트 반영)
 - Create: `docs/retrospectives/2026-07-17-phase1-kiwoom-broker-adapter.md`
 - Modify: `docs/STATUS.md` (Phase 2 핸드오프)
 - Modify: `docs/specs/2026-07-17-phase1-kiwoom-broker-adapter-design.md`
@@ -1490,7 +1490,7 @@ uv run pytest -m live -v                # 라이브 스모크 전체 그린
 ```
 하나라도 실패하면 완료 주장 금지 — 수정 후 재검증.
 
-- [ ] **Step 2: CLAUDE.md §5 갱신**
+- [ ] **Step 2: docs/reference/project-context.md §5 갱신**
 
 라이브 스모크에서 실측된 사실(토큰 응답 필드, TR 요청/응답 필드명, 레이트리밋 체감
 수치, 429 응답 형태 — Task 3~7 보고서의 "실측 정정" 내역)을 §5에 반영. 비공식 표기가
@@ -1511,6 +1511,6 @@ Phase 1 완료 표시. spec §5 표의 실측 상태도 이 시점에 함께 갱
 - [ ] **Step 5: 커밋**
 
 ```bash
-git add CLAUDE.md docs/retrospectives/2026-07-17-phase1-kiwoom-broker-adapter.md docs/STATUS.md docs/specs/2026-07-17-phase1-kiwoom-broker-adapter-design.md
+git add docs/reference/project-context.md docs/retrospectives/2026-07-17-phase1-kiwoom-broker-adapter.md docs/STATUS.md docs/specs/2026-07-17-phase1-kiwoom-broker-adapter-design.md
 git commit -m "docs: phase 1 retrospective + verified kiwoom facts + status handoff"
 ```

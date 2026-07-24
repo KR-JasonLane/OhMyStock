@@ -980,7 +980,7 @@ git commit -m "feat(api): analysis service and /analyze endpoints"
 - [ ] **Step 2:** 라이브 스모크 2건 작성·실행(live 마커 — Ollama 1건: 실제 generate_json이 유효 JSON 반환; 네이버 1건: "코스피" 검색 ≥1건) → `p4-task-7-live.txt`. (이 스모크 테스트 파일 추가는 이 태스크의 커밋 범위)
 - [ ] **Step 3:** `docker compose build backend && docker compose up -d` + `alembic upgrade head`(0005 확인) → `p4-task-7-tables.txt`.
 - [ ] **Step 4:** 실데이터 end-to-end — 스코어링이 신선한 상태에서 `curl -X POST http://127.0.0.1:8000/analyze` → status 완주 관찰(traders 단계 소요 실측) → `GET /analyze/latest`로 최종 리스트·판정·사유 확인 → `p4-task-7-latest.json`. 스코어링이 낡았으면 게이트 실패를 증거로 캡처 후 재수집→재스코어링→재분석.
-- [ ] **Step 5:** 판정 품질 육안 검토(사유가 입력 데이터·뉴스를 실제로 인용하는가, 환각 수치 없는가) — 회고록에 소견 기록. STATUS/회고록/CLAUDE.md(실측 팩트) 갱신 → 문서 커밋(사용자 승인).
+- [ ] **Step 5:** 판정 품질 육안 검토(사유가 입력 데이터·뉴스를 실제로 인용하는가, 환각 수치 없는가) — 회고록에 소견 기록. STATUS/회고록/docs/reference/project-context.md(실측 팩트) 갱신 → 문서 커밋(사용자 승인).
 
 ---
 

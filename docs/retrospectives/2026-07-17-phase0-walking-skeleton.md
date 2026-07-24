@@ -6,14 +6,14 @@
   `docs/plans/2026-07-14-phase0-walking-skeleton-plan.md`(구현 계획서, Task 1~10)
 - **커밋 범위:** `27635a8` ~ `aa61b1e` (+ 본 문서를 만드는 이 커밋)
 
-이 문서는 비전문가도 "무엇을 왜 어떻게 했는지" 따라올 수 있도록 CLAUDE.md 규칙 4에
+이 문서는 비전문가도 "무엇을 왜 어떻게 했는지" 따라올 수 있도록 docs/reference/project-context.md 규칙 4에
 따라 작성한다.
 
 ---
 
 ## 1. 무엇이 요청되었나
 
-OhMyStock은 한국 주식을 자동으로 매매하는 시스템이다(CLAUDE.md §1). 본격적인 기능
+OhMyStock은 한국 주식을 자동으로 매매하는 시스템이다(docs/reference/project-context.md §1). 본격적인 기능
 (데이터 수집·스코어링·AI 분석·매매)을 만들기 전에, **아키텍처 전체를 관통하는
 최소한의 "워킹 스켈레톤"**을 먼저 만들어 아키텍처 리스크를 제거하기로 했다
 (spec §2). 요구된 범위는 다음과 같다.
@@ -35,7 +35,7 @@ Phase 0 범위 **밖**: 실제 키움 API 호출, 데이터 수집, 스코어링
 
 ## 2. 기존 코드는 어땠나
 
-작업 시작 시점의 레포는 **문서만 존재하는 빈 상태**였다: `CLAUDE.md`,
+작업 시작 시점의 레포는 **문서만 존재하는 빈 상태**였다: `docs/reference/project-context.md`,
 `docs/specs/2026-06-16-phase0-walking-skeleton-design.md`,
 `docs/plans/2026-07-14-phase0-walking-skeleton-plan.md`만 있었고, `backend/`,
 `frontend/`, `docker-compose.yml` 등 실행 가능한 코드는 전혀 없었다. Task 1의 첫
@@ -146,7 +146,7 @@ CSP에서 허용한다.
   `uvicorn app.main:create_app --factory`로 기동해 uvicorn이 워커마다 앱 인스턴스를
   새로 만들도록 한다(Dockerfile CMD). 이 패턴이 없으면 테스트마다 전역 상태가
   공유되거나, 환경변수 부재로 모듈 임포트 단계에서 죽는다.
-- **계층 구조 (`api/ core/ adapters/ domain/ store/`, CLAUDE.md §3).** `api/`는
+- **계층 구조 (`api/ core/ adapters/ domain/ store/`, docs/reference/project-context.md §3).** `api/`는
   전송 계층만(FastAPI 라우터), `core/`는 설정·로깅, `store/`는 영속성(SQLAlchemy),
   `adapters/`·`domain/`은 Phase 0에서 빈 스텁으로만 존재한다. 브로커(키움)는
   `adapters/`에 `BrokerPort` 인터페이스 뒤에 숨겨질 예정(Phase 1)이라, 추후 다른
@@ -184,7 +184,7 @@ CSP에서 허용한다.
   설치했다.
 - **Python 3.14 → 3.12 핀.** Task 1에서 `pyproject.toml`의
   `requires-python = ">=3.12"` 제약만으로는 `uv`가 최신 만족 버전인
-  **Python 3.14.6**을 받아왔다. 모든 테스트는 3.14.6에서도 통과했지만, CLAUDE.md
+  **Python 3.14.6**을 받아왔다. 모든 테스트는 3.14.6에서도 통과했지만, docs/reference/project-context.md
   §4의 툴링 기본값(Python 3.12)과 Task 6의 Docker 이미지(`python:3.12-slim`)에는
   맞지 않았다. `backend/.python-version`에 `3.12`를 명시해 `uv`가 정확히
   Python 3.12.13을 받도록 고정하고, 전체 스위트를 3.12에서 재검증했다(3 passed).
@@ -250,7 +250,7 @@ Task 10의 E2E 검증은 코디네이터가 직접 수행했고, 마지막 3개 
 - **Task 8:** `useBackendStatus` 훅의 fetch 경로에 `disposed` 가드가 없음(WS 경로에는
   있음); `onmessage`의 `JSON.parse`가 방어 처리 없음.
 - **Task 9:** `system-overview.md`에서 인용 표기 일부가 부정확함 — 현재
-  `(출처: CLAUDE.md §1)`로 표기된 곳(system-overview.md 24번째 줄)이 실제로는
+  `(출처: docs/reference/project-context.md §1)`로 표기된 곳(system-overview.md 24번째 줄)이 실제로는
   spec(`2026-06-16-phase0-walking-skeleton-design.md`) §1을 인용해야 함; §3 서술이
   "설정이 lifespan에서 설정된다"로 읽히나 실제로는 `create_app()` 호출
   (construction) 시점에 설정됨.

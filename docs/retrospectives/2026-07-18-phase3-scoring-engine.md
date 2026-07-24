@@ -1,7 +1,7 @@
 # Phase 3 회고록 — 스코어링 엔진 (2026-07-18)
 
 > 무엇을 요청받았고, 무엇을 만들었고, 어떤 문제를 어떻게 잡았는지 비전문가도
-> 따라올 수 있게 기록한다 (CLAUDE.md 규칙 4). 태스크별 증거는
+> 따라올 수 있게 기록한다 (docs/reference/project-context.md 규칙 4). 태스크별 증거는
 > `.superpowers/sdd/p3-task-N-*`, 진행 원장은 `.superpowers/sdd/progress.md`.
 
 ## 1. 무엇을 요청받았나

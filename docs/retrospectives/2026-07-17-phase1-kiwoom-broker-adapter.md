@@ -6,7 +6,7 @@
   `docs/plans/2026-07-17-phase1-kiwoom-broker-adapter-plan.md`(구현 계획서, Task 1~9)
 - **커밋 범위:** `d43af6b`(계획서) ~ `85eb66c`(Task 8) + 본 문서를 만드는 이 커밋(Task 9)
 
-이 문서는 비전문가도 "무엇을 왜 어떻게 했는지" 따라올 수 있도록 CLAUDE.md 규칙 4에
+이 문서는 비전문가도 "무엇을 왜 어떻게 했는지" 따라올 수 있도록 docs/reference/project-context.md 규칙 4에
 따라 작성한다.
 
 ---
@@ -25,9 +25,9 @@ Phase 0(워킹 스켈레톤)에서 확립한 계층 구조(`api/core/adapters/do
 소비자(트레이딩 엔진 등)와 함께 만드는 것이 합리적이므로 Phase 5 이후로 미뤘다(spec
 §2). 도메인(`domain/broker.py`)은 `BrokerPort`라는 포트 인터페이스만 알고, 키움의
 TR id·헤더·페이지네이션·레이트리밋·토큰 수명은 전부 `adapters/kiwoom/` 안에
-봉인한다는 것이 핵심 설계 결정이었다(spec §3, CLAUDE.md §3).
+봉인한다는 것이 핵심 설계 결정이었다(spec §3, docs/reference/project-context.md §3).
 
-또한 이번 Phase부터 **신규 프로세스 규칙(CLAUDE.md 규칙 8)**이 적용됐다: 태스크마다
+또한 이번 Phase부터 **신규 프로세스 규칙(docs/reference/project-context.md 규칙 8)**이 적용됐다: 태스크마다
 코딩 직후 4명의 리뷰 에이전트(senior-developer/senior-trader/architecture-expert/
 security-expert)가 diff를 검토하고, Critical/Important 지적사항은 수정·재검토를
 거쳐야 다음 태스크로 넘어갈 수 있다.
@@ -187,10 +187,10 @@ Phase에서 유일하게 4/4 전원이 1차에서 수정을 요구한 태스크)
   실패해도 DB 엔진 `dispose()`가 반드시 실행되도록(예외 안전성 보장, LIFO 순서).
 
 ### Task 9 — 실측 팩트 반영 + 회고록 + STATUS 핸드오프 (본 문서)
-**목적:** Task 1~8에서 라이브 스모크로 확인된 사실을 `CLAUDE.md` §5와 spec §5에
+**목적:** Task 1~8에서 라이브 스모크로 확인된 사실을 `docs/reference/project-context.md` §5와 spec §5에
 반영하고, Phase 전체를 회고록으로 정리하며, `docs/STATUS.md`를 Phase 2로
 핸드오프한다. 코드 변경 없음(문서 전용) — 4-에이전트 패널 대상 아님.
-**파일:** `CLAUDE.md`(§5 갱신), `docs/specs/2026-07-17-phase1-kiwoom-broker-adapter-design.md`
+**파일:** `docs/reference/project-context.md`(§5 갱신), `docs/specs/2026-07-17-phase1-kiwoom-broker-adapter-design.md`
 (§5 표 갱신), `docs/retrospectives/2026-07-17-phase1-kiwoom-broker-adapter.md`(본
 문서, 신규), `docs/STATUS.md`(갱신).
 **커밋:** `docs: phase 1 retrospective + verified kiwoom facts + status handoff`
@@ -202,7 +202,7 @@ Phase에서 유일하게 4/4 전원이 1차에서 수정을 요구한 태스크)
 서술이 있었으나, 진행 원장(`.superpowers/sdd/progress.md`)을 실측 대조한 결과는
 **7개(Task 2~8)에서 수정이 있었고, Task 1만 1차에서 4/4 전원 승인**이었다(위 각
 태스크 절 참고, 특히 Task 6도 dev/trader/arch 3인이 수정을 요구했다). 6개가 아니라
-7개라는 점을 여기서 정정한다(CLAUDE.md 규칙 3 — 근거 없이 넘겨짚지 않는다). 다만
+7개라는 점을 여기서 정정한다(docs/reference/project-context.md 규칙 3 — 근거 없이 넘겨짚지 않는다). 다만
 결론(패널 프로세스가 실질적으로 결함을 걸러냈다는 것) 자체는 오히려 더 강하게
 뒷받침된다 — 8개 중 7개, 87.5%에서 최소 1개 이상의 Critical/Important 수정이
 있었다.
@@ -296,7 +296,7 @@ Task 6에서 일봉 조회(`ka10081`)의 `base_dt`를 빈 문자열로 보내자
 `[1511:필수 입력 값이 존재하지 않습니다. 필수입력파라미터=base_dt]`로 거부했다.
 사전 리서치(비공식 자료)에는 이 제약이 없었다 — 라이브 스모크를 태스크
 직후 즉시 실행하는 원칙(§4)이 없었다면 훨씬 늦게 발견됐을 문제다. 오늘(KST)
-날짜를 `YYYYMMDD`로 채우도록 수정해 해결했다(CLAUDE.md §5에 반영).
+날짜를 `YYYYMMDD`로 채우도록 수정해 해결했다(docs/reference/project-context.md §5에 반영).
 
 ## 6. Phase 5 이관 결정 — 긴급 TR 우선순위·타임아웃 정책
 
@@ -335,7 +335,7 @@ Phase 1 전체에 걸쳐 라이브 스모크가 태스크마다 누적됐고, �
 - **라이브 스모크:** `56 collected / 50 deselected / 6 selected` → **6 passed**,
   0 failed(10.53s) — 대상은 실제 `mockapi.kiwoom.com`.
 
-라이브 실행으로 확정된 핵심 실측(전부 CLAUDE.md §5·spec §5에 반영):
+라이브 실행으로 확정된 핵심 실측(전부 docs/reference/project-context.md §5·spec §5에 반영):
 
 1. `expires_dt`는 `YYYYMMDDHHMMSS` 형식의 **절대 KST 시각**(상대 TTL 아님).
 2. TR 호출은 `POST /api/dostk/{category}` + `authorization`/`api-id` 헤더,

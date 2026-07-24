@@ -100,7 +100,7 @@ api/schedule.py            # GET /schedule/status, POST /schedule/{pause,resume}
   래치(재평가 없음). 단 전 후보가 **기술적 사유(시세/컨텍스트 부재 — 예:
   일시적 빈 quote 응답)로만 드롭**된 경우는 판정이 이뤄진 게 아니므로
   래치를 세팅하지 않고 재시도한다(트레이더 델타 — degenerate quote 전례,
-  CLAUDE.md §5). 이 변경은 TradingService 수정(P5 스펙 §6-3 정정)으로
+  docs/reference/project-context.md §5). 이 변경은 TradingService 수정(P5 스펙 §6-3 정정)으로
   Phase 6 태스크에 편입.
 - **(d) 트레이딩 완료 판정의 비대칭**: `failed`, 그리고 "장중 비정상 종료"는
   미완료 → 창 내 재기동(reconcile 복구 경로는 실증됨 — P5 회고 §2).
@@ -116,7 +116,7 @@ api/schedule.py            # GET /schedule/status, POST /schedule/{pause,resume}
   conflict_check가 처리(충돌 시 다음 틱 재시도).
 - **(f) 트레이딩 start 09:00 ↔ 진입 창 09:05의 5분 버퍼**: reconcile은
   DB read + 소수 포지션 조회 수준이고 주문/시세 TR은 별도 레이트리밋
-  버킷(실측 — CLAUDE.md §5)이라 충분(트레이더 패널 확인).
+  버킷(실측 — docs/reference/project-context.md §5)이라 충분(트레이더 패널 확인).
 
 ## 5. 스케줄러 동작
 
@@ -241,7 +241,7 @@ api/schedule.py            # GET /schedule/status, POST /schedule/{pause,resume}
   1회**(아키텍트 패널: 매 크래시 1회로 읽히면 30초 간격 무한 크래시-재기동
   루프). 소진 후에는 `/schedule/status`가 `dead`를 영속 표시하며, 회복
   경로는 컨테이너 재시작(§10-2)뿐이다.
-- **mock 일봉 지연**(CLAUDE.md §5): 스코어링 신선도 게이트 실패가 아침까지
+- **mock 일봉 지연**(docs/reference/project-context.md §5): 스코어링 신선도 게이트 실패가 아침까지
   반복 → 창 종료 시 `gave_up`(사유 `stale_gate`) — 게이트가 설계대로
   동작하는 것(버그 아님)을 사유 리터럴로 구분 가능하게 남긴다.
 - **셧다운 순서(아키텍트 패널)**: lifespan 종료 시 **스케줄러 태스크를 가장

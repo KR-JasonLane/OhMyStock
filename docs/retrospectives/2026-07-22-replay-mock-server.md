@@ -36,7 +36,7 @@ Phase 5 트레이딩 엔진의 최종 검증(Task 8)은 장중(09:05~09:30 진�
   limiter 공유), `backend/scripts/replay_coverage_gate.py`(§6 커버리지
   게이트 — 전체/윈도우(--anchor/--days) 2모드, 임계 크로스·결측 분
   통계·카테고리 실종 경고).
-- **실측 확정**(CLAUDE.md §5 반영, `.superpowers/sdd/replay-ka10080-*`):
+- **실측 확정**(docs/reference/project-context.md §5 반영, `.superpowers/sdd/replay-ka10080-*`):
   `POST /api/dostk/chart` body `{stk_cd, tic_scope:"1", upd_stkpc_tp:"1",
   base_dt}` 1차 수락, 리스트 키 `stk_min_pole_chart_qry`, `cntr_tm`
   YYYYMMDDHHMMSS, 가격 ±부호(파서 abs 필수), 내림차순, 900행/페이지,

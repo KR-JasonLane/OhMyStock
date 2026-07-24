@@ -11,14 +11,44 @@
 
 ## ▶ 여기서 재개 (다음 액션)
 
-**Phase 6(스케줄러) Task 1~6·7a·8 완료(2026-07-23) — 전부 4-에이전트
-패널 전원 승인·커밋. 스케줄러 프로덕션 가동 개시(17:23 KST, 0011 적용).
-Task 8 리플레이 실증 완료(같은 날 재기동 → caps 시딩·이중 진입 0·est_krw
-경로 — `.superpowers/sdd/p6-task-8-replay-restart.txt`). 남은 것:
-7b(실환경 관찰 — ② 오늘 19:00 수집 자동 트리거(워처 예약) ③ 금 아침
-분석→자동매매 ④ 분석 지연 유도 ⑤ 재부팅 캐치업) → 회고록 마무리
-(초안 작성됨: docs/retrospectives/2026-07-23-phase6-scheduler.md).
-전체 766 passed.**
+**Phase 6(스케줄러) 코드 전 태스크 완료(2026-07-24) — Task 1~6·7a·7c·
+7d·8 전부 4-에이전트 패널 전원 승인·커밋. 스케줄러 프로덕션 가동 중
+(마이그레이션 0012 적용). 전체 782 passed.**
+
+**▶ 다음 작업(우선순위 순)**
+1. **Phase 8(텔레그램 봇) 스펙 작성** — 브레인스토밍 결정 3건 확보
+   (사용자 확정 2026-07-24): **#41 기능 범위=알림+핵심 제어**(체결/청산
+   알림 + 원격 킬스위치·pause/resume·상태 조회 — 기존 API 표면 재사용),
+   **#42 알림 정책=등급제**(즉시: 진입/청산 체결·손절·킬스위치·
+   트레이딩 gave_up(감시 공백)·스케줄러 dead / 다이제스트: 장 마감 후
+   1회 그날 파이프라인·픽·손익 요약), **#43 구현=공식 Bot API 직접
+   호출**(httpx sendMessage/getUpdates 폴링 — 결정 #11 관례, 신규 의존성 0).
+   절차: 스펙(한국어, docs/specs/) → 4패널 스펙 리뷰 → 계획서 → 4패널 →
+   태스크별 구현+패널.
+2. **7b-⑤ 재부팅 캐치업 검증**(비거래일 가능 — 아래 절차). 세션이
+   끊기므로 여유 있을 때.
+3. Phase 6 회고록 §3 7b 절 마무리 → Phase 6 종결.
+
+**▶ 재부팅 검증 절차(7b-⑤ — 세션 종료 후 수행)**
+- 재부팅 전 스냅샷: `curl -s localhost:8000/schedule/status`,
+  `docker compose ps`, `psql ... "select id,status from trade_runs order
+  by id desc limit 3"`.
+- `sudo reboot` → 재접속 후 확인: ① `docker compose ps`로 db/backend
+  자동 복귀(restart: unless-stopped), ② `docker compose logs backend |
+  grep -E "alembic|scheduler enabled|stale trade run"` — 마이그레이션
+  재적용·스케줄러 기동·좀비 정정 로그, ③ `/schedule/status`가 그날
+  몫을 정확히 판정하는지(거래일이면 캐치업 트리거, 비거래일이면
+  not_trading_day 휴면), ④ trade_runs에 process_restart 정정 흔적.
+- 전제 확인됨: dockerd·ollama 모두 `systemctl is-enabled` = enabled.
+
+**▶ 7b 실환경 관찰 결과(2026-07-23~24 — 회고록 §3 상세)**
+- ✅ ① 재기동 후 스케줄러 기동, ✅ ② 19:00 수집 자동 트리거 + 자정
+  스코어링(reference 정합), ✅ ③④ 아침 자동매매 + 분석 지연 유도 →
+  **진입 래치 재시도 전이 실증**(P5 Task 2 정정의 실경로), ⏳ ⑤ 재부팅.
+- **관찰이 실결함 4건 적발**(전부 수정·커밋): 수집 완료 리터럴
+  불일치("done" vs "succeeded" — 무한 재트리거), 스코어링 창 vs 기준일
+  의미론 충돌(익일 진입 전부 거부 방향), 관측성 갭 3종(7c), 좀비 run
+  잔존+킬스위치 경합(7d).
 - 스펙 v2(결정 #37~#40, 233ce98) · 계획서 v2(3268744). P5 정정 2건 구현
   완료: Task 1 일일 한도 DB 시딩(ae92ef4 — est_krw+인덱스 0010),
   Task 2 진입 래치 3분기(7293bf0 — DropKind).
@@ -81,7 +111,7 @@ Task 8 리플레이 실증 완료(같은 날 재기동 → caps 시딩·이중 �
 >    추가 후. 012510 degenerate 대체 — 게이트의 "저유동 카테고리 실종"
 >    경고 해소) + 그 심볼 무거래 분 ka10095 프로브(직전가 유지 브리지
 >    가정 검증), ② 페이지 경계 중복/누락 표본 점검. ⚠️ 백엔드 컨테이너
->    가동 중이면 호스트 토큰 발급 금지(8005 — CLAUDE.md §5).
+>    가동 중이면 호스트 토큰 발급 금지(8005 — docs/reference/project-context.md §5).
 > 2. **(09:05~09:30 진입 창) Task 8 라이브 스모크** — 아래 1번 절차.
 > 3. **(장중/장후) R7 — 엔진 통합 예행**: 계획서 R7 절. 기동 절차:
 >    ⓐ 리플레이 서버(호스트): `cd backend && REPLAY_ANCHOR=2026-06-25T09:00:00
@@ -104,11 +134,11 @@ Task 8 리플레이 실증 완료(같은 날 재기동 → caps 시딩·이중 �
 > 1. **Task 8 — 라이브 스모크(장중, 코디네이터 직접).** 계획서 Task 8 절:
 >    사전 준비 — `.env`에 TRADE_* 한도 4종 추가(§8-1 all-or-nothing —
 >    미설정이면 엔진 미조립 503), docker 백엔드 기동, 수집→스코어링→분석이
->    최신 상태여야 진입 신선도 가드 통과(mock 일봉 지연 주의 — CLAUDE.md §5).
+>    최신 상태여야 진입 신선도 가드 통과(mock 일봉 지연 주의 — docs/reference/project-context.md §5).
 >    검증 항목: `/trade/start` 진입 1건 체결 → 감시 폴링 → **강제 손절
 >    (stop_loss_pct 타이트 설정) 시장가 청산 실증** → 킬스위치 2모드 실동작+
 >    감사 컬럼 → 재기동 reconcile 복구. 증거 `.superpowers/sdd/p5-task-8-*`.
->    실측 팩트 CLAUDE.md §5 반영 + Phase 5 회고록(규칙 4).
+>    실측 팩트 docs/reference/project-context.md §5 반영 + Phase 5 회고록(규칙 4).
 > 2. **리플레이 목 서버(장외 검증 하네스 — 사용자 제안 2026-07-22):** 스펙
 >    `docs/specs/2026-07-22-replay-mock-server-design.md`(5자 리뷰 승인) +
 >    계획서 `docs/plans/2026-07-22-replay-mock-server-plan.md`(R1~R7).
@@ -280,7 +310,7 @@ G2 주문TR 3종+레이트리밋 버킷, G3 kt00018 행단위(기존 #1), G4 모
   2. **백엔드 컨테이너 가동 중에는 호스트/별도 프로세스에서 키움 토큰을
      발급하지 말 것** — 앱키당 활성 토큰이 1개뿐인 것으로 추정되며(미확정,
      측정 정황 근거), 다른 프로세스의 토큰 발급이 백엔드의 진행 중인 토큰을
-     무효화해 `[8005]` 오류를 유발한 사고가 실제로 있었다(CLAUDE.md §5,
+     무효화해 `[8005]` 오류를 유발한 사고가 실제로 있었다(docs/reference/project-context.md §5,
      `docs/retrospectives/2026-07-17-phase2-data-collection-pipeline.md` §5).
 - ✅ **Phase 2 PRE-GATE 통과 (2026-07-17 실측):** `base_dt`는 조회 기준일 —
   비영업일은 직전 영업일 자동 보정(에러 없음), 과거 백필 가능, 미래는 오늘 클램프.
@@ -354,7 +384,7 @@ G2 주문TR 3종+레이트리밋 버킷, G3 kt00018 행단위(기존 #1), G4 모
 - Phase 1 산출물: `backend/app/domain/broker.py`(`BrokerPort` + 도메인 모델),
   `backend/app/adapters/kiwoom/`(`errors.py`/`auth.py`/`rate_limiter.py`/
   `client.py`/`broker.py`) — `app.state.broker`로 FastAPI lifespan에 통합됨.
-  단위 50 passed / 라이브 6 passed(모의서버 실호출), CLAUDE.md §5에 실측 팩트 반영
+  단위 50 passed / 라이브 6 passed(모의서버 실호출), docs/reference/project-context.md §5에 실측 팩트 반영
   완료.
 - Phase 1 회고록: `docs/retrospectives/2026-07-17-phase1-kiwoom-broker-adapter.md`
   (Task 1~9 각 목적·파일·커밋 SHA, **패널 리뷰 결과와 수정 내역**, 설계/패턴,
@@ -371,10 +401,10 @@ G2 주문TR 3종+레이트리밋 버킷, G3 kt00018 행단위(기존 #1), G4 모
 - 진행 원장: `.superpowers/sdd/progress.md` (태스크별 커밋 SHA + 리뷰 결과 + 보류
   Minor 목록).
 - 커밋 메시지는 사용자가 사전 일괄 승인함(계획서의 메시지 그대로).
-- ⚠️ 커밋 규칙(CLAUDE.md 규칙 7): 커밋 전 **메시지 전문 컨펌 필수**, 커밋 메시지에
+- ⚠️ 커밋 규칙(AGENTS.md 커밋 규칙): 커밋 전 **메시지 전문 컨펌 필수**, 커밋 메시지에
   **AI 흔적(Co-Authored-By 등) 금지**. 기존 이력도 재작성 완료(2026-07-14).
 
-새 세션에서 재개하려면 Claude에게 이렇게 말하세요:
+새 세션에서 재개하려면 Codex에게 이렇게 말하세요:
 > "`docs/STATUS.md` 읽고 재개 지점부터 계속해."
 
 ---
@@ -388,10 +418,10 @@ G2 주문TR 3종+레이트리밋 버킷, G3 kt00018 행단위(기존 #1), G4 모
 [x] Phase 0 구현 (워킹 스켈레톤) — Task 1~10 완료, E2E DoD 7개 항목 전부 통과 (2026-07-17)
 [x] Phase 0 회고록 (docs/retrospectives/2026-07-17-phase0-walking-skeleton.md)
 [x] Phase 1: 키움 브로커 어댑터 (모의투자) — Task 1~9 완료, 단위 50 passed +
-    라이브 6 passed, 실측 팩트 CLAUDE.md §5 반영 (2026-07-17)
+    라이브 6 passed, 실측 팩트 docs/reference/project-context.md §5 반영 (2026-07-17)
 [x] Phase 1 회고록 (docs/retrospectives/2026-07-17-phase1-kiwoom-broker-adapter.md)
 [x] Phase 2: 데이터 수집 파이프라인 — Task 1~7 완료, 풀 수집 실측(3,887종목/
-    67분/캔들 212만행) + 재실행 멱등 확인, 실측 팩트 CLAUDE.md §5 반영
+    67분/캔들 212만행) + 재실행 멱등 확인, 실측 팩트 docs/reference/project-context.md §5 반영
     (2026-07-17)
 [x] Phase 2 회고록 (docs/retrospectives/2026-07-17-phase2-data-collection-pipeline.md)
 [x] Phase 3 PRE-GATE 3건 라이브 프로브 실측 (2026-07-18)
@@ -414,8 +444,8 @@ G2 주문TR 3종+레이트리밋 버킷, G3 kt00018 행단위(기존 #1), G4 모
     G1 ka10095: 파이프구분자·100종목·호가5단계(결정#27 생존), G2 주문TR:
     trde_tp"0"/"3"·취소 orig_ord_no/cncl_qty·버킷분리(§11-5 해소), G3 kt00018:
     avg_price 원단위 정수(PRE-GATE#1 해소)·get_balance 파싱검증. 실측 팩트
-    CLAUDE.md §5 반영. 증거 .superpowers/sdd/p5-pregate-G{1,2,3}.txt
-[x] broker-api-expert 에이전트 추가 (CLAUDE.md 규칙 8-b) — 키움 명세 검증,
+    docs/reference/project-context.md §5 반영. 증거 .superpowers/sdd/p5-pregate-G{1,2,3}.txt
+[x] broker-api-expert 에이전트 추가 (AGENTS.md 구현 후 리뷰 규칙) — 키움 명세 검증,
     G1 파이프·G2 필드명 실측으로 문서 오류 2건 조기 차단
 [x] Phase 5: Task 1B market_calendar 확장 — 2026 공휴일 테이블(트레이더
     패널이 6/3 지방선거·7/17 제헌절 부활 누락 교차검증 포착) + is_trading_day/
@@ -431,42 +461,45 @@ G2 주문TR 3종+레이트리밋 버킷, G3 kt00018 행단위(기존 #1), G4 모
 ... 이후: Task 1 대칭 완성 → Task 2(config·models·costs) → 3(exit_rules·
     selection·ticks) → 4(OrderPort 어댑터) → 5(저장소) → 6a/6b/6c → 7 → 8
 ... Task 1B(캘린더)·1(베이스확장) → 순수 → 어댑터/저장 → 부수효과 → 통합 → 라이브
-... Phase 6~8 (CLAUDE.md 로드맵 참고)
+... Phase 6~8 (docs/reference/project-context.md 로드맵 참고)
 ```
 
 ## 결정 로그 (무엇을, 왜 정했나)
 
 | # | 결정 | 이유 | 기록 위치 |
 |---|---|---|---|
-| 1 | 자산군 = **한국 주식** | 프로젝트 목표가 국내 주식 시장 자동매매 | CLAUDE.md §1 |
-| 2 | 브로커 = **키움 REST API** (신) | 크로스플랫폼 REST. 구 OpenAPI+는 Windows 전용 OCX라 Electron과 비호환 | CLAUDE.md §5 |
-| 3 | 아키텍처 **A**: 컨테이너 FastAPI 백엔드 + 호스트 네이티브 Electron UI | AI/퀀트/텔레그램 단일 언어 통합. 엔진이 UI 종료와 무관하게 생존 | CLAUDE.md §3 |
-| 4 | 컨테이너 경계: 백엔드+DB는 docker-compose, **Electron은 호스트** | Electron은 데스크톱 GUI라 컨테이너 부적합(특히 Windows) | CLAUDE.md §3 |
-| 5 | DB = **PostgreSQL** (순수) | 멀티서비스 동시 접근. TimescaleDB는 추후 추가 가능 | CLAUDE.md §3 |
-| 6 | **모의투자 우선** (`mockapi.kiwoom.com`) | 안전: 자동매매를 실전 자금으로 먼저 만들지 않는다 | CLAUDE.md §4 |
+| 1 | 자산군 = **한국 주식** | 프로젝트 목표가 국내 주식 시장 자동매매 | docs/reference/project-context.md §1 |
+| 2 | 브로커 = **키움 REST API** (신) | 크로스플랫폼 REST. 구 OpenAPI+는 Windows 전용 OCX라 Electron과 비호환 | docs/reference/project-context.md §5 |
+| 3 | 아키텍처 **A**: 컨테이너 FastAPI 백엔드 + 호스트 네이티브 Electron UI | AI/퀀트/텔레그램 단일 언어 통합. 엔진이 UI 종료와 무관하게 생존 | docs/reference/project-context.md §3 |
+| 4 | 컨테이너 경계: 백엔드+DB는 docker-compose, **Electron은 호스트** | Electron은 데스크톱 GUI라 컨테이너 부적합(특히 Windows) | docs/reference/project-context.md §3 |
+| 5 | DB = **PostgreSQL** (순수) | 멀티서비스 동시 접근. TimescaleDB는 추후 추가 가능 | docs/reference/project-context.md §3 |
+| 6 | **모의투자 우선** (`mockapi.kiwoom.com`) | 안전: 자동매매를 실전 자금으로 먼저 만들지 않는다 | docs/reference/project-context.md §4 |
 | 7 | 첫 서브프로젝트 = **Phase 0 워킹 스켈레톤** | 기능 구현 전에 아키텍처를 end-to-end로 검증 | docs/specs/2026-06-16-phase0-walking-skeleton-design.md |
-| 8 | 문서는 **한국어**로 작성 (CLAUDE.md만 영어) | 사용자 지시. CLAUDE.md는 규칙 6에 따라 영어 유지 | CLAUDE.md §2-1 |
+| 8 | 문서는 **한국어**로 작성 | 사용자 지시. 지속 작업 규칙은 `AGENTS.md`에 유지 | `AGENTS.md` |
 | 9 | KB증권 API 전환 **기각**, 키움 유지 | KB증권 핀테크스토어는 법인/제휴사 전용(사업자번호 필수) — 개인 사용 불가. 개인용 대안은 KIS뿐 | 2026-07-17 리서치, P1 spec §1 |
 | 10 | P1 범위 = 인증+시세/캔들+계좌 ("필요한 것만 먼저") | 주문·실시간은 소비자(트레이딩 엔진)와 함께 Phase 5에서 | P1 spec §1 |
 | 11 | 키움 통신 코드 **직접 구현** (비공식 래퍼 미사용) | 개인 유지보수 의존 리스크 회피, 자체 레이트리밋·포트 설계 정합 (규칙 2) | P1 spec §1 |
-| 12 | 태스크마다 **4-에이전트 리뷰 패널** 전원 통과 후 진행 | 사용자 지시 — 개발자/트레이더/아키텍트/보안 관점 상시 검증 | CLAUDE.md 규칙 8, `.claude/agents/` |
+| 12 | 태스크마다 **4-에이전트 리뷰 패널** 전원 통과 후 진행 | 사용자 지시 — 개발자/트레이더/아키텍트/보안 관점 상시 검증 | AGENTS.md 구현 후 리뷰 규칙, `.codex/agents/` |
 | 13 | 4-에이전트 패널이 **8개 코드 태스크 중 7개**에서 Critical/Important 결함을 잡아 수정시킴(1개만 1차 전원승인) — 패널 프로세스(결정 #12)의 유효성이 실측으로 입증됨 | 락-sleep 전역 직렬화, 401/429 재시도 예산 혼합, silent-0 금액 필드 등 실제 결함을 코드 작성 직후 잡아냄 | `docs/retrospectives/2026-07-17-phase1-kiwoom-broker-adapter.md` §3 총괄 |
 | 14 | 트레이딩 엔진 관련 정책(긴급 TR 우선순위·타임아웃)은 **Phase 1에서 설계하지 않고 Phase 5로 이관** | Phase 1은 주문을 다루지 않아 "긴급"을 정의할 도메인 지식(소비자)이 없음 — 조기 설계는 추측 기반이 됨(YAGNI). 인프라(레이트리미터 락-바깥 sleep)는 이미 이를 지원하도록 준비됨 | `docs/retrospectives/2026-07-17-phase1-kiwoom-broker-adapter.md` §6 |
 | 15 | P2 유니버스 = **전 종목** (ETF/ETN 포함, 구분 필드 저장) | 사용자 결정 — 유연성 우선, 필터는 소비 단계에서 | P2 spec §1 |
 | 16 | P2 수집 시동 = **HTTP API** (`POST /collect` + status) | 사용자 결정 — Phase 7 대시보드 버튼의 토대. localhost 바인딩 전제, `POST /collect`·`POST /score` 둘 다 무인증 쓰기 — CORS `allow_origins=["*"]` 하에서는 drive-by 트리거 가능. Phase 5·Phase 7 전 인증/CORS 오리진 제한 재평가 필요(T7 패널 보안) | P2 spec §1·§8, P3 spec §10 |
 | 17 | 일봉은 1페이지(600봉)를 **그대로 upsert** (6개월로 자르지 않음) | 추가 비용 없이 오는 데이터 — 소비자가 잘라 씀. 재실행 멱등 | P2 spec §1 |
 | 18 | 섹터 매핑 = 키움 TR(ka10101+ka20002) 우선, **실측 스파이크로 확정** — 불발 시 KRX 정보데이터시스템 파일 조인(대안 B) | ka20002의 "구성종목 반환"이 미검증 추정이라 코드 작성 전 실측이 최선 | P2 spec §1·§5 |
-| 19 | 무효 토큰 응답(HTTP 200 + `[8005]`)은 기존 401 재발급 경로와 **동일한 1회성 invalidate-and-reissue 분기**로 처리(별도 정책 신설 안 함) | 401과 본질이 같은 "토큰이 더 이상 유효하지 않다"는 신호 — 별도 상태기계를 만들면 재시도 예산 이중관리 위험(Phase 1 Task 5의 401/429 혼합 버그와 동일 클래스) | CLAUDE.md §5, `backend/app/adapters/kiwoom/client.py`(commit `50391ac`) |
+| 19 | 무효 토큰 응답(HTTP 200 + `[8005]`)은 기존 401 재발급 경로와 **동일한 1회성 invalidate-and-reissue 분기**로 처리(별도 정책 신설 안 함) | 401과 본질이 같은 "토큰이 더 이상 유효하지 않다"는 신호 — 별도 상태기계를 만들면 재시도 예산 이중관리 위험(Phase 1 Task 5의 401/429 혼합 버그와 동일 클래스) | docs/reference/project-context.md §5, `backend/app/adapters/kiwoom/client.py`(commit `50391ac`) |
 | 20 | P4 LLM = **gemma4:31b-cloud**(Ollama 클라우드 추론) — 외부 전송 수용, 단 **로컬 모델 전환은 설정만으로 가능**하게 유지 + 실전 전환 전 재평가 필수 | 사용자 결정(로컬 하드웨어 제약). LangSmith 텔레메트리는 별도로 4중 차단 | P4 spec §10-5, `docker-compose.yml`, `backend/app/domain/analysis/graph.py` |
 | 21 | 뉴스 = **네이버 API HUB**(신규 플랫폼) — 구 오픈 API 아님 | 사용자가 발급한 키가 API HUB용이고 두 체계는 키 비호환(401/024 실측). 응답 형식은 동일해 어댑터 상수만 교체 | P4 회고록 §3-1, `backend/app/adapters/naver/client.py` |
 | 22 | LLM 응답의 마크다운 펜스 제거는 **어댑터 소관**(도메인 파싱은 엄격 유지) | 펜스는 특정 벤더/경로의 전송 아티팩트 — 도메인이 알면 "domain은 외부 의존 금지" 위반. 대칭 펜스 한 겹만 벗겨 fail-loud 유지 | P4 회고록 §3-2, P4-T7 아키텍트 패널 |
 | 23 | economist 파싱 실패 폴백 = **현행 유지(중립 + 상한 5, 열림)** — 트레이더 패널의 "닫힘(상한 0)" 권고를 사용자가 기각 | 사용자 결정(2026-07-18): 파이프라인 가용성 우선. 종목별 판정은 계속 기록되므로 감사는 가능. P4 회고록 §7 충돌 종결 | P4 spec §8(현행 유지), 본 결정 로그 |
 | 24 | 쓰기 엔드포인트 보호 = **API 키 헤더(X-API-Key) + CORS 오리진 제한** | 사용자 결정(2026-07-18). 토큰 미설정 시 경고만(모의 로컬 개발 편의), 실전 전환 게이트에서 필수로 승격 | P5 사전 게이트 계획서 Task 3 |
-| 36 | **Phase 7(대시보드) 최후순위로 순연** — 순서: 6(스케줄러)→8(텔레그램)→7(대시보드). 대신 트레이딩 경로 전반에 상시 요구 2건: 상세 로그(판정·방어선 발동) + 분석하기 쉬운 데이터 적재(SQL 조회 가능) | 사용자 결정(2026-07-23): 서버를 CLI로만 운영 중이라 대시보드 효용 낮음, 트레이딩 로직 우선 | CLAUDE.md §6 |
+| 36 | **Phase 7(대시보드) 최후순위로 순연** — 순서: 6(스케줄러)→8(텔레그램)→7(대시보드). 대신 트레이딩 경로 전반에 상시 요구 2건: 상세 로그(판정·방어선 발동) + 분석하기 쉬운 데이터 적재(SQL 조회 가능) | 사용자 결정(2026-07-23): 서버를 CLI로만 운영 중이라 대시보드 효용 낮음, 트레이딩 로직 우선 | docs/reference/project-context.md §6 |
 | 37 | P6 스케줄러 = **백엔드 프로세스 내장 asyncio 루프**(서비스 `start()` 직접 호출) | 사용자 결정(2026-07-23): 도메인 conflict_check가 이 방식을 상정, 단일 토큰 제약(8005) 자연 충족, 인증·컨테이너 추가 없음 | P6 spec §1·§3 |
 | 38 | AI 분석 실행 시점 = **장전 아침 1회**(기본 08:20) | 사용자 결정(2026-07-23): 밤사이 뉴스·국면 반영된 최신 판정으로 진입, LLM 호출 1회로 비용 최소 (실측: 야간 분석 risk_off 픽 0 전례) | P6 spec §1·§4 |
 | 39 | 트레이딩 = **완전 자동 시작**(거래일 09:00, 스케줄러가 기동) | 사용자 결정(2026-07-23): 자동매매 목표 부합, 방어선 전체 실증됨, 모의 환경. 실전 전환 게이트에서 유지 여부 재확인 | P6 spec §1·§10-1 |
 | 40 | 내성 = **compose `restart: unless-stopped` + DB 기준 캐치업**(완료 판정을 전부 DB로 — 재기동 첫 틱이 곧 캐치업) | 사용자 결정(2026-07-23): 재부팅 후 무인 복귀 + 낮 재기동 시 그날 몫 만회 | P6 spec §1·§4·§10-2 |
+| 41 | P8 텔레그램 = **알림 + 핵심 제어**(원격 킬스위치·pause/resume·상태 조회) | 사용자 결정(2026-07-24): 완전 자동매매(#39)라 외부에서 알고 멈출 수 있는 것이 핵심 가치. 기존 API 표면 재사용 | (P8 spec 예정) |
+| 42 | P8 알림 = **등급제**(즉시: 체결·손절·킬스위치·gave_up·dead / 다이제스트: 장 마감 후 1회 요약) | 사용자 결정(2026-07-24): 전부 즉시는 알림 피로, 다이제스트만은 긴급 상황 누락 | (P8 spec 예정) |
+| 43 | P8 구현 = **공식 Bot API 직접 호출**(httpx, 신규 의존성 0) | 사용자 결정(2026-07-24): 결정 #11(비공식 래퍼 의존 회피) 관례 — 수신 명령이 소수라 폴링으로 충분 | (P8 spec 예정) |
 
 ## 후속 설계를 제약하는 검증된 팩트 (사용 전 재확인)
 
@@ -488,14 +521,15 @@ G2 주문TR 3종+레이트리밋 버킷, G3 kt00018 행단위(기존 #1), G4 모
   last-write-wins로 손실적), 관리종목·거래정지는 `auditInfo`/`state`로 판별
   가능. 정책 결정(산업 업종 화이트리스트·ETF 포함·필드 저장)은 Phase 3
   브레인스토밍에서 — 위 재개 지점 참고.
-- 상세·출처는 `CLAUDE.md` §5, `docs/retrospectives/2026-07-17-phase1-kiwoom-broker-adapter.md`,
+- 상세·출처는 `docs/reference/project-context.md` §5, `docs/retrospectives/2026-07-17-phase1-kiwoom-broker-adapter.md`,
   `docs/retrospectives/2026-07-17-phase2-data-collection-pipeline.md` 참고.
 
 ## 문서 인덱스
 
 | 경로 | 용도 |
 |---|---|
-| `CLAUDE.md` | 규칙·아키텍처·검증된 API 팩트·로드맵 (매 세션 자동 로드, 영어) |
+| `AGENTS.md` | Codex 작업 규칙 (매 세션 자동 로드) |
+| `docs/reference/project-context.md` | 아키텍처·검증된 API 팩트·로드맵 |
 | `docs/STATUS.md` | 이 문서 — 재개 지점 + 결정 로그 |
 | `docs/specs/2026-06-16-phase0-walking-skeleton-design.md` | Phase 0 설계 spec |
 | `docs/specs/2026-07-17-phase1-kiwoom-broker-adapter-design.md` | Phase 1 설계 spec (§5 실측 결과로 갱신됨) |
@@ -522,7 +556,7 @@ G2 주문TR 3종+레이트리밋 버킷, G3 kt00018 행단위(기존 #1), G4 모
 
 ## 세션 연속성 작동 방식
 
-1. **CLAUDE.md**는 새 세션에서 Claude Code가 자동 로드하며 이 문서를 가리킨다.
+1. **AGENTS.md**는 새 Codex 세션에서 자동 로드되며 이 문서를 가리킨다.
 2. **이 문서(`docs/STATUS.md`)**가 사람/AI가 읽는 재개 지점이며, 세션 종료 전 항상
    마지막으로 갱신한다.
 3. 모든 것이 **git**에 커밋되어 세션·기기 간에 상태가 보존된다.

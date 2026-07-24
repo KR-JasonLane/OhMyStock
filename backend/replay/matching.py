@@ -116,7 +116,7 @@ class MatchingEngine:
             if limit_price <= 0:
                 return OrderResult(False, reason="limit requires price")
             if not is_on_tick(limit_price, market):
-                # RC4003 재현(틱 판별 실측 — CLAUDE.md §5)
+                # RC4003 재현(틱 판별 실측 — docs/reference/project-context.md §5)
                 return OrderResult(
                     False, reason="[2000](RC4003:모의투자 호가단위 오류입니다.)")
         if side == "buy":

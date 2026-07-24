@@ -477,7 +477,7 @@ class TradingService(BackgroundRunService):
 
         재시도 자체 백오프는 미도입(트레이더 Minor 판단 근거): 폴링 주기
         (recommended_delay)가 자연 간격이고, quote TR은 주문과 별도 레이트
-        리밋 버킷(CLAUDE.md §5)이며, 창 상한(entry_window_end)이 재시도
+        리밋 버킷(docs/reference/project-context.md §5)이며, 창 상한(entry_window_end)이 재시도
         횟수를 이미 제한한다."""
         latest = await asyncio.to_thread(self._analysis_latest)
         if not latest:

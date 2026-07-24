@@ -1,6 +1,6 @@
 """키움 주문 TR의 요청 빌더·응답 파서 — broker.py 비대화 방지(계획서 Task 4).
 
-실측 근거(2026-07-22, CLAUDE.md §5) — G2(매수+지정가)·G3(매수/매도 시장가)·
+실측 근거(2026-07-22, docs/reference/project-context.md §5) — G2(매수+지정가)·G3(매수/매도 시장가)·
 틱 판별로 확정. SELL+LIMIT(kt10001, trde_tp="0"+ord_uv)은
 라이브 마커(tests/live/test_live_orders.py)로 **실측 완료**(2026-07-22 12:08
 장중: rc=0 '모의투자 매도주문완료' — broker-api 패널 공백 해소):

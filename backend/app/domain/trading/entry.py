@@ -12,7 +12,7 @@ check_order_caps(amount_krw)는 **place_order 호출 직전** 실행된다(§8-1
 
 체결가 주의: 반환 TradePosition.entry_price는 **추정치**(지정가=발주가,
 시장가=관측 ask)다 — mock 시장가 체결가는 호가 그리드 비준수(블렌디드,
-CLAUDE.md §5)라 정확한 평단은 Task 7이 잔고(kt00018 pur_pric — G3 실측 원 단위
+docs/reference/project-context.md §5)라 정확한 평단은 Task 7이 잔고(kt00018 pur_pric — G3 실측 원 단위
 정수)로 확정한다(costs.py의 "실측 필드 우선" 원칙과 동일)."""
 
 import asyncio

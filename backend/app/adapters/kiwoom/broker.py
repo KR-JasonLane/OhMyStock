@@ -246,7 +246,7 @@ class KiwoomBroker:
                 f"unexpected response schema [ka20002]: {type(exc).__name__}") from exc
         return members
 
-    # --- OrderPort (P5 Task 4 — 전 필드 G1/G2/G3 실측 확정, CLAUDE.md §5) ---
+    # --- OrderPort (P5 Task 4 — 전 필드 G1/G2/G3 실측 확정, docs/reference/project-context.md §5) ---
 
     async def get_quotes(self, symbols: list[str]) -> list[MarketData]:
         """ka10095 다종목 시세+호가. 100종목 초과는 내부에서 청크 분할(호출자

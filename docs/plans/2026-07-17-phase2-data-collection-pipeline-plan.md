@@ -1342,7 +1342,7 @@ git commit -m "feat(api): collection trigger and status endpoints"
 ### Task 7: 풀 수집 실측 + 실측 팩트 반영 + 회고록 + STATUS (코디네이터 주도)
 
 **Files:**
-- Modify: `CLAUDE.md` §5 (신규 TR 실측 팩트), `docs/STATUS.md` (Phase 3 핸드오프)
+- Modify: `docs/reference/project-context.md` §5 (신규 TR 실측 팩트), `docs/STATUS.md` (Phase 3 핸드오프)
 - Modify: `docs/specs/2026-07-17-phase2-data-collection-pipeline-design.md`
   (§5 스파이크 대상 → 실측 결과)
 - Create: `docs/retrospectives/2026-07-17-phase2-data-collection-pipeline.md`
@@ -1370,7 +1370,7 @@ docker compose exec db psql -U ohmystock -d ohmystock -c \
 (두 번째 run이 수 분 내 종료되는지). 실패 시 원인 수정 후 재실행 — 완주 전 완료
 주장 금지.
 
-- [ ] **Step 2: 문서 갱신 + 회고록** — CLAUDE.md §5에 ka10099/ka10101/ka20002(또는
+- [ ] **Step 2: 문서 갱신 + 회고록** — docs/reference/project-context.md §5에 ka10099/ka10101/ka20002(또는
 대안 B) 실측 팩트를 "verified live (2026-07-17)"로 추가, spec §5 갱신, 규칙 4
 회고록(태스크별 파일·커밋·패널 결과, 스파이크 판정, 풀 수집 실측 수치, 남은 항목),
 STATUS를 Phase 3(스코어링 엔진) 재개 지점으로 갱신 (수집 실행 권장 시간대 19시 이후
@@ -1379,6 +1379,6 @@ STATUS를 Phase 3(스코어링 엔진) 재개 지점으로 갱신 (수집 실행
 - [ ] **Step 3: 커밋**
 
 ```bash
-git add CLAUDE.md docs/STATUS.md docs/specs/2026-07-17-phase2-data-collection-pipeline-design.md docs/retrospectives/2026-07-17-phase2-data-collection-pipeline.md
+git add docs/reference/project-context.md docs/STATUS.md docs/specs/2026-07-17-phase2-data-collection-pipeline-design.md docs/retrospectives/2026-07-17-phase2-data-collection-pipeline.md
 git commit -m "docs: phase 2 retrospective + collection facts + status handoff"
 ```

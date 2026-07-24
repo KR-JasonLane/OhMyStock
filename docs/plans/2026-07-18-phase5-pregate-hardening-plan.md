@@ -18,7 +18,7 @@ domain, 보호는 api 의존성 + main.py 조립. 신규 의존성 없음.
 
 ## Global Constraints
 
-- 문서·주석·테스트명 한국어("왜" 중심 주석), CLAUDE.md 규칙 준수.
+- 문서·주석·테스트명 한국어("왜" 중심 주석), docs/reference/project-context.md 규칙 준수.
 - 시크릿은 SecretStr, 값 로그/예외 노출 금지. 커밋 메시지 AI 흔적 금지.
 - TDD: RED 캡처 → 구현 → GREEN 캡처(`../.superpowers/sdd/p5pre-task-N-{red,green}.txt`).
 - 테스트 기준선: **299 passed, 10 deselected** — 회귀 0.

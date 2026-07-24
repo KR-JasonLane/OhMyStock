@@ -17,7 +17,7 @@ OK_MSG = "정상적으로 처리되었습니다"
 def kiwoom_json(payload: dict, cont_yn: str = "N",
                 next_key: str = "") -> JSONResponse:
     """TR 공통 봉투: HTTP 200 + return_code/return_msg 바디,
-    cont-yn/next-key 응답 헤더(실측 TR 패턴 — CLAUDE.md §5)."""
+    cont-yn/next-key 응답 헤더(실측 TR 패턴 — docs/reference/project-context.md §5)."""
     body = {"return_code": 0, "return_msg": OK_MSG}
     body.update(payload)
     return JSONResponse(body, headers={"cont-yn": cont_yn,

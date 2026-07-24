@@ -166,7 +166,7 @@ class CollectionService:
 3. 단위 테스트 전체 그린 (Phase 1의 50개 포함 회귀).
 4. **풀 수집 1회 완주 실측**: 전 종목 명부+업종 매핑+일봉이 DB에 적재, run 일지
    정상, 재실행 시 스킵 동작 확인.
-5. 모든 태스크 패널 통과, 실측 팩트 CLAUDE.md §5 반영, 회고록 + STATUS Phase 3
+5. 모든 태스크 패널 통과, 실측 팩트 docs/reference/project-context.md §5 반영, 회고록 + STATUS Phase 3
    핸드오프.
 
 ## 8. 리스크 / 미해결 항목
@@ -189,7 +189,7 @@ class CollectionService:
   분기를 추가해 해결(commit `50391ac`). **(측정 정황상 추정, 미확정) 앱키당
   활성 토큰이 1개뿐일 가능성** — 백엔드 가동 중 별도 프로세스에서 토큰을
   재발급하면 기존 토큰이 무효화되는 것으로 관측됨. 운영 규칙: 백엔드 가동 중
-  호스트에서 별도로 토큰 발급 금지(CLAUDE.md §5에 반영).
+  호스트에서 별도로 토큰 발급 금지(docs/reference/project-context.md §5에 반영).
 - **⚠️ 신규(Task 7 실측): 응답 필드가 전부 빈 문자열인 퇴화(degenerate) 캔들
   응답 존재** — 종목 `012510`에서 관측. `Candle.__post_init__`의 OHLC 검증이
   fail-loud로 거부해 실제로는 위험하지 않았으나, 유사 응답이 더 있을 수 있다는

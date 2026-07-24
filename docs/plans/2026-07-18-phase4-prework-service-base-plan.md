@@ -9,7 +9,7 @@
 얹히게 한다.
 
 **Architecture:** 신규 `backend/app/core/background_service.py`에
-`BackgroundRunService` 베이스를 둔다 (CLAUDE.md §3의 core/ 정의 "scheduling
+`BackgroundRunService` 베이스를 둔다 (docs/reference/project-context.md §3의 core/ 정의 "scheduling
 primitives"에 부합 — 비즈니스 로직 없음). 도메인 서비스는 `_run()`만 구현한다.
 
 ## Global Constraints

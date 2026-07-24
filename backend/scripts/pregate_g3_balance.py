@@ -10,7 +10,7 @@
   4. 청산 확인은 raw kt00018 기반(broker.get_balance 파싱 독립) + 필드명 후보/알려진 키
 실제 체결 후 반드시 청산. 잔존 시 큰 경고로 수동 청산 유도.
 
-확인 목표(스펙 §4 G3 / CLAUDE.md §5 PRE-GATE #1):
+확인 목표(스펙 §4 G3 / docs/reference/project-context.md §5 PRE-GATE #1):
   1. kt00018 리스트 키(acnt_evlt_remn_indv_tot 추정)와 행 단위 필드
   2. **avg_price/pur_pric가 원 단위 정수인가**(TradePosition.avg_price:int 가정 검증)
   3. broker.get_balance() 파싱이 실제 행과 일치하는가(행 수 대조)
@@ -39,7 +39,7 @@ MOCK_BASE = "https://mockapi.kiwoom.com"
 PROBE = "005930"
 ORD_QTY = "1"
 
-# 잔고 행 리스트 키 후보(알려진 것 우선) — CLAUDE.md §5 추정
+# 잔고 행 리스트 키 후보(알려진 것 우선) — docs/reference/project-context.md §5 추정
 KNOWN_ROW_KEYS = ("acnt_evlt_remn_indv_tot",)
 # 행 종목코드 필드명 후보(미검증 — 후보 순회로 강건화)
 SYMBOL_KEYS = ("stk_cd", "stk_cd_gb", "stkcd")

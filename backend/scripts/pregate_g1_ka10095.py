@@ -11,7 +11,7 @@
   5. 실제 소요시간
 
 전제: .env에 모의 발급 키(KIWOOM_MOCK=true). 백엔드/다른 프로세스가 같은 앱키로
-가동 중이면 실행하지 말 것(앱키당 활성 토큰 1개 추정 — CLAUDE.md §5, [8005] 사고).
+가동 중이면 실행하지 말 것(앱키당 활성 토큰 1개 추정 — docs/reference/project-context.md §5, [8005] 사고).
 이 스크립트는 자체 TokenManager로 발급하고 종료 시 revoke 한다 — client가 자체
 TokenManager를 만들지 않도록 token_manager=tm을 명시 주입한다(그렇지 않으면 두
 토큰이 경합해 살아있는 토큰이 미폐기된다 — 보안 패널).

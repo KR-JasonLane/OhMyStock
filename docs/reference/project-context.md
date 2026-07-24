@@ -1,6 +1,6 @@
-# CLAUDE.md — OhMyStock
+# OhMyStock 프로젝트 컨텍스트
 
-Guidance for Claude (and any AI/human contributor) working in this repository.
+Architecture, verified integration facts, and roadmap reference for contributors.
 
 > **▶ Resuming work?** Read **`docs/STATUS.md`** first — it is the live resume point
 > (current position in the workflow + next action + decision log).
@@ -15,61 +15,9 @@ desktop dashboard and a Telegram bot for monitoring and control.
 > NOTE: The brokerage is the **Kiwoom REST API** (Korean stocks). See "Verified
 > brokerage facts" below.
 
-## 2. Working rules (MUST follow)
-
-These are the user's standing rules. They override default behavior. Keep this file
-updated whenever the user introduces a new rule or changes direction.
-
-1. **Document-driven & versioned.** Every unit of work is grounded in a document. If
-   a suitable folder does not exist, create it and keep the document under version
-   control. Plans go in `docs/plans/`, design specs in `docs/specs/`, the master
-   architecture in `docs/architecture/`. **All documents are written in Korean**,
-   except this `CLAUDE.md`, which stays in English (rule 6).
-2. **Readable, maintainable code.** No "make-it-work-for-now" code (e.g. deep `if`
-   nesting). Always design for maintenance and extension — favor clear abstractions,
-   well-bounded modules, and explicit interfaces (see Architecture).
-3. **Never just agree.** Base every answer on facts. Research first (web search,
-   official docs) and fact-check. If the user's request or assumption is wrong per
-   the research, say "no" immediately and explain why.
-4. **Atomic work + retrospectives.** Do work in atomic units. For each unit write a
-   retrospective in `docs/retrospectives/` that a non-expert can follow: what was
-   requested, what implementation/changes were needed, what the existing code looked
-   like, which design/patterns were used, and exactly which file + line numbers were
-   changed and how. Be detailed and meticulous.
-5. **Read the docs before acting.** Always research relevant material and work from
-   documentation first — especially the **Kiwoom REST API** spec and its caveats
-   (rate limits, pagination, order types, mock vs real).
-6. **Maintain this file.** These rules live here in English. Whenever the user asks
-   for something new or changes a rule, create/update `CLAUDE.md` accordingly.
-7. **Confirm commit messages first.** Before creating ANY git commit, show the user
-   the exact, FULL proposed commit message (and the files to be committed) and wait
-   for their confirmation. Never commit without it. Commit messages must contain
-   **no AI attribution** — no `Co-Authored-By: Claude ...` trailer, no
-   "Generated with Claude" lines. This overrides any default harness behavior.
-8. **Four-agent review panel per task.** After coding each implementation task,
-   dispatch four review agents on the task's diff, and move to the next task only
-   when ALL four have verified it (Critical/Important findings must be fixed and
-   re-reviewed):
-   1. **Senior Developer** — readability, boilerplate, patchwork `if` nesting,
-      code reuse; flags violations of SOLID and DRY.
-   2. **Senior Stock Trader** — trading-strategy expert; flags flow/algorithm
-      problems that are disadvantageous or incorrect for actual trading.
-   3. **Architecture Expert** — infrastructure and overall architecture fit.
-   4. **Security Expert** — code security and communication security.
-   The four agents are defined as reusable subagents in `.claude/agents/`
-   (`senior-developer`, `senior-trader`, `architecture-expert`, `security-expert`) —
-   dispatch them by those names via the Agent tool.
-
-   **8-b. Optional broker-API reviewer (`broker-api-expert`).** For tasks that touch
-   the broker API — adapter implementation, TR call sites, PRE-GATE probe scripts —
-   additionally dispatch `broker-api-expert` (defined in `.claude/agents/`). It
-   verifies our code calls the Kiwoom REST API per spec/measured reality: request
-   body/headers/order-type codes, `cont-yn`/`next-key` pagination, response field
-   parsing, token/rate-limit handling, mock/real boundary. Its governing rule is
-   **measured evidence over documentation** (Kiwoom docs are unreliable — see §5).
-   Not part of the always-on 4-agent panel; summon it only when the task is
-   API-shaped. Findings at Critical/Important must be fixed and re-reviewed, same as
-   rule 8.
+Persistent working rules live in the repository `AGENTS.md`. The reusable review
+workflow lives in `.agents/skills/ohmystock-review-panel/SKILL.md`, and its reviewers
+are defined under `.codex/agents/`.
 
 ## 3. Architecture (decided)
 
@@ -387,7 +335,8 @@ Measured live during Phase 4 acceptance (2026-07-18); see
 ## 7. Repository layout
 ```
 OhMyStock/
-├─ CLAUDE.md                 # this file
+├─ AGENTS.md                 # Codex working rules
+├─ docs/reference/project-context.md
 ├─ docker-compose.yml        # backend + db (+ later ollama)
 ├─ backend/                  # Python FastAPI service (containerized)
 ├─ frontend/                 # Electron + React + TS (host-native)

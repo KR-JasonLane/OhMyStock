@@ -19,7 +19,7 @@ backend/replay/data/minutes.sqlite 에 저장(gitignore — 운영 DB와 분리,
 담당 — 프로브 단계에서 형태 가정을 최소화한다.
 
 전제: .env 모의 키. 같은 앱키로 백엔드/타 프로세스 가동 중이면 실행 금지
-(활성 토큰 1개 — [8005] 사고, CLAUDE.md §5). 자체 TokenManager 주입 + 종료 시
+(활성 토큰 1개 — [8005] 사고, docs/reference/project-context.md §5). 자체 TokenManager 주입 + 종료 시
 revoke(G1 하네스와 동일 — 미주입 시 이중 토큰 경합으로 미폐기 토큰이 남는다).
 """
 

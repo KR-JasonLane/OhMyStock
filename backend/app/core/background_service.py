@@ -3,7 +3,7 @@
 구현한다. P3까지 CollectionService/ScoringService에 두 번 복제됐던 패턴의
 단일 출처다 (P3 spec §9 — "세 번째 동형 서비스가 생기는 Phase 4가 추출 적기").
 
-비즈니스 로직이 없는 오케스트레이션 스캐폴딩이므로 CLAUDE.md §3의 core/
+비즈니스 로직이 없는 오케스트레이션 스캐폴딩이므로 docs/reference/project-context.md §3의 core/
 정의("scheduling primitives")에 부합한다 — domain/store/adapters를 알지
 못한다."""
 

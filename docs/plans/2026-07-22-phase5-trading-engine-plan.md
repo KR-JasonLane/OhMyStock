@@ -103,7 +103,7 @@ backend/alembic/versions/
 - [ ] **G4 — 모의키→실전엔드포인트 대칭성:** **독립 스크립트·독립 httpx·발급 토큰
   즉시 revoke**(공유 TokenManager 오염 금지, 보안). 실전 base 조회 TR 1건만.
 - [ ] **호가 단위(틱)·시장별 세율·공휴일 소스** 확정(스펙 §4 재확인 항목).
-- [ ] 실측 결과를 CLAUDE.md §5 + 스펙 §4에 반영. **G1 불발 시 스펙 재개정 후 재계획.**
+- [ ] 실측 결과를 docs/reference/project-context.md §5 + 스펙 §4에 반영. **G1 불발 시 스펙 재개정 후 재계획.**
 
 ---
 
@@ -507,7 +507,7 @@ async def apply_reconcile(actions, orders: OrderPort,
       마커도 지정가(00)/시장가(03) 매도 접수를 개별 확인.
 - [ ] 킬 스위치(STOP_NEW_ENTRIES/LIQUIDATE_ALL) 실동작 + 감사 컬럼 기록 확인.
 - [ ] 재기동 reconcile — 감시 중 프로세스 종료 후 재기동 시 포지션 복구 확인.
-- [ ] 실측 팩트를 CLAUDE.md §5 + 스펙에 반영. Phase 5 회고록 작성(규칙 4).
+- [ ] 실측 팩트를 docs/reference/project-context.md §5 + 스펙에 반영. Phase 5 회고록 작성(규칙 4).
 
 ---
 

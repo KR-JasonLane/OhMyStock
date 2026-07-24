@@ -2,8 +2,8 @@
 
 - **날짜:** 2026-06-16
 - **상태:** 초안 (사용자 검토 대기)
-- **작성:** Claude (브레인스토밍 세션)
-- **범위:** OhMyStock의 첫 서브프로젝트. 레포/문서 구조, 거버넌스(CLAUDE.md), 그리고
+- **작성:** AI 보조 브레인스토밍 세션
+- **범위:** OhMyStock의 첫 서브프로젝트. 레포/문서 구조, 거버넌스(docs/reference/project-context.md), 그리고
   아키텍처 전체를 관통하는 최소 end-to-end "워킹 스켈레톤"(호스트 네이티브 Electron UI
   ↔ 컨테이너 FastAPI 백엔드 ↔ PostgreSQL)을 기능 작업 이전에 구축한다.
 
@@ -45,7 +45,7 @@ Phase 0 **범위 밖**(명시): 실제 키움 API 호출, 데이터 수집, 스�
   않는다.
 - **DB 연결**(`store/`): SQLAlchemy 엔진 + 마이그레이션이 동작함을 증명하는 사소한
   마이그레이션 1개(`schema_version` 또는 `app_meta` 테이블 생성).
-- **계층 구조 스텁** (CLAUDE.md §3 기준: `api/`, `core/`, `adapters/`, `domain/`,
+- **계층 구조 스텁** (docs/reference/project-context.md §3 기준: `api/`, `core/`, `adapters/`, `domain/`,
   `store/`) — 이후 단계가 명확한 자리에 들어가도록.
 
 ### 3.2 `frontend/` — Electron + React + TS (호스트 네이티브)
@@ -72,14 +72,14 @@ Phase 0 **범위 밖**(명시): 실제 키움 API 호출, 데이터 수집, 스�
 ```
 
 ## 5. 문서 & 형상관리 (규칙 1, 4, 6)
-- `CLAUDE.md`(루트) — 규칙(영어) + 아키텍처 + 검증된 키움 팩트. (생성 완료)
+- `docs/reference/project-context.md`(루트) — 규칙(영어) + 아키텍처 + 검증된 키움 팩트. (생성 완료)
 - `docs/architecture/system-overview.md` — 마스터 청사진(Phase 0 구현 시 생성): 8개
   서브시스템, 데이터 흐름, 컨테이너 토폴로지, 일일 타임라인, 검증된 키움 팩트, 로드맵.
 - `docs/plans/` — Phase 0 구현 계획서(다음 단계, writing-plans로).
 - `docs/specs/` — 이 문서.
 - `docs/retrospectives/` — 완료 시 Phase 0 회고록 작성(규칙 4).
 - git 초기화 완료; `.gitignore`로 Python/Node/Electron/Docker 산출물 제외.
-- **문서 언어:** 한국어 (CLAUDE.md만 영어 — 규칙 6).
+- **문서 언어:** 한국어 (docs/reference/project-context.md만 영어 — 규칙 6).
 
 ## 6. 에러 처리
 - 백엔드: 구조화 로깅; DB 다운 시 `/health`가 degraded 보고; 필수 환경변수 누락 시
@@ -98,7 +98,7 @@ Phase 0 **범위 밖**(명시): 실제 키움 API 호출, 데이터 수집, 스�
 1. `docker compose up`이 `db`+`backend`를 기동; `/health`가 DB 연결됨 + `mode=mock`으로
    ok 반환.
 2. 호스트 Electron 앱이 실행되어 백엔드의 연결 상태를 표시.
-3. `CLAUDE.md`, `docs/architecture/system-overview.md`, 폴더 구조가 존재하고 git에
+3. `docs/reference/project-context.md`, `docs/architecture/system-overview.md`, 폴더 구조가 존재하고 git에
    커밋됨.
 4. 백엔드·프론트엔드 단위 테스트 통과.
 5. `docs/retrospectives/`에 Phase 0 회고록 존재.
@@ -109,5 +109,5 @@ Phase 0 **범위 밖**(명시): 실제 키움 API 호출, 데이터 수집, 스�
   라이브 호출 없음).
 - **Windows에서의 Ollama GPU:** 컨테이너 Ollama는 NVIDIA + WSL2 GPU 패스스루 필요;
   대안은 `host.docker.internal`을 통한 호스트 네이티브 Ollama. Phase 4에서 결정.
-- **레이트리밋 / TP-SL 클라이언트측:** Phase 0에서는 다루지 않으나 CLAUDE.md에 기록해
+- **레이트리밋 / TP-SL 클라이언트측:** Phase 0에서는 다루지 않으나 docs/reference/project-context.md에 기록해
   Phase 1/5가 이를 고려해 설계하도록 함.

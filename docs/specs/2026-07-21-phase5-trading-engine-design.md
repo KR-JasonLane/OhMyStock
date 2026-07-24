@@ -1,7 +1,7 @@
 # Phase 5 — 트레이딩 엔진 설계 스펙
 
 작성일: 2026-07-21 · 개정: 2026-07-22 (v3.1 — 4-에이전트 델타 재검토 반영) · 상태: 브레인스토밍 확정 대기, 사용자 승인 대기
-선행 문서: `docs/STATUS.md`, `CLAUDE.md` §5(검증된 키움 팩트),
+선행 문서: `docs/STATUS.md`, `docs/reference/project-context.md` §5(검증된 키움 팩트),
 `docs/specs/2026-07-18-phase4-ai-analysis-design.md`(§12 연계),
 `docs/retrospectives/2026-07-18-phase5-pregate-hardening.md`(§4 잔여 게이트·§5 이월)
 
@@ -30,7 +30,7 @@
 
 ### 1-1. 결정 #32에 대한 정정 (v2 — 보안 패널 반영)
 
-**v1에서 "자격증명 분리가 하드 게이트"라고 단정한 서술을 정정한다.** CLAUDE.md §5에
+**v1에서 "자격증명 분리가 하드 게이트"라고 단정한 서술을 정정한다.** docs/reference/project-context.md §5에
 실측된 사실은 **"모의 엔드포인트 + 실전 키 페어 → `[8030]` 거부"** 이 **한 방향뿐**이다.
 
 - 이는 **설정 실수(mismatch)를 잡는 트립와이어**이지, **실전 상태의 런타임 안전장치가
@@ -107,7 +107,7 @@ api/trade.py                  # 4개 라우트 (POST는 require_trade_token)
 Phase 1·2에서 문서와 실제가 반복 어긋났다(`ka10099` marketCode 혼입, `ka10081`
 `base_dt` 필수, 무효 토큰 `[8005]`). 아래는 모의서버 실호출로 확정 후 구현한다.
 증거: `.superpowers/sdd/p5-pregate-*.txt`. **G1~G3 실측 완료(2026-07-22) —
-상세는 CLAUDE.md §5 반영. 요약:**
+상세는 docs/reference/project-context.md §5 반영. 요약:**
 
 | # | 대상 | 실측 결과(2026-07-22) | 판정 |
 |---|---|---|---|
@@ -163,7 +163,7 @@ class OrderPort(Protocol):
   안 주면 별도 호가 TR을 `get_quotes`에 합성하거나 진입 지정가 전략을 재검토
 - 키움 호가구분 코드(`trde_tp` 단일자리 `"0"` 지정가/`"3"` 시장가 — G2/G3 실측)는
   **어댑터 내부 매핑 테이블에만** 존재. 도메인은
-  `OrderStyle.LIMIT`/`MARKET` enum만 안다 (CLAUDE.md §3 — 브로커 교체 가능성)
+  `OrderStyle.LIMIT`/`MARKET` enum만 안다 (docs/reference/project-context.md §3 — 브로커 교체 가능성)
 - `OrderAck`/응답은 **바디만** 도메인·저장소로 전달한다. `Authorization` 헤더·토큰
   문자열은 어느 계층에도 넘기지 않는다 (§9, 보안 C1)
 
@@ -408,7 +408,7 @@ fail-fast 검증: `0 < stop_loss_pct < 100`, `0 < take_profit_pct`,
 
 `BackgroundRunService`는 현재 정지 API가 없다(단발 배치 전제). 트레이딩은 장중
 상시 루프 + 외부 킬 스위치가 필요하므로 **베이스에 협조적 정지 계약을 추가**한다
-(TradingService에만 얹으면 CLAUDE.md 규칙 2 위반 — 땜빵):
+(TradingService에만 얹으면 docs/reference/project-context.md 규칙 2 위반 — 땜빵):
 
 - `request_stop(mode)` — `asyncio.Event`류 신호를 세운다. `mode ∈
   {STOP_NEW_ENTRIES, LIQUIDATE_ALL}`(단일 `_running` 불리언으로는 두 모드 표현
@@ -606,7 +606,7 @@ fail-fast 검증: `0 < stop_loss_pct < 100`, `0 < take_profit_pct`,
 2. **모의 체결 시뮬레이션의 현실성 미지수** — 모의 체결은 실제 호가 잔량을 반영
    안 할 수 있다. 모의 체결률·슬리피지를 실전 근거로 삼지 않는다
 3. **일봉 신호 + 장중 집행의 시점 괴리** — §6-3 0단계 갭 가드로 완화
-4. **모의 피드 지연**(CLAUDE.md §5) — 상위 파이프라인이 게이트에서 막히면 진입
+4. **모의 피드 지연**(docs/reference/project-context.md §5) — 상위 파이프라인이 게이트에서 막히면 진입
    신호가 안 나온다. 트레이딩 엔진 단독 테스트 경로를 확보
 5. **레이트리밋 경합** — 주문·시세·잔고 버킷 분리 여부를 G2에서 확인. 같은
    버킷이면 감시 폴링이 손절 주문을 지연시킬 수 있어 **주문 우선순위** 설계 필요
@@ -640,7 +640,7 @@ fail-fast 검증: `0 < stop_loss_pct < 100`, `0 < take_profit_pct`,
 - G1~G3은 **장중(09:00~15:30, 영업일)** 실행 필요 — 실측 세션 시간 확보
 - G4(모의 키 → 실전 엔드포인트)는 **실전 base URL 호출**이므로 조회 TR 1건만
   극도로 신중히
-- 실측 중 **호스트에서 별도 키움 토큰 발급 금지**(CLAUDE.md §5 — 앱키당 활성 토큰
+- 실측 중 **호스트에서 별도 키움 토큰 발급 금지**(docs/reference/project-context.md §5 — 앱키당 활성 토큰
   1개 추정, `[8005]` 사고 방지)
 - `api_trade_token`(주문 전용, 결정 #33 — **실전 모드에선 `api_write_token`과
   다른 값 필수**, §6-2-c), `max_single_order_krw`/`max_daily_orders`/

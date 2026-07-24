@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- 커밋 메시지에 AI 흔적 금지 (`Co-Authored-By: Claude` 등 트레일러 금지 — CLAUDE.md 규칙 7). 커밋 메시지는 사전 일괄 승인분을 그대로 사용.
+- 커밋 메시지에 AI 저자 표시 금지 (`Co-Authored-By` 등 트레일러 금지 — `AGENTS.md` 커밋 규칙). 커밋 메시지는 사전 일괄 승인분을 그대로 사용.
 - 태스크마다 4-에이전트 패널 리뷰(senior-developer/senior-trader/architecture-expert/security-expert) 전원 통과 후 다음 태스크 진행 (규칙 8). 패널 디스패치는 **코디네이터 전담** — 구현자는 절대 자체 실행하지 않는다.
 - 테스트 실행 출력은 반드시 파일로 캡처(`> ../.superpowers/sdd/p3-task-N-<이름>.txt 2>&1`) 후 결과를 보고한다. 증거 파일 접두는 `p3-task-N-`.
 - 새 런타임 의존성 추가 금지 (pandas/numpy 금지 — 스펙 결정 #6).
@@ -20,7 +20,7 @@
 - 도메인 계층(`domain/`)은 어댑터/SQL을 임포트하지 않는다 (헥사고날 원칙).
 - `.env` 값 출력 금지. 라이브 서버 호출 없음 (Phase 3은 DB만 읽음).
 - 모든 스코어링 파라미터는 `ScoringConfig` 기본값 — 하드코딩 금지 (스펙 §4-6).
-- 문서는 한국어 (CLAUDE.md 규칙 1).
+- 문서는 한국어 (docs/reference/project-context.md 규칙 1).
 
 ## 파일 구조 (신규/수정 총괄)
 

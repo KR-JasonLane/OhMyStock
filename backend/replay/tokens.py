@@ -1,6 +1,6 @@
 """토큰 레지스트리(스펙 §7) — 단일 활성 토큰 의미론 재현.
 
-실측 계약(CLAUDE.md §5, Phase 2):
+실측 계약(docs/reference/project-context.md §5, Phase 2):
 - 신규 발급이 기존 토큰을 무효화한다(앱키당 활성 토큰 1개 — 측정 정황).
 - 무효 토큰의 TR 호출은 HTTP 401이 아니라 **HTTP 200 + return_code=3 +
   return_msg에 `[8005:Token이 유효하지 않습니다]`**(실측 원문 —

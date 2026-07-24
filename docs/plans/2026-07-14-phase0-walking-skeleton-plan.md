@@ -23,7 +23,7 @@ vitest + @testing-library/react / PostgreSQL 16 / docker-compose.
 - 백엔드 계층: `api/`(transport만), `core/`(설정·로깅), `adapters/`, `domain/`, `store/`.
 - 모의투자 우선: 기본 `KIWOOM_MOCK=true`. Phase 0에서는 **키움 API를 절대 호출하지 않는다**
   (환경변수 존재 검증만).
-- 모든 문서는 **한국어** (CLAUDE.md만 영어).
+- 모든 문서는 **한국어** (docs/reference/project-context.md만 영어).
 - 커밋 메시지는 conventional commits (`feat:`, `test:`, `docs:`, `chore:`).
 - `.env`는 절대 커밋 금지 (`.gitignore`에 이미 등록됨). 커밋 대상은 `.env.example`.
 - 작업 디렉터리: 백엔드 명령은 `backend/`에서, 프론트 명령은 `frontend/`에서 실행.
@@ -1080,7 +1080,7 @@ git commit -m "feat(frontend): backend status hook + app integration + CSP"
 - Create: `docs/architecture/system-overview.md`
 
 **Interfaces:**
-- Consumes: `CLAUDE.md` §3(아키텍처)·§5(키움 팩트)·§6(로드맵),
+- Consumes: `docs/reference/project-context.md` §3(아키텍처)·§5(키움 팩트)·§6(로드맵),
   spec §3~4(구성요소·데이터 흐름).
 - Produces: 이후 모든 Phase의 spec이 참조할 마스터 청사진 문서 (한국어).
 
@@ -1088,7 +1088,7 @@ git commit -m "feat(frontend): backend status hook + app integration + CSP"
 
 `docs/architecture/system-overview.md` — 아래 8개 섹션을 모두 포함해 한국어로 작성:
 
-1. **시스템 개요** — OhMyStock 한 문단 요약 (CLAUDE.md §1 내용을 한국어로).
+1. **시스템 개요** — OhMyStock 한 문단 요약 (docs/reference/project-context.md §1 내용을 한국어로).
 2. **컨테이너 토폴로지** — docker-compose(db, backend, 추후 ollama) + 호스트 Electron
    구도. Phase 0에서 실제 구축된 compose 구성(포트 8000, db healthcheck, 자동
    마이그레이션)을 그대로 기술.
@@ -1101,10 +1101,10 @@ git commit -m "feat(frontend): backend status hook + app integration + CSP"
    →AI 필터→주문→모니터링) ASCII 다이어그램.
 6. **일일 운영 타임라인** — 장 마감 후 수집(야간 배치, 레이트리밋 TR당 ~1req/s 때문)
    → 자정 스코어링 → 장 전 AI 분석 → 장 중 매매·모니터링.
-7. **검증된 키움 REST 팩트 요약** — CLAUDE.md §5의 핵심(모의/실전 URL, 토큰 재발급,
+7. **검증된 키움 REST 팩트 요약** — docs/reference/project-context.md §5의 핵심(모의/실전 URL, 토큰 재발급,
    TR id, 네이티브 TP/SL 부재 → 클라이언트측 구현, 레이트리밋)을 표로. 원본은
-   CLAUDE.md §5임을 명시.
-8. **로드맵과 의존 관계** — CLAUDE.md §6 표 + Phase 0 완료 상태 반영.
+   docs/reference/project-context.md §5임을 명시.
+8. **로드맵과 의존 관계** — docs/reference/project-context.md §6 표 + Phase 0 완료 상태 반영.
 
 - [ ] **Step 2: 커밋**
 

@@ -5,7 +5,7 @@
 - **역할:** 이 문서는 이후 모든 Phase(1~8)의 spec이 참조하는 **마스터 청사진**이다.
   개별 Phase spec은 이 문서의 관련 절을 인용하고, 그 Phase에 국한된 세부 설계만
   추가한다.
-- **근거 문서:** `CLAUDE.md`(§1·§3·§5·§6), `docs/specs/2026-06-16-phase0-walking-skeleton-design.md`(§3·§4),
+- **근거 문서:** `docs/reference/project-context.md`(§1·§3·§5·§6), `docs/specs/2026-06-16-phase0-walking-skeleton-design.md`(§3·§4),
   `docs/plans/2026-07-14-phase0-walking-skeleton-plan.md`(Task 6), 실제 코드
   (`backend/app/`, `frontend/src/renderer/src/`).
 
@@ -26,7 +26,7 @@ Windows 전용이라 크로스플랫폼 Electron UI와 호환되지 않기 때�
 런타임 아키텍처는 **컨테이너 Python 백엔드 + 호스트 네이티브 Electron UI**(안 A)다.
 백엔드와 DB(추후 Ollama)는 `docker-compose`로 실행하고, Electron UI는 데스크톱 GUI
 특성상 컨테이너화하지 않고 호스트에서 직접 실행되어 `localhost`로 백엔드에 접속한다.
-이 구도 덕분에 트레이딩 엔진은 UI 창이 닫혀도 계속 동작한다. (출처: CLAUDE.md §3,
+이 구도 덕분에 트레이딩 엔진은 UI 창이 닫혀도 계속 동작한다. (출처: docs/reference/project-context.md §3,
 spec §1.3~1.4)
 
 Phase 0 계획서(Task 6)에 정의된 실제 compose 토폴로지는 다음과 같다:
@@ -81,7 +81,7 @@ Phase 0 계획서(Task 6)에 정의된 실제 compose 토폴로지는 다음과 
 ## 3. 백엔드 계층 구조
 
 백엔드(`backend/app/`)는 5개 계층으로 나뉘며, 각 계층은 명확한 단일 책임을 가진다
-(출처: CLAUDE.md §3, 실제 코드 `backend/app/*`):
+(출처: docs/reference/project-context.md §3, 실제 코드 `backend/app/*`):
 
 | 계층 | 책임 | Phase 0 구현 상태 |
 |---|---|---|
@@ -97,7 +97,7 @@ Phase 0 계획서(Task 6)에 정의된 실제 compose 토폴로지는 다음과 
 못하고 오직 `BrokerPort`가 정의한 계약(주문, 시세 조회, 잔고 등)에만 의존한다. 따라서
 키움을 다른 브로커(KIS 등)로 교체하더라도 `domain/`은 수정할 필요가 없다. 이는
 "make-it-work-for-now" 식의 깊은 `if` 분기를 금지하고 명확한 인터페이스로 설계하라는
-프로젝트 규칙(CLAUDE.md §2 규칙 2)을 아키텍처 수준에서 구현한 것이다.
+프로젝트 규칙(docs/reference/project-context.md §2 규칙 2)을 아키텍처 수준에서 구현한 것이다.
 **의도된 예외 1건:** `domain/sector_classification.py`(Phase 3)는 브로커 고유의
 업종코드 체계를 도메인 상수로 소비한다 — 분류의 유일한 소비자가 스코어링
 도메인 자신이기 때문(스펙 2026-07-18 §3-2 결정). 브로커 교체 시 이 맵은 새
@@ -111,7 +111,7 @@ Phase 0 계획서(Task 6)에 정의된 실제 compose 토폴로지는 다음과 
 
 ## 4. 8개 서브시스템 (로드맵 Phase 1~8)
 
-로드맵의 각 Phase는 다음 서브시스템 하나씩을 구축한다(출처: CLAUDE.md §6, §5):
+로드맵의 각 Phase는 다음 서브시스템 하나씩을 구축한다(출처: docs/reference/project-context.md §6, §5):
 
 1. **브로커 어댑터(Phase 1)** — `BrokerPort` 인터페이스와 키움 REST **모의투자**
    구현체. 인증(OAuth2 client_credentials, 토큰 재발급), 시세 조회, 주문 실행을
@@ -188,7 +188,7 @@ Phase 0은 실제 키움 API 호출·데이터 수집·매매 로직 없이, 상
 ## 6. 일일 운영 타임라인
 
 키움 REST의 레이트리밋(TR당 ~1 req/s, 전역이 아닌 TR별)과 네이티브 TP/SL 부재라는
-검증된 제약(§7 참고)이 아래 타임라인의 형태를 결정한다(출처: CLAUDE.md §5, §6 Phase
+검증된 제약(§7 참고)이 아래 타임라인의 형태를 결정한다(출처: docs/reference/project-context.md §5, §6 Phase
 2·5·6):
 
 1. **장 마감 후 — 데이터 수집 (야간 배치)**: 약 2,800개 전 종목의 6개월치 일봉을
@@ -207,7 +207,7 @@ Phase 0은 실제 키움 API 호출·데이터 수집·매매 로직 없이, 상
 
 ## 7. 검증된 키움 REST 팩트 요약
 
-아래 표의 원본 출처는 **`CLAUDE.md` §5(검증된 브로커 팩트)**이며, 신뢰 전 재검증
+아래 표의 원본 출처는 **`docs/reference/project-context.md` §5(검증된 브로커 팩트)**이며, 신뢰 전 재검증
 대상임을 명시한다. 상세 근거: https://openapi.kiwoom.com/guide/index ,
 https://github.com/younghwan91/kiwoom-rest-api
 
@@ -224,7 +224,7 @@ https://github.com/younghwan91/kiwoom-rest-api
 
 ## 8. 로드맵과 의존 관계
 
-로드맵 표는 CLAUDE.md §6과 동일하며, Phase 0의 현재 상태를 반영한다:
+로드맵 표는 docs/reference/project-context.md §6과 동일하며, Phase 0의 현재 상태를 반영한다:
 
 | Phase | 이름 | 의존 | 상태 |
 |---|---|---|---|

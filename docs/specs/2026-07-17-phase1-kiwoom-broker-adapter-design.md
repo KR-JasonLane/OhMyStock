@@ -23,7 +23,7 @@
 4. **직접 구현** (비공식 래퍼 라이브러리 미사용) — 개인 유지보수 프로젝트 의존 리스크
    회피, 우리 레이트리밋·포트 설계와의 정합성 (규칙 2).
 5. **검증 프로세스 (신규 규칙 8):** 각 태스크 코딩 후 **4-에이전트 리뷰 패널**
-   (`.claude/agents/`: senior-developer, senior-trader, architecture-expert,
+   (`.codex/agents/`: senior-developer, senior-trader, architecture-expert,
    security-expert) 전원 통과 후 다음 태스크로.
 
 ## 2. 목표
@@ -108,7 +108,7 @@ class BrokerPort(Protocol):
 공식 포털(openapi.kiwoom.com)은 로그인 필요 SPA라 자동 수집 불가 — **확인이 필요할
 때 브라우저를 띄우면 사용자가 로그인해 주기로 함(2026-07-17 합의).** 실제로는 이번
 Phase에서 브라우저 확인 없이도 라이브 스모크(모의서버 실호출)만으로 위 표의 대부분을
-실측 확정했다. 구현 중 발견된 불일치는 모두 CLAUDE.md §5에 반영했다(규칙 5·6).
+실측 확정했다. 구현 중 발견된 불일치는 모두 docs/reference/project-context.md §5에 반영했다(규칙 5·6).
 
 ## 6. 테스트
 
@@ -131,7 +131,7 @@ Phase에서 브라우저 확인 없이도 라이브 스모크(모의서버 실�
 2. 단위 테스트 전부 통과 (Phase 0의 9개 포함 전체 회귀 그린).
 3. 라이브 스모크: 모의서버에서 토큰 발급·현재가·일봉·예수금·잔고 조회 성공.
 4. 모든 태스크가 4-에이전트 패널 검증을 통과했다.
-5. 실측으로 확인된 키움 팩트(레이트리밋, 429 스키마, 응답 필드)가 CLAUDE.md §5와
+5. 실측으로 확인된 키움 팩트(레이트리밋, 429 스키마, 응답 필드)가 docs/reference/project-context.md §5와
    회고록에 반영되었다.
 6. `docs/retrospectives/`에 Phase 1 회고록 존재, STATUS.md가 Phase 2로 핸드오프.
 

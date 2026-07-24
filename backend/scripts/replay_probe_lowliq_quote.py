@@ -5,7 +5,7 @@
 실서버 ka10095의 실시간 스냅샷 의미와 같은지 저유동 심볼로 확인한다 —
 ka10095의 cur_prc가 "마지막 체결가"라면 두 세계는 일치한다.
 
-실행 전제: 백엔드 정지(단일 토큰 — CLAUDE.md §5). G1 토큰 관용구.
+실행 전제: 백엔드 정지(단일 토큰 — docs/reference/project-context.md §5). G1 토큰 관용구.
 """
 
 import asyncio
