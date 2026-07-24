@@ -240,6 +240,23 @@ class PositionMonitor:
                           trailing_active=evaluation.new_trailing_active)
         if (updated.peak_price != pos.peak_price
                 or updated.trailing_active != pos.trailing_active):
+            # 방어선 상태 전이 로그(결정 #36 — P6 Task 7c): peak 갱신·
+            # 트레일링 활성화가 안 남으면 "손절/트레일링이 왜 그 가격에
+            # 발동했는가"를 사후 재구성할 수 없다. 전이 시에만 찍어
+            # 폴링 주기(수 초) 폭주를 피한다. 활성화는 되돌릴 수 없는
+            # 래치라 WARNING(방어선 단계 상승), peak 갱신은 INFO.
+            if updated.trailing_active and not pos.trailing_active:
+                logger.warning(
+                    "defense trailing ACTIVATED: %s entry=%d peak=%d "
+                    "current=%d gain=%.2f%%", pos.symbol, pos.entry_price,
+                    updated.peak_price, md.quote.price,
+                    (updated.peak_price / pos.entry_price - 1) * 100)
+            elif updated.peak_price != pos.peak_price:
+                logger.info(
+                    "defense peak updated: %s %d→%d (entry=%d current=%d "
+                    "trailing=%s)", pos.symbol, pos.peak_price,
+                    updated.peak_price, pos.entry_price, md.quote.price,
+                    updated.trailing_active)
             # 주문과 무관한 관측 영속 — 실패해도 이번 사이클 판정은 유효하고
             # 다음 관측이 같은 값을 재계산하므로 격리(경고 노출+로그). 단 청산
             # 발주 직전 persist(EXITING)는 fail-closed로 별도 수행된다.

@@ -127,9 +127,15 @@ class TradingStore:
     def finish_run(self, run_id: int, status: str,
                    stopped_by_kill_switch: bool = False,
                    kill_switch_mode: str | None = None,
-                   failure_reason: str | None = None) -> None:
+                   failure_reason: str | None = None,
+                   warnings: str | None = None) -> None:
         """킬 스위치 감사(§9 보안 패널) — Task 7이 _run() 종료 시
-        request_stop 여부·모드로부터 기록한다."""
+        request_stop 여부·모드로부터 기록한다.
+
+        warnings(P6 Task 7c, 결정 #36): run 중 누적된 판정 경고(진입 탈락
+        사유·재시도)를 개행 구분 텍스트로 영속 — 종전에는 메모리에만 있어
+        run 종료와 함께 소실됐다. 값은 도메인이 만든 고정 서술 문자열이며,
+        예외 원문은 여기로 오지 않는다(failure_reason은 타입명만 — §9)."""
         with self._sessions.begin() as session:
             run = session.get(TradeRunRow, run_id)
             if run is None:
@@ -139,6 +145,7 @@ class TradingStore:
             run.stopped_by_kill_switch = stopped_by_kill_switch
             run.kill_switch_mode = kill_switch_mode
             run.failure_reason = failure_reason
+            run.warnings = warnings
 
     def daily_order_usage(self, day: date,
                           run_environment: str) -> DailyOrderUsage:
@@ -520,4 +527,9 @@ class TradingStore:
                                     if run.finished_at else None),
                     "stopped_by_kill_switch": run.stopped_by_kill_switch,
                     "kill_switch_mode": run.kill_switch_mode,
-                    "failure_reason": run.failure_reason}
+                    "failure_reason": run.failure_reason,
+                    # 종료된 run의 판정 경고(0012) — 감사 접근자가 원시 SQL
+                    # 없이도 "왜 안 샀나"에 답하도록(개발자 T7c Minor).
+                    # ⚠️ 이 dict를 API로 노출하는 소비자는 현재 없다 —
+                    # 노출 시 무인증 표면 재평가 필요(§8-2 이월).
+                    "warnings": run.warnings}

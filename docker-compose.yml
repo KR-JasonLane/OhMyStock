@@ -25,6 +25,19 @@ services:
       context: ./backend
       target: app   # 다중 스테이지(리플레이 분리 — §4-2): 프로덕션 대상 명시
     restart: unless-stopped   # 재부팅 수렴 — db 서비스의 주석 참조(§10-2)
+    logging:
+      # 결정 #36(상세 로그) 보존: 기본 json-file은 회전 없음(무한 성장) +
+      # 컨테이너 재생성 시 유실. 회전 50MB×5로 상한.
+      # ⚠️ SSOT 경계(보안 P6-T7c): 진입 판정은 trade_runs.warnings(0012),
+      # 주문·체결·포지션 상태는 trade_* 테이블, 스케줄 판정은
+      # scheduler_events가 DB SSOT다. 단 **포지션 방어선 전이 이력**
+      # (peak 갱신·트레일링 활성화 시각/가격)은 현재 로그 전용 —
+      # trade_positions는 UPDATE 스냅샷이라 최신 상태만 남는다. 회전·
+      # 재생성 시 이 이력은 소실된다(백로그: position_events 테이블).
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
     env_file: .env
     extra_hosts:
       # 리눅스 네이티브 도커는 host.docker.internal을 기본 제공하지 않는다

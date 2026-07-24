@@ -177,8 +177,14 @@ def select_entries(candidates: list[EntryCandidate], held_symbols: set[str],
             continue
         quantity = int(slot_krw * buffer) // cand.current_price
         if quantity <= 0:
+            # ⚠️ slot_krw 원값을 넣지 않는다(보안 P6-T7c Important): slot_krw
+            # = available × max_capital_pct ÷ max_positions 는 고정 설정값의
+            # 선형 변환이라 **계좌 가용 잔액을 역산**할 수 있다. 위 slot<=0
+            # 분기(보안 R-패치)와 같은 원칙이며, Task 7c로 이 사유가
+            # trade_runs.warnings에 영구 적재되면서 노출 범위가 "현재 run"
+            # 에서 "전체 이력"으로 확대되므로 동일 마스킹이 필수가 됐다.
             dropped.append(DroppedCandidate(
-                            cand.symbol, f"slot budget {slot_krw:,} buys 0 shares at "
+                            cand.symbol, f"slot budget buys 0 shares at "
                             f"{cand.current_price:,}"))
             continue
         plans.append(EntryPlan(symbol=cand.symbol, name=cand.name,

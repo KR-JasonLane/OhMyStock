@@ -212,6 +212,13 @@ class TradeRunRow(Base):
     stopped_by_kill_switch: Mapped[bool] = mapped_column(
         Boolean, default=False, server_default="0")
     kill_switch_mode: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # run 중 누적된 경고(진입 탈락 사유·재시도 판정·부분 실패·monitor 상시
+    # 경고) — **개행 구분 텍스트**. 결정 #36(분석 친화 적재): 종전에는
+    # /trade/status 메모리에만 있어 run 종료와 함께 소실됐고, "그날 왜 안
+    # 샀나"를 사후에 SQL로 물을 수 없었다(P6 Task 7c, 2026-07-24 7b 실측).
+    # ⚠️ analysis_runs.warnings는 JSON 배열 문자열로 형식이 다르다(아키텍트
+    # ·개발자 T7c 정정) — 이쪽은 psql 직독 가독성이 주 용도라 개행 텍스트.
+    warnings: Mapped[str | None] = mapped_column(Text, nullable=True)
     failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 

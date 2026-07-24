@@ -55,7 +55,8 @@ class _StoreLike(Protocol):
     def finish_run(self, run_id: int, status: str,
                    stopped_by_kill_switch: bool = False,
                    kill_switch_mode: str | None = None,
-                   failure_reason: str | None = None) -> None: ...
+                   failure_reason: str | None = None,
+                   warnings: str | None = None) -> None: ...
     def create_position(self, run_id: int, position: TradePosition) -> int: ...
     def update_position(self, position_id: int, **kwargs) -> None: ...
     def save_position_snapshot(self, position_id: int,
@@ -180,14 +181,36 @@ class TradingService(BackgroundRunService):
             status = "stopping" if mode is not None else "running"
         else:
             status = self._final_status
-        monitor_warnings = tuple(self._monitor.warnings) if self._monitor else ()
         return TradingProgress(
             run_id=self._run_id, status=status,
             positions_count=len(self._pos_ids),
-            warnings=tuple(self._warnings) + monitor_warnings,
+            warnings=self._all_warnings(),
             daily_order_count=caps.order_count if caps else 0,
             daily_order_krw=caps.order_krw if caps else 0,
             kill_switch=mode.value if mode else None)
+
+    def _all_warnings(self) -> tuple[str, ...]:
+        """경고 두 출처 합성 — 서비스 누적(self._warnings)과 monitor의 상시
+        경고(딕셔너리 — 해소 시 사라지는 현재 상태). /trade/status와 run
+        종료 영속이 **같은 합성**을 쓰도록 단일화(트레이더 T7c: finish_run
+        만 monitor 출처를 빠뜨려 방어선 신뢰성 경고가 DB에 안 남았다)."""
+        monitor_warnings = (tuple(self._monitor.warnings)
+                            if self._monitor else ())
+        return tuple(self._warnings) + monitor_warnings
+
+    def _collected_warnings(self) -> str | None:
+        """DB 영속용 직렬화(개행 구분, 최신 200건). 비면 None — 빈 문자열이
+        아니라 NULL이어야 `IS NOT NULL` 집계가 깨끗하다."""
+        merged = self._all_warnings()
+        if not merged:
+            return None
+        kept = merged[-200:]
+        dropped = len(merged) - len(kept)
+        body = "\n".join(kept)
+        # 절단 사실을 남긴다(트레이더 T7c Minor — 잘린 줄 수를 모르면
+        # 사후 분석이 "전부 다"라고 오인한다)
+        return (f"[{dropped} earlier warnings truncated]\n{body}"
+                if dropped else body)
 
     def _on_accepted(self) -> None:
         # 필드 대입만(베이스 계약 — 예외 금지)
@@ -238,7 +261,14 @@ class TradingService(BackgroundRunService):
                     self._store.finish_run, self._run_id, status,
                     stopped_by_kill_switch=mode is not None,
                     kill_switch_mode=mode.value if mode else None,
-                    failure_reason=failure)
+                    failure_reason=failure,
+                    # 판정 경고 영속(P6 Task 7c, 결정 #36) — 메모리 소실
+                    # 방지. 상한: 마지막 200건(폭주 방어, 최신 우선).
+                    # ⚠️ progress()와 **동일한 두 출처 합성**(트레이더 T7c
+                    # Important): monitor의 상시 경고(persist:/quote: —
+                    # 방어선 신뢰성 경고)를 빼면 run 종료 시 그것만 소실돼
+                    # 이 태스크의 목적이 절반만 달성된다.
+                    warnings=self._collected_warnings())
             except Exception:  # noqa: BLE001
                 logger.exception("finish_run failed for run %s", self._run_id)
 
@@ -301,7 +331,7 @@ class TradingService(BackgroundRunService):
             self._entries_done = True
         # 금액 원값은 warnings(무인증 /trade/status)에 넣지 않는다 — 건수는
         # 이미 daily_order_count로 노출되는 수준(§8-2 노출 최소 관례)
-        self._warnings.append(
+        self._warn_once(
             f"daily caps seeded from earlier runs today "
             f"({usage.order_count} orders counted)")
         logger.info(
@@ -315,7 +345,7 @@ class TradingService(BackgroundRunService):
         rows, corrupted = await asyncio.to_thread(
             self._store.open_positions, self._run_environment)
         for pid in corrupted:
-            self._warnings.append(
+            self._warn_once(
                 f"position row {pid} corrupted (enum) — excluded from "
                 "reconcile, manual repair required")
         self._pos_ids = {pos.symbol: pid for pid, pos in rows}
@@ -353,7 +383,12 @@ class TradingService(BackgroundRunService):
         applied, warnings = await apply_reconcile(
             actions, self._orders, self._persist_by_symbol,
             record_cancel=self._record_reconcile_cancel)
-        self._warnings.extend(warnings)
+        # reconcile 배치 경고(고아 주문·취소 모호 등)도 _warn_once 경유 —
+        # extend는 dedup·실시간 로그를 모두 건너뛴다(개발자 T7c 델타:
+        # ".append 12곳 통일"이 .extend 형태 1곳을 놓쳤다. _run_reconcile은
+        # 매 run 시작과 미니 reconcile 양쪽에서 도는 핵심 경로)
+        for warning in warnings:
+            self._warn_once(warning)
         for action in applied:
             # 종결 판정(CLOSE/FAIL_ENTRY)은 보유 집합에서 즉시 제거(개발자
             # P5-T7 Critical #1 — 방치 시 그 심볼 재진입이 막히고 stale
@@ -387,9 +422,16 @@ class TradingService(BackgroundRunService):
     def _warn_once(self, message: str) -> None:
         """재시도 사이클에서 반복되는 경고의 중복 억제 — 진입 재시도(P6
         §4-c)는 창 내 매 사이클 재평가라, 무조건 append하면 25분 창 동안
-        같은 문구가 수백 건 쌓여 /trade/status를 오염한다."""
+        같은 문구가 수백 건 쌓여 /trade/status를 오염한다.
+
+        **로그도 같은 dedup을 탄다**(P6 Task 7c — 결정 #36): 종전에는
+        warnings 리스트에만 쌓여 run 종료와 함께 소실됐고, 진입 재시도
+        판정이 로그에 0건이라 "왜 안 샀나"를 사후 재구성할 수 없었다
+        (2026-07-24 7b 관찰에서 실측 — 09:06~09:11 재시도 수십 회가 로그
+        무기록). 스케줄러 `_record_once`와 동일 패턴."""
         if message not in self._warnings:
             self._warnings.append(message)
+            logger.warning("trade decision: %s", message)
 
     async def _enter_positions(self, now: datetime) -> bool:
         """진입 배치 1회 시도. 반환 = **판정 성립 여부**(P6 §4-c — P5 정정):
@@ -507,7 +549,7 @@ class TradingService(BackgroundRunService):
                 if fresh:
                     md = fresh[0]
             except Exception:  # noqa: BLE001
-                self._warnings.append(
+                self._warn_once(
                     f"{plan.symbol}: pre-entry requote failed — using batch "
                     "snapshot")
             ask = md.ask if md.ask > 0 else md.quote.price
@@ -523,7 +565,7 @@ class TradingService(BackgroundRunService):
                 outcome = await self._executor_for(pos_id).execute(plan, ask)
             except SingleOrderCapExceeded as exc:
                 # 후보 단위 위반(트레이더 I5) — 이 후보만 스킵, 배치 계속
-                self._warnings.append(
+                self._warn_once(
                     f"{plan.symbol}: entry blocked by single-order cap "
                     f"({exc}) — skipped, batch continues")
                 await asyncio.to_thread(
@@ -533,7 +575,7 @@ class TradingService(BackgroundRunService):
                 continue
             except DailyCapExceeded as exc:
                 # 전역 소진(§8-1) — 신규 진입 배치 중단(판정 성립 — 래치)
-                self._warnings.append(f"entry batch stopped by daily cap: "
+                self._warn_once(f"entry batch stopped by daily cap: "
                                       f"{exc}")
                 await asyncio.to_thread(
                     self._store.update_position, pos_id,
@@ -548,6 +590,14 @@ class TradingService(BackgroundRunService):
         symbol = plan.symbol
         if outcome.position is not None:
             entered = replace(outcome.position, entered_at=self._clock())
+            # 진입 체결 로그(결정 #36, 개발자 T7c Important — 청산은
+            # "position closed"가 있는데 진입은 로그가 없어 "언제 무엇을
+            # 얼마에 샀나"라는 가장 중요한 판정이 DB 조인 없이는 안 보였다)
+            logger.info(
+                "entry filled: %s qty=%d price=%d amount=%d (phase=%s)",
+                symbol, entered.quantity, entered.entry_price,
+                entered.entry_price * entered.quantity,
+                entered.entry_phase.value if entered.entry_phase else "-")
             await asyncio.to_thread(self._store.save_position_snapshot,
                                     pos_id, entered)
             await self._verify_entry_with_balance(pos_id, entered)
@@ -557,7 +607,7 @@ class TradingService(BackgroundRunService):
         if outcome.requires_reconcile:
             # ⚠️ 확정 ENTRY_FAILED 금지(§6-3.8 캐비어트 — 마지막 EntryPhase
             # 유지) — 미니 reconcile이 브로커 ground truth로 최종 상태 결정
-            self._warnings.append(
+            self._warn_once(
                 f"{symbol}: entry unresolved ({outcome.failure_reason}) — "
                 "mini reconcile")
             await self._mini_reconcile(symbol)
@@ -565,7 +615,7 @@ class TradingService(BackgroundRunService):
         await asyncio.to_thread(self._store.update_position, pos_id,
                                 state=PositionState.ENTRY_FAILED)
         self._pos_ids.pop(symbol, None)
-        self._warnings.append(f"{symbol}: entry failed — "
+        self._warn_once(f"{symbol}: entry failed — "
                               f"{outcome.failure_reason}")
 
     async def _verify_entry_with_balance(self, pos_id: int,
@@ -588,7 +638,7 @@ class TradingService(BackgroundRunService):
             if attempt == 1:  # 전파 유예 후 1회 재확인
                 await self._sleep(self._config.poll_interval_sec * 2)
         if broker_pos is None:
-            self._warnings.append(
+            self._warn_once(
                 f"{entered.symbol}: entered but balance shows none "
                 "(2 checks) — phantom position closed (alarm)")
             await asyncio.to_thread(
@@ -611,9 +661,16 @@ class TradingService(BackgroundRunService):
     async def _post_actions(self, actions: list[ExitAction]) -> None:
         for action in actions:
             if action.state is PositionState.CLOSED:
-                # 쿨다운 근거는 DB closed_at(§8-1 — recent_closed_symbols)
-                logger.info("position closed: %s (%s)", action.symbol,
-                            action.reason.value)
+                # 쿨다운 근거는 DB closed_at(§8-1 — recent_closed_symbols).
+                # 가격·손익 병기(트레이더 T7c 권고): "entry filled"와 grep
+                # 대칭 — 진입은 단가/금액이 보이는데 청산이 사유만 남으면
+                # 하루 매매를 로그로 추적하다 "얼마에 팔았나"에서 끊긴다.
+                # None(추정가 미상 — reconcile 시드 등)은 그대로 노출해
+                # "가격 미상"을 정직하게 남긴다(I4 계약 보존).
+                logger.info(
+                    "position closed: %s (%s) qty=%d price=%s pnl=%s",
+                    action.symbol, action.reason.value, action.quantity,
+                    action.exit_price, action.realized_pnl)
         if not any(a.requires_reconcile for a in actions):
             self._forget_closed(actions)
             return
@@ -633,7 +690,7 @@ class TradingService(BackgroundRunService):
                     logger.error("CLOSED-with-holdings for %s but no tracked "
                                  "position id — manual intervention",
                                  action.symbol)
-                    self._warnings.append(
+                    self._warn_once(
                         f"{action.symbol}: CLOSED but balance holds "
                         f"{broker_pos.quantity} and position id unknown — "
                         "manual intervention required")
@@ -652,7 +709,7 @@ class TradingService(BackgroundRunService):
                     trailing_active=False, entered_at=self._clock())
                 await asyncio.to_thread(self._store.save_position_snapshot,
                                         pos_id, reopened)
-                self._warnings.append(
+                self._warn_once(
                     f"{action.symbol}: CLOSED overturned — balance still "
                     f"holds {broker_pos.quantity}, reopened for watch")
         self._forget_closed(actions)
@@ -688,7 +745,7 @@ class TradingService(BackgroundRunService):
                         await asyncio.to_thread(
                             self._store.save_position_snapshot, pos_id,
                             replace(pos, state=PositionState.EXIT_FAILED))
-                    self._warnings.append(
+                    self._warn_once(
                         f"{pos.symbol}: liquidation incomplete at market "
                         "close — EXIT_FAILED (still held)")
                 return
@@ -784,7 +841,7 @@ class TradingService(BackgroundRunService):
                 await asyncio.to_thread(
                     self._store.save_position_snapshot, pid,
                     replace(pos, quantity=broker_qty))
-                self._warnings.append(
+                self._warn_once(
                     f"{pos.symbol}: quantity aligned to balance "
                     f"({pos.quantity}→{broker_qty})")
 
