@@ -67,6 +67,13 @@ class Settings(BaseSettings):
     # lifespan 테스트가 실물 스케줄러를 띄우지 않게).
     scheduler_enabled: bool = True
 
+    # Telegram은 세 값이 하나의 자격 증명/권한 묶음이다. 일부 설정을
+    # 조용히 비활성으로 취급하면 운영자가 알림·원격 정지가 된다고 오인할 수
+    # 있으므로 아래 validator에서 all-or-nothing과 양수 ID를 강제한다.
+    telegram_bot_token: SecretStr | None = None
+    telegram_allowed_user_id: int | None = None
+    telegram_allowed_chat_id: int | None = None
+
     # ── 리플레이 프로필(스펙 §4-1 — 자동 전환 없음, 명시적 env+재기동) ──
     # 설정되면 키움 어댑터가 mock/real URL 대신 이 값을 쓴다(로컬 리플레이
     # 목 서버 전용 — 아래 validator가 루프백/replay 서비스명 외 전부 거부).
@@ -87,6 +94,46 @@ class Settings(BaseSettings):
         if self.kiwoom_base_url_override is not None:
             return "replay"
         return self.mode
+
+    @property
+    def telegram_enabled(self) -> bool:
+        return (
+            self.telegram_bot_token is not None
+            and self.telegram_allowed_user_id is not None
+            and self.telegram_allowed_chat_id is not None
+            and self.run_environment != "replay"
+        )
+
+    @model_validator(mode="after")
+    def _텔레그램_설정_검증(self) -> "Settings":
+        telegram_values = (
+            self.telegram_bot_token,
+            self.telegram_allowed_user_id,
+            self.telegram_allowed_chat_id,
+        )
+        if any(value is not None for value in telegram_values) and not all(
+            value is not None for value in telegram_values
+        ):
+            raise ValueError(
+                "TELEGRAM_BOT_TOKEN, TELEGRAM_ALLOWED_USER_ID, "
+                "TELEGRAM_ALLOWED_CHAT_ID는 전부 설정하거나 전부 비워야 합니다."
+            )
+        if (
+            self.telegram_allowed_user_id is not None
+            and self.telegram_allowed_user_id <= 0
+        ):
+            raise ValueError("TELEGRAM_ALLOWED_USER_ID는 양수여야 합니다.")
+        if (
+            self.telegram_allowed_chat_id is not None
+            and self.telegram_allowed_chat_id <= 0
+        ):
+            raise ValueError("TELEGRAM_ALLOWED_CHAT_ID는 양수여야 합니다.")
+        if (
+            self.telegram_bot_token is not None
+            and not self.telegram_bot_token.get_secret_value().strip()
+        ):
+            raise ValueError("TELEGRAM_BOT_TOKEN은 공백일 수 없습니다.")
+        return self
 
     @model_validator(mode="after")
     def _실전_모드는_쓰기_토큰이_필수다(self) -> "Settings":

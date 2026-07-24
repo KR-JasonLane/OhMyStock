@@ -22,6 +22,7 @@ from app.api.ws import router as ws_router
 from app.core import market_calendar
 from app.core.config import Settings, get_settings
 from app.core.replay_clock import make_replay_clock
+from app.core.sensitive_logging import configure_sensitive_http_logging
 from app.domain.analysis.config import AnalysisConfig
 from app.domain.analysis.service import AnalysisService
 from app.domain.collection import CollectionService
@@ -42,6 +43,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
+configure_sensitive_http_logging()
 
 logger = logging.getLogger(__name__)
 

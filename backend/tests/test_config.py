@@ -164,3 +164,78 @@ def test_필수_시크릿의_빈_문자열도_즉시_실패(monkeypatch):
     monkeypatch.setenv("DATABASE_URL", "")
     with pytest.raises(ValidationError):
         Settings(_env_file=None)
+
+
+@pytest.mark.parametrize(
+    ("token", "user_id", "chat_id"),
+    [
+        ("secret", None, None),
+        (None, "10", None),
+        (None, None, "20"),
+        ("secret", "10", None),
+        ("secret", None, "20"),
+        (None, "10", "20"),
+    ],
+)
+def test_텔레그램_설정은_전부_있거나_전부_없어야_한다(
+    monkeypatch, token, user_id, chat_id
+):
+    _set_env(monkeypatch)
+    values = {
+        "TELEGRAM_BOT_TOKEN": token,
+        "TELEGRAM_ALLOWED_USER_ID": user_id,
+        "TELEGRAM_ALLOWED_CHAT_ID": chat_id,
+    }
+    for name, value in values.items():
+        if value is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, value)
+
+    with pytest.raises(ValidationError, match="TELEGRAM_"):
+        Settings(_env_file=None)
+
+
+@pytest.mark.parametrize("name", ["TELEGRAM_ALLOWED_USER_ID", "TELEGRAM_ALLOWED_CHAT_ID"])
+@pytest.mark.parametrize("value", ["0", "-1"])
+def test_텔레그램_ID는_양수여야_한다(monkeypatch, name, value):
+    _set_env(monkeypatch)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "secret")
+    monkeypatch.setenv("TELEGRAM_ALLOWED_USER_ID", "10")
+    monkeypatch.setenv("TELEGRAM_ALLOWED_CHAT_ID", "20")
+    monkeypatch.setenv(name, value)
+
+    with pytest.raises(ValidationError, match="TELEGRAM_"):
+        Settings(_env_file=None)
+
+
+def test_telegram_enabled는_정상_3종에서만_true(monkeypatch):
+    _set_env(monkeypatch)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "TOPTOKEN")
+    monkeypatch.setenv("TELEGRAM_ALLOWED_USER_ID", "10")
+    monkeypatch.setenv("TELEGRAM_ALLOWED_CHAT_ID", "20")
+
+    settings = Settings(_env_file=None)
+
+    assert settings.telegram_enabled is True
+    assert "TOPTOKEN" not in repr(settings)
+
+
+def test_telegram_enabled는_replay에서_false(monkeypatch):
+    _set_env(monkeypatch)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "secret")
+    monkeypatch.setenv("TELEGRAM_ALLOWED_USER_ID", "10")
+    monkeypatch.setenv("TELEGRAM_ALLOWED_CHAT_ID", "20")
+    monkeypatch.setenv("KIWOOM_BASE_URL_OVERRIDE", "http://replay:9095")
+
+    assert Settings(_env_file=None).telegram_enabled is False
+
+
+def test_텔레그램_token은_공백만_있을_수_없다(monkeypatch):
+    _set_env(monkeypatch)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "   ")
+    monkeypatch.setenv("TELEGRAM_ALLOWED_USER_ID", "10")
+    monkeypatch.setenv("TELEGRAM_ALLOWED_CHAT_ID", "20")
+
+    with pytest.raises(ValidationError, match="TELEGRAM_BOT_TOKEN"):
+        Settings(_env_file=None)
