@@ -152,3 +152,82 @@ Task 1의 `InboundMessage`로 변환하거나 Bot API 실패를 안전하게 분
   -q app tests`도 exit 0이다.
 - 실제 Telegram 호출은 수행하지 않았으며 모든 어댑터 요청은
   `httpx.MockTransport`로만 검증했다.
+
+## Task 3 — 0013 영속 모델과 저장소
+
+- 요청: polling offset과 update batch의 원자 커밋, 확인 토큰의 단일 소비,
+  command intent, append-only operational event, 고정 조각 delivery를
+  재기동 가능한 SQL 상태로 만들었다.
+- 기존 상태: `0012`가 Alembic head였고 Telegram용 테이블과 저장소는 없었다.
+- 설계 판단: claim은 후보 조회만으로 소유권을 인정하지 않고 상태·version·
+  lease를 다시 조건으로 건 UPDATE의 rowcount가 1일 때만 성공으로 본다.
+  terminal 상태는 claim 조건에서 제외했다. confirmation은
+  `secrets.token_urlsafe(32)` 원문을 호출자에게 한 번만 반환하고 SHA-256
+  해시만 저장하며 TTL은 호출 인자와 무관하게 120초로 고정했다.
+  JSON은 key 정렬·공백 제거·NaN 금지 canonical 형식으로 저장한다.
+- 변경 위치: `backend/alembic/versions/0013_telegram_notifications.py`,
+  `backend/app/store/models.py`, `telegram_inbox_store.py`,
+  `telegram_command_store.py`, `notification_store.py`와 저장소/마이그레이션
+  테스트. SQLite의 자동 증가 의미를 보존하기 위해 PK 타입만 dialect
+  variant를 사용하며 PostgreSQL에서는 BigInteger다.
+- 안전성: batch와 offset, token 소비와 intent 생성은 각각 하나의
+  `sessions.begin()`에 있다. delivery retry 예산과 lease는 조각별이며 모두
+  전송되면 payload와 모든 body를 NULL로 purge한다. retention은 sent
+  notification만 제한 건수로 지우며 pending/sending/dead-letter,
+  command unknown과 audit 근거에는 손대지 않는다. naive datetime은 store
+  경계에서 즉시 거부한다.
+- 검증: focused 저장소 테스트와 0013 upgrade/downgrade 왕복을 실행했다.
+  운영 DB upgrade와 Telegram/키움 네트워크 호출은 하지 않았다.
+
+### Task 3 공식 패널 수정
+
+- command 실행 상태를 `pending → claimed → running`으로 제한했다. 만료된
+  `running`은 재실행하지 않고 CAS로 `unknown` 표시한 뒤
+  `unknown → reconciling` 전용 claim에서만 대사한다. 모든 실행·종결 전이는
+  owner와 version fence가 일치해야 한다.
+- synthetic 음수 update를 제거했다. confirmation 소비는 기존 inbox의
+  실제 `/confirm` update ID가 필수이며, token 소비와 intent insert는 같은
+  트랜잭션이다. 운영자별 lock row를 upsert하고 `FOR UPDATE`로 발급을
+  직렬화한다.
+- delivery에 version fence를 추가하고 success/retry 우회 API를 제거했다.
+  마지막 조각은 outbox를 `FOR UPDATE`로 잠근 뒤 전체 성공을 확인하고
+  payload/body를 purge한다. claim 순서는 priority, occurred_at,
+  part_index다.
+- update/event/outbox insert는 SQLite/PostgreSQL dialect upsert 또는
+  unique conflict 흡수 구조로 바꾸고 offset 갱신은 DB 조건부 단조 증가로
+  만들었다. operational event는 도메인 모델만 받으며 caller session에
+  참여하는 primitive를 제공한다.
+- 저장 경계는 hash·command·식별자·canonical JSON·본문 byte 상한을
+  fail-fast 검증한다. 미허용 폭주는 Counter로 메모리 집계하고 분당
+  주체 행과 고정 집계 bucket을 합쳐 최대 300행으로 제한한다.
+- 민감 조회/digest에는 각각 15분/24시간 purge 시각을 저장한다. 기한이
+  지나면 미전송이어도 본문을 지우고 dead-letter 메타데이터는 남긴다.
+  terminal update·confirmation·sent outbox 정리는 limit가 있는 API만
+  제공하며 unknown, pending/sending, 조사 전 dead-letter와 연결된 감사
+  근거는 삭제하지 않는다.
+- SQLite는 `FOR UPDATE`를 실제 row lock으로 집행하지 않는다. 테스트는
+  conditional UPDATE/unique constraint의 단일 승자 의미를 검증하고,
+  프로덕션 PostgreSQL에서는 코드에 보존한 `FOR UPDATE`가 발급과 마지막
+  조각 종결을 직렬화한다.
+
+### Task 3 2차 재검토
+
+- `reconciling` worker도 죽을 수 있으므로 lease가 만료된 reconciliation을
+  owner+version CAS로 다른 worker가 회수하게 했다. stale worker의 terminal
+  기록은 fence에서 거부된다.
+- 모든 notification 변경은 parent outbox lock을 delivery보다 먼저
+  획득한다. TTL purge는 살아 있는 sending lease가 있으면 건너뛰고 만료 후
+  outbox lock→delivery version 증가·본문 폐기→outbox payload 폐기 순서다.
+  claim은 이미 purge 시각이 지난 본문을 가져오지 않는다.
+- confirmation 90일 정리는 unresolved execution 연결만 보존한다. terminal
+  execution은 제한된 후보 범위에서 nullable FK를 해제한 뒤 confirmation을
+  지운다.
+- rejected iterable은 최대 100개까지만 소비한다. 분당 total 300 이후에는
+  외부 SHA-256 값과 문법상 충돌할 수 없는 `__total__`, `__overflow__` 내부
+  bucket 두 행만 갱신해 write amplification을 막는다. retention도 limit와
+  인덱스를 갖는다.
+- 메시지는 조각당 4,096 **문자**, 최대 64조각, 전체 UTF-8 256 KiB로
+  제한한다. update/offset은 bool·문자열을 포함한 비 exact-int를 거부하고,
+  correlation/owner는 `[A-Za-z0-9_-]{1,64}`로 통일했다.
+- timezone-aware 검증은 `telegram_common.py`로 이동해 세 저장소가 같은
+  fail-fast 계약을 사용한다.

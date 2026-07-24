@@ -3,7 +3,7 @@
 from datetime import date, datetime
 
 from sqlalchemy import (BigInteger, Boolean, Date, DateTime, Float, ForeignKey,
-                        Index, Integer, String, Text, literal)
+                        Index, Integer, String, Text, UniqueConstraint, literal)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 # instruments.state / instruments.audit_info 칼럼 길이 — 모델과 store의 절단
@@ -309,3 +309,161 @@ class TradeFillRow(Base):
     fill_price: Mapped[int] = mapped_column(Integer)
     fill_qty: Mapped[int] = mapped_column(Integer)
     filled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+# --- P8 Telegram durable processing (0013) ---
+class TelegramStateRow(Base):
+    __tablename__ = "telegram_state"
+    key: Mapped[str] = mapped_column(String(32), primary_key=True)
+    value: Mapped[str] = mapped_column(Text)
+    lease_owner: Mapped[str | None] = mapped_column(String(64))
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class TelegramUpdateRow(Base):
+    __tablename__ = "telegram_updates"
+    __table_args__ = (
+        Index("ix_telegram_updates_claim", "status", "lease_until", "update_id"),
+        Index("ix_telegram_updates_retention", "status", "finished_at", "update_id"))
+    update_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    operator_hash: Mapped[str] = mapped_column(String(64))
+    command: Mapped[str] = mapped_column(String(24))
+    argument_hash: Mapped[str | None] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(24))
+    owner: Mapped[str | None] = mapped_column(String(64))
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    version: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    correlation_id: Mapped[str] = mapped_column(String(64))
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class TelegramConfirmationRow(Base):
+    __tablename__ = "telegram_confirmations"
+    __table_args__ = (
+        Index("ix_telegram_confirmations_retention", "consumed_at", "expires_at", "id"),)
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"), primary_key=True,
+        autoincrement=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    operator_hash: Mapped[str] = mapped_column(String(64))
+    chat_hash: Mapped[str] = mapped_column(String(64))
+    command: Mapped[str] = mapped_column(String(24))
+    state_fingerprint: Mapped[str] = mapped_column(String(128))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class TelegramConfirmationLockRow(Base):
+    __tablename__ = "telegram_confirmation_locks"
+    operator_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+
+
+class TelegramCommandExecutionRow(Base):
+    __tablename__ = "telegram_command_executions"
+    __table_args__ = (Index("ix_telegram_executions_claim", "status", "lease_until", "created_at"),)
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    update_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("telegram_updates.update_id"))
+    confirmation_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("telegram_confirmations.id"))
+    command: Mapped[str] = mapped_column(String(24))
+    state_fingerprint: Mapped[str] = mapped_column(String(128))
+    targets_json: Mapped[str] = mapped_column(Text, default="[]", server_default="[]")
+    status: Mapped[str] = mapped_column(String(24))
+    owner: Mapped[str | None] = mapped_column(String(64))
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    version: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    failure_kind: Mapped[str | None] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class TelegramCommandAuditRow(Base):
+    __tablename__ = "telegram_command_audit"
+    __table_args__ = (Index("ix_telegram_command_audit_retention", "ts", "id"),)
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"), primary_key=True,
+        autoincrement=True)
+    update_id: Mapped[int] = mapped_column(BigInteger)
+    intent_id: Mapped[str | None] = mapped_column(String(64))
+    event: Mapped[str] = mapped_column(String(32))
+    result: Mapped[str] = mapped_column(String(24))
+    error_kind: Mapped[str | None] = mapped_column(String(64))
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class TelegramRejectedUpdateCounterRow(Base):
+    __tablename__ = "telegram_rejected_update_counters"
+    __table_args__ = (
+        Index("ix_telegram_rejected_retention", "minute", "subject_hash"),)
+    minute: Mapped[datetime] = mapped_column(DateTime(timezone=True), primary_key=True)
+    subject_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+
+
+class OperationalEventRow(Base):
+    __tablename__ = "operational_events"
+    __table_args__ = (
+        UniqueConstraint("source_type", "source_id", "source_version",
+                         name="uq_operational_event_source_version"),)
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"), primary_key=True,
+        autoincrement=True)
+    kind: Mapped[str] = mapped_column(String(40))
+    source_type: Mapped[str] = mapped_column(String(32))
+    source_id: Mapped[int] = mapped_column(BigInteger)
+    source_version: Mapped[str] = mapped_column(String(96))
+    payload: Mapped[str] = mapped_column(Text)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class NotificationOutboxRow(Base):
+    __tablename__ = "notification_outbox"
+    __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_notification_outbox_key"),
+        Index("ix_notification_outbox_retention", "status", "sent_at", "id"),
+        Index("ix_notification_outbox_purge", "purge_at", "status", "id"))
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"), primary_key=True,
+        autoincrement=True)
+    idempotency_key: Mapped[str] = mapped_column(String(128))
+    kind: Mapped[str] = mapped_column(String(40))
+    priority: Mapped[int] = mapped_column(Integer)
+    sensitive: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    payload: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(24))
+    next_attempt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error_kind: Mapped[str | None] = mapped_column(String(64))
+    retention_kind: Mapped[str] = mapped_column(
+        String(24), default="standard", server_default="standard")
+    purge_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class NotificationDeliveryRow(Base):
+    __tablename__ = "notification_deliveries"
+    __table_args__ = (
+        UniqueConstraint("outbox_id", "part_index", name="uq_notification_delivery_part"),
+        Index("ix_notification_delivery_claim", "status", "next_attempt_at", "lease_until", "id"))
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"), primary_key=True,
+        autoincrement=True)
+    outbox_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("notification_outbox.id"))
+    part_index: Mapped[int] = mapped_column(Integer)
+    total_parts: Mapped[int] = mapped_column(Integer)
+    body: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(24))
+    owner: Mapped[str | None] = mapped_column(String(64))
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    first_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    next_attempt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error_kind: Mapped[str | None] = mapped_column(String(64))
+    last_http_status: Mapped[int | None] = mapped_column(Integer)
+    telegram_message_id: Mapped[int | None] = mapped_column(BigInteger)
+    version: Mapped[int] = mapped_column(Integer, default=0, server_default="0")

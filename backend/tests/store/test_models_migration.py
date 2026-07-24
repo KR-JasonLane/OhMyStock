@@ -220,3 +220,27 @@ def test_0010_0011이_est_krw_인덱스_스케줄러_이벤트를_만든다(
     assert "scheduler_events" not in set(insp.get_table_names())
     cols = {c["name"] for c in insp.get_columns("trade_orders")}
     assert "est_krw" not in cols
+
+
+def test_0013이_telegram_영속테이블과_고유키를_만든다(tmp_path, monkeypatch):
+    db_url = f"sqlite+pysqlite:///{tmp_path / 'mig.db'}"
+    monkeypatch.setenv("DATABASE_URL", db_url)
+    cfg = Config(str(BACKEND_DIR / "alembic.ini"))
+    cfg.set_main_option("script_location", str(BACKEND_DIR / "alembic"))
+    command.upgrade(cfg, "head")
+    insp = inspect(create_engine(db_url))
+    expected = {
+        "telegram_state", "telegram_updates", "telegram_confirmations",
+        "telegram_command_executions", "telegram_command_audit",
+        "telegram_rejected_update_counters", "operational_events",
+        "notification_outbox", "notification_deliveries",
+    }
+    assert expected <= set(insp.get_table_names())
+    outbox_uniques = {tuple(item["column_names"])
+                      for item in insp.get_unique_constraints("notification_outbox")}
+    assert ("idempotency_key",) in outbox_uniques
+    update_columns = {column["name"] for column in insp.get_columns("telegram_updates")}
+    assert not {"raw_token", "text", "account_number"} & update_columns
+
+    command.downgrade(cfg, "0012")
+    assert not expected & set(inspect(create_engine(db_url)).get_table_names())
