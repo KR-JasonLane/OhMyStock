@@ -7,6 +7,10 @@
 from typing import Any, Protocol
 
 
+class AccountSnapshotDeferred(RuntimeError):
+    """저우선 digest가 새 broker snapshot을 시작하지 않았다는 명시 계약."""
+
+
 class OperationsControlPort(Protocol):
     def scheduler_fingerprint(self) -> str: ...
 

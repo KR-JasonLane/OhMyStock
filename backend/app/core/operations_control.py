@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 
 from app.core.background_service import StopMode
+from app.domain.notifications.ports import AccountSnapshotDeferred
 from app.domain.trading.models import LiquidationResult, LiquidationTarget
 
 
@@ -36,10 +37,6 @@ class LiquidationPreview:
 
 class StateChangedError(ValueError):
     pass
-
-
-class AccountSnapshotDeferred(RuntimeError):
-    """저우선 digest가 새 broker 조회를 시작하지 않았음을 나타낸다."""
 
 
 class OperationsControl:

@@ -10,7 +10,9 @@ from app.adapters.telegram import (TelegramAuthenticationError,
                                    TelegramPermanentError,
                                    TelegramRateLimited,
                                    TelegramTemporaryError)
-from app.core.telegram_service import OutboxSender, TelegramCircuit
+from app.core.telegram_service import (DigestService, Maintenance, OutboxSender,
+                                       TelegramCircuit)
+from app.domain.notifications.digest import Digest, DigestAccount, DigestSection
 from app.domain.notifications.models import NotificationPriority
 from app.domain.notifications.models import OperationalEvent
 from app.domain.notifications.projector import NotificationProjector
@@ -294,3 +296,117 @@ async def test_조각별_10회시도와_24시간_age는_전송전_dead_letter한
                 created_at=clock.value - timedelta(hours=25)))
     assert await worker.run_once() == 1
     assert _state(store, stale)[0].status == "dead_letter"
+
+
+@pytest.mark.anyio
+async def test_maintenance는_민감만료와_보존기간을_엄격한_batch로_정리한다(sender):
+    _, store, _, clock = sender
+    account_id = store.enqueue_parts(
+        "account-ttl", ["예수금 1000000"], sensitive=True, retention_kind="query",
+        priority=NotificationPriority.DIGEST)
+    digest_id = store.enqueue_parts(
+        "digest-ttl", ["총평가 1200000"], sensitive=True, retention_kind="digest",
+        priority=NotificationPriority.DIGEST)
+    for index in range(500):
+        outbox_id = store.enqueue_parts(f"sent-{index}", ["metadata"])
+        delivery = store.claim_deliveries("seed")[0]
+        assert delivery.outbox_id == outbox_id
+        assert store.finish_delivery(
+            delivery.id, "seed", delivery.version, telegram_message_id=index)
+    with store._sessions.begin() as session:
+        session.execute(NotificationOutboxRow.__table__.update().where(
+            NotificationOutboxRow.status == "sent"
+        ).values(sent_at=NOW - timedelta(days=366)))
+
+    clock.advance(25 * 60 * 60)
+    deleted = await Maintenance(store, now=clock, batch_size=500).run_once()
+
+    assert deleted == 500
+    assert store.load_payload(account_id) is None
+    assert store.load_delivery_bodies(account_id) == [None]
+    assert store.load_payload(digest_id) is None
+    assert store.load_delivery_bodies(digest_id) == [None]
+    assert _state(store, account_id)[0].status == "dead_letter"
+
+
+@pytest.mark.anyio
+async def test_digest_service는_builder결과를_thread의_원자outbox로_한번만_materialize한다(sender):
+    _, store, _, clock = sender
+
+    class Planner:
+        marked = []
+
+        def due_dates(self, now):
+            return (datetime(2026, 7, 24, tzinfo=timezone.utc).date(),)
+
+        def mark_generated(self, trading_day):
+            self.marked.append(trading_day)
+
+    class Builder:
+        async def build(self, trading_day):
+            return Digest(
+                trading_day, "mock",
+                DigestSection({"collection_status": "done"}, clock()),
+                DigestSection({"order_count": 1}, clock()),
+                DigestAccount(None, None, None, None, "unknown", "unavailable",
+                              ("account_snapshot",), None, None))
+
+    planner = Planner()
+    service = DigestService(planner, Builder(), store, now=clock)
+
+    assert await service.run_once() == 1
+    assert await service.run_once() == 0
+    assert planner.marked == [datetime(2026, 7, 24, tzinfo=timezone.utc).date()]
+    assert store.count_outbox() == 1
+
+
+@pytest.mark.anyio
+async def test_sender는_dead상태에서도_만료본문을_scrub하고_35초이내만료건을_claim하지않는다(sender):
+    _, store, telegram, clock = sender
+    expired = store.enqueue_parts(
+        "expired-query", ["예수금 1000000"], sensitive=True, retention_kind="query")
+    clock.advance(16 * 60)
+    dead_circuit = TelegramCircuit()
+    dead_circuit.mark_dead("authentication_failed")
+    dead = OutboxSender(store, telegram, chat_id=1234, worker_id="dead", now=clock,
+                         authentication_circuit=dead_circuit)
+    assert await dead.run_once() == 0
+    assert store.load_payload(expired) is None
+    assert store.load_delivery_bodies(expired) == [None]
+
+    near_expiry = store.enqueue_parts(
+        "near-expiry", ["총평가 1200000"], sensitive=True, retention_kind="query")
+    with store._sessions.begin() as session:
+        session.execute(NotificationOutboxRow.__table__.update().where(
+            NotificationOutboxRow.id == near_expiry
+        ).values(purge_at=clock.value + timedelta(seconds=30)))
+    active = OutboxSender(store, telegram, chat_id=1234, worker_id="active", now=clock)
+    assert await active.run_once() == 0
+    assert telegram.messages == []
+
+
+@pytest.mark.anyio
+async def test_sender는_전체전송_deadline을_넘기면_재시도한다(sender):
+    _, store, _, clock = sender
+
+    class BlockingTelegram:
+        async def send_message(self, chat_id, text):
+            await asyncio.Event().wait()
+
+    worker = OutboxSender(store, BlockingTelegram(), chat_id=1234,
+                          worker_id="deadline", now=clock)
+    worker._SEND_DEADLINE_S = 0.01
+    outbox_id = store.enqueue_parts("deadline", ["one"])
+
+    assert await worker.run_once() == 1
+    _, delivery = _state(store, outbox_id)
+    assert delivery.status == "pending"
+    assert delivery.last_error_kind == "send_deadline"
+
+
+def test_sender는_TTL_guard가_전체전송_deadline보다길어야한다(sender, monkeypatch):
+    _, store, telegram, _ = sender
+    monkeypatch.setattr(NotificationStore, "SENSITIVE_DELIVERY_MIN_TTL_S", 30)
+
+    with pytest.raises(ValueError, match="TTL guard"):
+        OutboxSender(store, telegram, chat_id=1234, worker_id="guard")

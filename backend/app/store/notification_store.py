@@ -3,16 +3,21 @@
 import json
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import Engine, case, func, or_, select, update
 from sqlalchemy.orm import aliased
 from sqlalchemy.orm import sessionmaker
 
-from app.domain.notifications.models import OperationalEvent
-from app.store.models import (NotificationDeliveryRow, NotificationOutboxRow,
-                              OperationalEventRow, TelegramStateRow)
+from app.domain.notifications.models import NotificationPriority, OperationalEvent
+from app.domain.notifications.digest import DigestSection
+from app.store.kst_time import as_aware_utc, coarse_utc_bounds, within_kst_day
+from app.store.models import (AnalysisRunRow, AnalysisVerdictRow, CollectionRunRow,
+                              NotificationDeliveryRow, NotificationOutboxRow,
+                              OperationalEventRow, SchedulerEventRow, ScoreRunRow,
+                              TelegramStateRow, TradeOrderRow, TradePositionRow,
+                              TradeRunRow)
 from app.store.telegram_common import (MAX_DELIVERY_PARTS,
                                        MAX_DELIVERY_TOTAL_BYTES,
                                        aware as _aware, canonical_json,
@@ -36,7 +41,131 @@ class Delivery:
     created_at: datetime
 
 
+@dataclass(frozen=True)
+class MaterializedDigest:
+    """One durable digest outbox materialization result."""
+
+    outbox_id: int
+    created: bool
+    priority: NotificationPriority
+
+
+class DigestRunStore:
+    """기존 run 테이블을 다이제스트 허용목록 DTO로만 읽는 read model."""
+
+    def __init__(self, engine: Engine, run_environment: str,
+                 now: Callable[[], datetime] | None = None) -> None:
+        self._sessions = sessionmaker(bind=engine, expire_on_commit=False)
+        self._run_environment = run_environment
+        self._now = now or (lambda: datetime.now(timezone.utc))
+
+    def pipeline_summary(self, trading_day: date) -> DigestSection:
+        with self._sessions() as session:
+            analysis = self._latest_started(AnalysisRunRow, trading_day, session=session)
+            score = (session.get(ScoreRunRow, analysis.score_run_id)
+                     if analysis is not None else None)
+            pick_count = 0
+            if analysis is not None:
+                pick_count = session.scalar(select(func.count()).select_from(
+                    AnalysisVerdictRow).where(
+                    AnalysisVerdictRow.run_id == analysis.id,
+                    AnalysisVerdictRow.picked.is_(True))) or 0
+        reference_day = score.reference_date if score is not None else None
+        collection = (self._latest_started(CollectionRunRow, reference_day)
+                      if reference_day is not None else None)
+        facts = {
+            "collection_status": collection.status if collection else "unavailable",
+            "collection_reference_day": (reference_day.isoformat()
+                                         if reference_day else None),
+            "scoring_status": score.status if score else "unavailable",
+            "scoring_reference_day": (score.reference_date.isoformat()
+                                        if score else None),
+            "candidate_count": score.universe_count if score else None,
+            "analysis_status": analysis.status if analysis else "unavailable",
+            "analysis_score_reference_day": (reference_day.isoformat()
+                                               if reference_day else None),
+            "pick_count": pick_count if analysis else None,
+            "market_regime": analysis.regime if analysis else None,
+        }
+        rows = (collection, score, analysis)
+        return DigestSection(
+            facts, _latest_finished_or_started(rows),
+            tuple(name for name, row in zip(
+                ("collection", "scoring", "analysis"), rows) if row is None))
+
+    def trading_summary(self, trading_day: date) -> DigestSection:
+        runs = self._started_on(TradeRunRow, trading_day,
+                                TradeRunRow.run_environment == self._run_environment)
+        run_ids = [row.id for row in runs]
+        with self._sessions() as session:
+            if run_ids:
+                orders = session.scalars(select(TradeOrderRow).where(
+                    TradeOrderRow.trade_run_id.in_(run_ids))).all()
+            else:
+                orders = ()
+            lo, hi = coarse_utc_bounds(trading_day)
+            closed = session.scalars(select(TradePositionRow).join(TradeRunRow).where(
+                TradeRunRow.run_environment == self._run_environment,
+                TradePositionRow.realized_pnl.is_not(None),
+                TradePositionRow.closed_at.is_not(None), TradePositionRow.closed_at >= lo,
+                TradePositionRow.closed_at <= hi)).all()
+            closed = [row for row in closed
+                      if within_kst_day(row.closed_at, trading_day)]
+            open_count = session.scalar(select(func.count()).select_from(
+                TradePositionRow).join(TradeRunRow).where(
+                TradeRunRow.run_environment == self._run_environment,
+                TradePositionRow.state.in_(("entered", "exiting")))) or 0
+            scheduler_events = session.scalars(select(SchedulerEventRow).where(
+                SchedulerEventRow.action == "gave_up", SchedulerEventRow.ts >= lo,
+                SchedulerEventRow.ts <= hi)).all()
+            gave_up_count = sum(within_kst_day(event.ts, trading_day)
+                                for event in scheduler_events)
+            dead_events = session.scalars(select(OperationalEventRow).where(
+                OperationalEventRow.kind == "scheduler_dead",
+                OperationalEventRow.occurred_at >= lo,
+                OperationalEventRow.occurred_at <= hi)).all()
+            scheduler_dead_count = sum(within_kst_day(event.occurred_at, trading_day)
+                                       for event in dead_events)
+            dead_letters = session.scalars(select(NotificationOutboxRow).where(
+                NotificationOutboxRow.status == "dead_letter",
+                NotificationOutboxRow.occurred_at >= lo,
+                NotificationOutboxRow.occurred_at <= hi)).all()
+            dead_letter_count = sum(within_kst_day(row.occurred_at, trading_day)
+                                    for row in dead_letters)
+        buy_count = sum(order.side == "buy" for order in orders)
+        sell_count = sum(order.side == "sell" for order in orders)
+        return DigestSection({
+            "order_count": len(orders), "entry_order_count": buy_count,
+            "exit_order_count": sell_count, "current_position_count": open_count,
+            "realized_pnl": sum(row.realized_pnl or 0 for row in closed),
+            "realized_pnl_confidence": "estimated",
+            "kill_switch_run_count": sum(row.stopped_by_kill_switch for row in runs),
+            "scheduler_gave_up_count": gave_up_count,
+            "scheduler_dead_count": scheduler_dead_count,
+            "dead_letter_count": dead_letter_count,
+        }, self._now(), ("trade_runs",) if not runs else ())
+
+    def _latest_started(self, model, trading_day: date, *, session=None):
+        rows = self._started_on(model, trading_day, session=session)
+        return max(rows, key=lambda row: row.started_at, default=None)
+
+    def _started_on(self, model, trading_day: date, *conditions, session=None):
+        lo, hi = coarse_utc_bounds(trading_day)
+        own_session = session is None
+        session = session or self._sessions()
+        try:
+            rows = session.scalars(select(model).where(
+                *conditions, model.started_at >= lo, model.started_at <= hi)).all()
+            return [row for row in rows if within_kst_day(row.started_at, trading_day)]
+        finally:
+            if own_session:
+                session.close()
+
+
 class NotificationStore:
+    # Sender total request deadline(30s) + cancellation/DB handoff margin(5s).
+    SENSITIVE_DELIVERY_MIN_TTL_S = 35
+
     def __init__(self, engine: Engine, now: Callable[[], datetime] | None = None) -> None:
         self._sessions = sessionmaker(bind=engine, expire_on_commit=False)
         self._now = now or (lambda: datetime.now(timezone.utc))
@@ -203,7 +332,61 @@ class NotificationStore:
         with self._sessions() as session:
             return session.scalar(select(func.count()).select_from(
                 NotificationOutboxRow).where(
-                    NotificationOutboxRow.idempotency_key == idempotency_key)) or 0
+                NotificationOutboxRow.idempotency_key == idempotency_key)) or 0
+
+    def generated_digest_days(self, run_environment: str) -> tuple[date, ...]:
+        """Outbox가 존재한 날짜는 delivery 상태와 무관하게 생성 완료다."""
+        prefix = f"digest:{run_environment}:"
+        with self._sessions() as session:
+            keys = session.scalars(select(NotificationOutboxRow.idempotency_key).where(
+                NotificationOutboxRow.idempotency_key.like(f"{prefix}%"))).all()
+        days: set[date] = set()
+        for key in keys:
+            suffix = key.removeprefix(prefix)
+            try:
+                days.add(date.fromisoformat(suffix))
+            except ValueError:
+                # 다른 producer의 malformed key는 scheduler를 막지 않는다.
+                continue
+        return tuple(sorted(days))
+
+    def record_digest_skipped_stale(self, trading_day: date,
+                                    run_environment: str, now: datetime) -> None:
+        """7 거래일 window 밖 누락을 재생성하지 않고 audit으로 종결한다."""
+        self.append_event(OperationalEvent(
+            kind="digest_skipped_stale", source_type="digest",
+            source_id=trading_day.toordinal(), version=f"stale-v1:{run_environment}",
+            payload={"trading_day": trading_day.isoformat(),
+                     "run_environment": run_environment}, occurred_at=_aware(now)))
+
+    def materialize_digest(self, idempotency_key: str, payload: Any,
+                           bodies: Sequence[str] | str,
+                           *, occurred_at: datetime) -> MaterializedDigest:
+        """Digest payload와 고정 delivery body를 한 transaction에 생성한다."""
+        identifier(idempotency_key, "idempotency_key", 128)
+        if not idempotency_key.startswith("digest:"):
+            raise ValueError("digest idempotency_key must start with digest:")
+        occurred = _aware(occurred_at)
+        now = _aware(self._now())
+        if isinstance(bodies, str):
+            bodies = (bodies,)
+        if not bodies:
+            raise ValueError("digest requires at least one delivery body")
+        if len(bodies) > MAX_DELIVERY_PARTS:
+            raise ValueError("digest delivery part count exceeds 64")
+        checked = self._checked_delivery_bodies(bodies, NotificationPriority.DIGEST)
+        with self._sessions.begin() as session:
+            outbox_id, created = self._insert_outbox(session, dict(
+                idempotency_key=idempotency_key, kind="digest",
+                priority=NotificationPriority.DIGEST, sensitive=True,
+                payload=canonical_json(payload), status="pending",
+                next_attempt_at=now, occurred_at=occurred, created_at=now,
+                sent_at=None, last_error_kind=None, retention_kind="digest",
+                purge_at=now + timedelta(hours=24)))
+            if created:
+                self._add_delivery_rows(session, outbox_id, checked, now)
+            return MaterializedDigest(
+                outbox_id, created, NotificationPriority.DIGEST)
 
     def materialize_missing_operational_deliveries(
             self, render: Callable[[str, dict[str, object]], tuple[str, ...]],
@@ -330,6 +513,7 @@ class NotificationStore:
         limit = positive_int(limit, "limit")
         lease_s = positive_int(lease_s, "lease_s")
         now = _aware(self._now())
+        send_deadline = now + timedelta(seconds=self.SENSITIVE_DELIVERY_MIN_TTL_S)
         until = now + timedelta(seconds=lease_s)
         claimed: list[Delivery] = []
         with self._sessions.begin() as session:
@@ -340,7 +524,7 @@ class NotificationStore:
                 NotificationOutboxRow.status == "pending",
                 NotificationDeliveryRow.next_attempt_at <= now,
                 or_(NotificationOutboxRow.purge_at.is_(None),
-                    NotificationOutboxRow.purge_at > now),
+                    NotificationOutboxRow.purge_at > send_deadline),
                 or_(NotificationDeliveryRow.status == "pending",
                     (NotificationDeliveryRow.status == "sending")
                     & (NotificationDeliveryRow.lease_until < now)),
@@ -587,9 +771,31 @@ class NotificationStore:
                 NotificationOutboxRow.id.in_(ids)).delete(synchronize_session=False)
             return len(ids)
 
+    def maintenance_cleanup(self, now: datetime, batch_size: int = 1000) -> int:
+        """민감 본문 scrub과 1년 지난 sent 메타데이터 삭제의 총 상한을 지킨다."""
+        now = _aware(now)
+        batch_size = positive_int(batch_size, "batch_size")
+        scrubbed = self.purge_expired_sensitive(now, limit=batch_size)
+        remaining = batch_size - scrubbed
+        if remaining <= 0:
+            return scrubbed
+        return scrubbed + self.purge_retention(
+            now - timedelta(days=365), limit=remaining)
+
 
 def _from_db_time(value: datetime) -> datetime:
     """Restore SQLite's lost timezone marker; this table only stores UTC."""
     if value.tzinfo is None or value.utcoffset() is None:
         return value.replace(tzinfo=timezone.utc)
     return value
+
+
+def _latest_finished_or_started(rows) -> datetime | None:
+    stamps = []
+    for row in rows:
+        if row is None:
+            continue
+        value = row.finished_at or row.started_at
+        if value is not None:
+            stamps.append(as_aware_utc(value))
+    return max(stamps, default=None)

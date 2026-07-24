@@ -669,3 +669,57 @@ Telegram delivery sender가 없었다. 초기 점검에서 projector가 outbox p
   critical body 경계, transaction backfill, 민감 렌더 경계를 보완했다.
   키움 경로는 변경하지 않아 broker-api-expert는 사용하지 않았다.
 - 실제 Telegram/키움 API와 운영 DB는 호출하지 않았다.
+
+## Task 8 — 16:10 다이제스트와 보존 maintenance
+
+### 요청과 기존 상태
+
+거래일 장 마감 뒤 당일 파이프라인·거래·계좌 상태를 한 번만 전달하고,
+재기동으로 빠진 최근 날짜를 안전하게 캐치업해야 했다. 기존 outbox에는
+sensitive query/digest TTL과 sender의 전송 후 scrub은 있었지만, 다이제스트
+계획·원자 materialization·03:30 maintenance 조립은 없었다.
+
+### 설계 판단과 변경 위치
+
+- `DigestPlanner`는 KST 16:10 이전·비거래일에는 아무 날짜도 내지 않는다.
+  최근 7거래일을 오래된 순서로 반환하며, 생성일의 최댓값이 아니라 각 날짜를
+  outbox 존재 집합과 대조해 window 내부의 비연속 누락도 캐치업한다. window
+  밖 gap만 `digest_skipped_stale` operational audit으로 종결한다. 날짜 멱등
+  키는 `digest:{run_environment}:{YYYY-MM-DD}`다.
+- brief의 `priority="low"`는 Task 4 이후 잘못된 계약이다. builder는
+  `priority="digest"`를 사용해 fresh cache 또는 진행 중 interactive 조회만
+  공유하며 broker 호출을 새로 시작하지 않는다. deferred·timeout·broker 실패는
+  `None` 금액과 `account_snapshot` failed field로 정직하게 보존한다.
+- `AccountSnapshotDeferred`는 core의 이름 문자열을 판별하지 않고
+  `domain/notifications/ports.py`가 소유하는 명시 예외 계약으로 옮겼다.
+  OperationsControl은 이를 re-export하므로 기존 호출자 호환도 유지한다.
+- `NotificationStore.materialize_digest()`는 sensitive payload, 고정 delivery
+  body, 24시간 purge 시각을 하나의 transaction에서 만들고 unique key가
+  중복 생성을 차단한다. Task 7 formatter의 안정 상관 ID·고정 분할을 사용해
+  Telegram body 상한을 넘지 않는다. `DigestRunStore`는 원문 경고나 vendor
+  오류 대신 기준시각·상태·count만 가진 scalar read model을 만든다. digest
+  planner와 materializer, run summary와 maintenance의 모든 동기 store 접근은
+  `asyncio.to_thread` 경계에 둔다.
+- maintenance는 만료 sensitive payload/body를 상태와 무관하게 scrub한 뒤,
+  남은 batch 예산에서만 1년 지난 sent 메타데이터를 지운다. pending/sending
+  active lease는 기존 Task 3 fence에 따라 보호한다. 03:30 metadata
+  maintenance 외 sender tick도 만료 본문을 먼저 scrub해 TTL 노출을 다음날까지
+  늘리지 않는다.
+- adapter의 phase별 timeout만으로는 전체 외부 노출 상한이 되지 않는다.
+  sender는 30초 `wait_for` 전체 deadline을 적용해 deadline 초과를 fenced
+  retry로 끝내며, store는 35초 이상 남은 sensitive outbox만 claim한다. 두
+  상수 관계도 생성 시 검증한다.
+
+### 검증과 패널
+
+- RED: digest 모듈 부재, maintenance 부재, BrokerError fallback 부재,
+  환경 audit 충돌, 전 거래일 pipeline 기준일을 차례로 관측했다.
+- focused 63건, 전체 1029 passed/11 deselected, `compileall`,
+  `git diff --check`를 통과했다(기존 Starlette deprecation warning 1건).
+- 1차 패널 Important(내부 hole, 환경 audit, typed read model/as_of, 본문
+  상한·상관 ID, TTL·deadline)를 모두 수정했다. 최종 동일 diff는
+  senior-developer, senior-trader, architecture-expert, security-expert가
+  독립 재검토해 Critical 0건, Important 0건으로 승인했다. broker adapter/TR/
+  주문 경로를 바꾸지 않아 broker-api-expert는 적용하지 않았다.
+- 실제 Telegram·키움 API와 운영 DB는 호출하지 않았다. 브로커 adapter/TR/주문
+  경로를 바꾸지 않아 broker-api-expert는 적용하지 않는다.
