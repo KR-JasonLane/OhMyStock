@@ -8,7 +8,7 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: ohmystock
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ohmystock}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
       POSTGRES_DB: ohmystock
     volumes:
       - pgdata:/var/lib/postgresql/data
@@ -45,7 +45,10 @@ services:
       # 차이 실측 2026-07-22). 분석 파이프라인의 호스트 Ollama 연결에 필수.
       - "host.docker.internal:host-gateway"
     environment:
-      DATABASE_URL: postgresql+psycopg://ohmystock:${POSTGRES_PASSWORD:-ohmystock}@db:5432/ohmystock
+      # 비밀번호는 URL user-info에 보간하지 않는다. 특수문자를 포함한 고유 값을
+      # 그대로 libpq 환경변수로 전달해 URL parsing·로그 노출 위험을 피한다.
+      DATABASE_URL: postgresql+psycopg://ohmystock@db:5432/ohmystock
+      PGPASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
       # LangSmith 텔레메트리 차단 — 활성화 시 프롬프트/응답(전략 기밀)이 외부 SaaS로 전송된다
       # (SDK가 인식하는 4개 이름 전부 고정 — 보안 패널 실측)
       LANGSMITH_TRACING_V2: "false"

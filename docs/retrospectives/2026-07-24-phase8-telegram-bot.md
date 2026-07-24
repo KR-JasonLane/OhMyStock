@@ -783,3 +783,108 @@ Task 2~8의 설정/client/store/control/command/projector/sender/digest는 각�
   security-expert가 독립 재검토해 Critical 0건, Important 0건으로 승인했다.
   broker adapter/TR/주문 경로를 바꾸지 않아 broker-api-expert는 적용하지
   않았다.
+
+## Task 10 — 비라이브 수용 준비·운영 문서·최종 회귀
+
+### 요청과 기존 상태
+
+Phase 8 구현 Task 1~9와 0014 migration이 커밋된 뒤, 비밀 비노출·외부 호출
+차단 회귀, 현재 migration chain 검증, 운영자가 승인 뒤 수행할 모의 수용 절차,
+재개 문서를 마무리했다. Task 10 시작 시 `docs/STATUS.md`는 Task 9가 미커밋인
+것처럼 남아 있었고, 수용 brief도 예전 head 기준의 `0012 → 0013`만 적고 있었다.
+실제 head는 `0012 → 0013 → 0014`이며, 운영 DB의 downgrade는 허용하지 않는다.
+
+### Task 1~10 설계·변경 위치 요약
+
+| Task | 경계와 핵심 판단 | 대표 변경 위치 |
+|---:|---|---|
+| 1 | Telegram DTO·DB 없이 명령/인증/평문 렌더링을 순수 domain으로 분리 | `backend/app/domain/notifications/{models,parsing,authorization,formatting}.py` |
+| 2 | all-or-nothing 설정과 고정 origin Bot API client, URL·token 비노출 | `backend/app/core/config.py`, `backend/app/adapters/telegram/client.py` |
+| 3 | inbox/confirmation/intent/event/outbox를 lease·CAS·고유키로 durable화 | `backend/alembic/versions/0013_telegram_notifications.py`, `backend/app/store/telegram_*_store.py`, `notification_store.py` |
+| 4 | REST와 Telegram이 `OperationsControl`을 공유하고 managed liquidation만 허용 | `backend/app/core/operations_control.py`, `backend/app/api/{schedule,trade}.py` |
+| 5 | 확인 소비와 command intent를 분리하고 crash 뒤 대사로 종결 | `backend/app/domain/notifications/commands.py`, `backend/app/store/telegram_command_store.py` |
+| 6 | 거래/스케줄러 변경과 같은 transaction의 append-only operational event | `backend/app/store/{trading_store,scheduler_store}.py`, `backend/app/domain/trading/{service,monitor}.py` |
+| 7 | 고정 delivery 조각, lease/retry/dead-letter, 민감 payload scrub | `backend/app/domain/notifications/projector.py`, `backend/app/store/notification_store.py` |
+| 8 | 거래일 16:10 다이제스트, 7거래일 catch-up, bounded retention | `backend/app/domain/notifications/digest.py`, `backend/app/core/telegram_service.py` |
+| 9 | 독립 loop/lane과 FastAPI lifespan 조립, HMAC hash widening | `backend/app/core/telegram_service.py`, `backend/app/main.py`, `backend/alembic/versions/0014_telegram_hmac_v1.py` |
+| 10 | 예시 환경의 placeholder 강제, chain/수용/재개 문서 최신화 | `backend/tests/test_environment_example.py`, `.env.example`, `.superpowers/sdd/task-10-brief.md`, `docs/STATUS.md`, `docs/architecture/system-overview.md` |
+
+Task 10의 환경 예시는 PostgreSQL 비밀번호와 Telegram token·허용 user/chat ID를
+모두 빈 값으로만 둔다. `docker-compose.yml`은 빈 값·미설정 값을 알려진 기본값으로
+fallback하지 않고 필수 변수 보간으로 fail-fast한다. 설명은 `.env`에만 충분히 긴
+고유 비밀번호를 둘 것과 replay·테스트에서 서비스를 기동하지 않는다는 안전 계약을
+유지한다. 새 회귀는 `.env.example`의 빈 값과 Compose의 약한 fallback 부재를 함께
+확인한다. backend는 비밀번호를 URL user-info에 보간하지 않고 `PGPASSWORD`로
+전달하므로 특수문자가 포함된 고유 비밀번호도 URL parsing으로 깨지지 않는다.
+
+### TDD·마이그레이션·전체 검증
+
+- RED: `cd backend && uv run pytest tests/test_environment_example.py -q`가
+  예전 `POSTGRES_PASSWORD=ohmystock` 때문에 1건 실패했다.
+- 두 번째 RED: 예시 문자열만 바꿔도 Compose의 `${POSTGRES_PASSWORD:-ohmystock}`
+  fallback은 남는다는 정적 회귀가 실패했다.
+- GREEN: `.env.example`을 빈 필수값으로 두고 Compose의 두 보간을
+  `${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}`으로 바꿨다. 환경 예시,
+  migration, Telegram lifespan focused 범위는 통과했다. backend는 password 없는
+  `DATABASE_URL`과 `PGPASSWORD`를 분리한다.
+- 로그 회귀: network-fake poller→dispatcher→실제 `CommandProcessor`
+  (`/account`, `/resume` confirmation)→publisher 경로와 `MockTransport`
+  `TelegramClient` redirect 오류를 통과시켰다. bot token, 생성 confirmation 원문,
+  계좌 금액 sentinel은 `caplog`에 없고 confirmation만 memory sender에 전달된다.
+  outbox에는 confirmation 원문을 적재하지 않는다.
+- migration: 운영 DB가 아닌 경로를 `/tmp/ohmystock-p8-task10.*`로 검증한
+  명시적 임시 SQLite DB에서 `0012 → 0013 → 0014`, `0014 → 0012`,
+  `0012 → 0013 → 0014`를 실행했다. 양쪽 최종 version은 `0014`였고,
+  파일은 `unlink`와 빈 디렉터리 `rmdir`로 제거했다.
+- 전체(최신 동일 diff): `cd backend && uv run pytest -q`는 **1051 passed, 11 deselected**,
+  기존 `StarletteDeprecationWarning` 1건으로 통과했다. 기본 pytest는 `live`
+  marker를 제외하며, 일반 테스트 fixture가 Telegram 환경변수와 dotenv source를
+  차단한다. Bot API 테스트는 mock transport, lifespan 테스트는 network 금지 fake를
+  사용한다.
+
+### 패널 발견과 수정
+
+Task 1~9의 각 구현 단위는 senior-developer, senior-trader,
+architecture-expert, security-expert의 독립 리뷰를 통과했다. 패널은 초기 단계에서
+명령 응답 유실, confirmation·lease crash 창, partial fill/잔량의 허위 성공,
+실제 backlog 상한 미강제, stale poller commit, sender retry·민감 본문 보존,
+종료 소유권을 Critical/Important로 발견했다. 각각 durable intent와 reconciliation,
+append-only event, CAS/version fence, poll 입구 상한, shared auth circuit,
+scrub/retention, `main.py` 단일 종료 소유권과 회귀로 수정했다. Task 10의 1차
+패널은 약한 Compose DB password fallback, URL user-info의 특수문자 처리, token을
+실제 서비스 경로에 주입하지 않은 로그 회귀, STATUS의 중복 태스크 순서, 과거 Phase
+상태 문구, 실제 모의 손절 수용 절차의 누락을 Critical/Important로 발견했다.
+`.env.example` 빈 필수값과 Compose fail-fast, password 없는
+`DATABASE_URL`+`PGPASSWORD`, network-fake poller→dispatcher→processor→publisher·
+client 오류 caplog 회귀, 현재 재개점, `exit_reason=stop_loss` 별도 수용 게이트로
+각각 수정했다.
+
+최종 동일 diff는 `senior-developer`, `senior-trader`, `architecture-expert`,
+`security-expert`가 다시 독립 검토해 **Critical 0건, Important 0건**으로
+승인했다. 이번 단위는 키움 broker adapter/TR/주문 계약을 변경하지 않아
+`broker-api-expert`는 대상이 아니다.
+
+### 미실행 live·운영 한계·별도 수용 절차
+
+이 태스크에서는 실제 Telegram, 키움 모의/실전 API, 운영 PostgreSQL, 별도 키움
+토큰 발급을 **전혀 실행하지 않았다**. `live` marker 11건도 의도적으로 제외했다.
+실제 수용에는 사용자 승인과 대상 bot/모의계좌의 명시가 필요하며, 별도 증거 파일에
+비밀·계좌 원값을 기록하지 않는다.
+
+승인 후에는 전용 테스트 bot과 개인 private chat을 `.env`에만 설정하고,
+`KIWOOM_MOCK=true`, backend replica 1개, Uvicorn worker 1개로 기동한다. 다음을
+순서대로 대사한다.
+
+1. 허용/미허용·private/group 인증, `/status`·`/account`·`/positions`의 기준 시각과 마스킹을 확인한다.
+2. `/pause`·`/stop` 즉시 효과와 `/resume`의 2단계 확인을 확인한다.
+3. 장중 모의 환경에서 실제 진입 체결 뒤 **`exit_reason=stop_loss` 손절**을 반드시 유발하고, 별도로 킬스위치 청산 완료와 pipeline `gave_up`를 각각 유발한다. 각 경우의 outbox·Telegram 상관 ID·operational event·주문/잔량/포지션을 함께 대사한다. 일반 청산이나 `/liquidate_all`은 손절 검증을 대체하지 않으며, 이 증거는 아래 리플레이 결함 검증과 구분한다.
+4. OhMyStock 관리 포지션만 대상으로 `/liquidate_all` preview/confirm을 수행하고 DB, broker 잔고, 미체결, intent terminal 상태를 함께 대사한다.
+5. 리플레이 fault seam으로 부분체결·미체결·거래정지·장 종료를 재현해 잔량, 가격 정확도, 수동 조치와 `needs_attention` 알림을 DB/Telegram 양쪽에서 대사한다. 리플레이 결과를 실서버 실측으로 표현하지 않는다.
+6. Telegram 차단·복구의 outbox/`[지연 알림]`, 발송 전후 재기동의 허용 중복 상관 ID, 16:10 다이제스트 날짜 멱등성을 확인한다.
+7. SQL 감사와 로그에 token, confirmation 원문, 계좌번호, 금액 원값이 없는지 확인한다.
+
+내장 Telegram 서비스는 backend/호스트 전체 다운을 스스로 알릴 수 없고, Bot API의
+성공 응답과 DB 기록 사이 크래시에서는 동일 상관 ID의 at-least-once 중복 전송이
+가능하다. pause는 기존 인메모리 계약이라 재기동 후 해제될 수 있으며,
+`STOP_NEW_ENTRIES` 뒤 감시 승계 이슈와 재부팅 캐치업 검증은 Phase 8이 은폐하지
+않는 별도 운영 한계다.

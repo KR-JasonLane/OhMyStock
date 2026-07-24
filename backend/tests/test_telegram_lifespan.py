@@ -1,7 +1,9 @@
 import asyncio
+import logging
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
@@ -18,10 +20,12 @@ from app.core.telegram_service import (
     TelegramService,
     external_id_hash,
 )
-from app.domain.notifications.commands import CommandResult
+from app.adapters.telegram.client import TelegramClient, TelegramPermanentError
+from app.domain.notifications.commands import CommandProcessor, CommandResult
 from app.domain.notifications.models import InboundMessage, OperatorIdentity
 from app.store.models import Base
 from app.store.telegram_inbox_store import TelegramInboxStore
+from app.store.telegram_command_store import TelegramCommandStore
 from app.store.notification_store import NotificationStore
 
 
@@ -276,6 +280,112 @@ async def test_command응답은_outbox이고_confirmation원문은_DB에없다(t
     assert "CONFIRM_SECRET" not in str(notifications.load_payload(1))
     assert await sender.run_once() == 1
     assert telegram.messages == ["/confirm CONFIRM_SECRET"]
+
+
+@pytest.mark.anyio
+async def test_명령응답_경로는_token_confirmation_계좌금액을_로그하지않는다(
+        tmp_path, caplog):
+    """Task 10 수용 회귀: mock sender를 써도 실제 명령 응답 흐름을 지난다."""
+    caplog.set_level(logging.DEBUG)
+    clock = Clock()
+    engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'secret-log.db'}")
+    Base.metadata.create_all(engine)
+    notifications = NotificationStore(engine, now=clock)
+    inbox = TelegramInboxStore(engine, now=clock)
+    commands = TelegramCommandStore(engine, now=clock)
+    telegram = FakeTelegram()
+    telegram.messages = []
+
+    async def send_message(chat_id: int, text: str) -> int:
+        telegram.messages.append((chat_id, text))
+        return len(telegram.messages)
+
+    telegram.send_message = send_message
+    bot_token = "BOT_TOKEN_SHOULD_NEVER_LOG"
+    circuit = TelegramCircuit()
+    ephemeral = EphemeralResponseSender(
+        telegram, chat_id=22, circuit=circuit, now=clock)
+    publisher = CommandResponsePublisher(notifications, ephemeral)
+
+    class SensitiveControl:
+        def scheduler_fingerprint(self):
+            return "scheduler-state"
+
+        async def account_summary(self):
+            return {
+                "available_deposit": "ACCOUNT_AMOUNT_SHOULD_NEVER_LOG",
+                "total_eval": "ACCOUNT_AMOUNT_SHOULD_NEVER_LOG",
+                "total_profit": "ACCOUNT_AMOUNT_SHOULD_NEVER_LOG",
+                "realized_pnl": "ACCOUNT_AMOUNT_SHOULD_NEVER_LOG",
+                "realized_pnl_confidence": "estimated",
+                "as_of": "2026-07-24T10:00:00+09:00",
+                "source": "fake",
+                "failed_fields": (),
+            }
+
+        async def system_status(self):
+            return {}
+
+        async def open_positions_summary(self):
+            return {}
+
+        async def pause_scheduler(self):
+            return {"applied": True}
+
+        async def resume_scheduler(self, expected=None):
+            assert expected == "scheduler-state"
+            return {"applied": True}
+
+        async def stop_new_entries(self, intent_id):
+            return True
+
+        async def liquidation_preview(self):
+            return SimpleNamespace(targets=())
+
+        async def liquidate_managed(self, intent_id, targets, *, expected_run_id=None):
+            raise AssertionError("not used by account/resume regression")
+
+        async def reconcile_control_intent(self, intent_id, targets=()):
+            raise AssertionError("not used by account/resume regression")
+
+    telegram.updates = [_message(89, "/account"), _message(90, "/resume")]
+    poller = InboxPoller(
+        telegram=telegram,
+        inbox=inbox,
+        operators=(OperatorIdentity(11, 22),),
+        bot_token=SecretStr(bot_token),
+        worker_id="secret-log-poller",
+        circuit=circuit,
+        now=clock,
+    )
+    assert await poller.run_once() == 2
+    processor = CommandProcessor(
+        inbox, commands, SensitiveControl(), "secret-log-command",
+        chat_hash="v1:" + "c" * 64, now=clock)
+    dispatcher = CommandDispatcher(
+        inbox, processor, worker_id="secret-log-dispatcher", now=clock,
+        response_publisher=publisher)
+    assert await dispatcher.tick_control() == 1
+    assert await dispatcher.tick_query() == 1
+    assert await CompositeSender(ephemeral, LoopStep()).run_once() == 1
+
+    confirmation = telegram.messages[0][1].removeprefix("/confirm ")
+    assert confirmation and confirmation != telegram.messages[0][1]
+
+    async def redirect_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(302, headers={"Location": "https://evil.example"})
+
+    async with TelegramClient(
+            SecretStr(bot_token), transport=httpx.MockTransport(redirect_handler)) as client:
+        with pytest.raises(TelegramPermanentError):
+            await client.get_updates(0)
+
+    for sensitive_value in (
+        bot_token,
+        confirmation,
+        "ACCOUNT_AMOUNT_SHOULD_NEVER_LOG",
+    ):
+        assert sensitive_value not in caplog.text
 
 
 @pytest.mark.anyio

@@ -11,15 +11,18 @@
 
 ## ▶ 여기서 재개 (다음 액션)
 
-**Phase 8(텔레그램 봇) Task 1~8 커밋 완료, Task 9 구현·4인 패널 최종
-승인 완료(미커밋). 전체 1049 passed, 11 live tests deselected.**
+**Phase 8(텔레그램 봇) Task 1~10 비라이브 수용 준비 완료. 최신 전체 회귀는
+1051 passed, 11 live tests deselected, 기존 warning 1건이며, 4인 최종 패널의
+Critical/Important는 0이다. 실제 Telegram·키움·운영 PostgreSQL·별도 토큰
+발급은 실행하지 않았다.**
 
 **▶ 다음 작업(우선순위 순)**
-1. **Phase 8(텔레그램 봇) Task 9 변경 커밋 후 Task 10 수용 검증 착수** — 스펙
+1. **Task 10 문서·검증 변경 커밋 후 승인 대기: Phase 8 모의 수용 실행** — 스펙
    `docs/specs/2026-07-24-phase8-telegram-bot-design.md`와 계획서
    `docs/plans/2026-07-24-phase8-telegram-bot-plan.md` 모두 작성 및
-   리뷰 패널 승인 완료. Task 1~3 커밋은 각각 `30059f7`, `ca50c24`,
-   `79b0aa0`, `d16e522`, `70a713c`, `df140bd`, `d391bd3`, `b1217cc`.
+   리뷰 패널 승인 완료. Phase 8 Task 1~9 커밋은 구현 순서대로
+   `30059f7`, `ca50c24`, `79b0aa0`, `d16e522`, `70a713c`, `df140bd`,
+   `d391bd3`, `b1217cc`, `1302320`이다.
    Task 9는 poller/command/query/reconcile/projector/sender/digest/maintenance
    독립 루프, HMAC 식별자, lane backpressure, 공유 인증 circuit, shutdown
    소유권과 FastAPI lifespan 조립 및 0014 widening을 구현했으며 4인 패널
@@ -43,9 +46,11 @@
    resume/liquidate_all. 구현 순서: Task 1 순수 알림 모델·파서·인증·포맷
    → Task 2 설정/Bot API → Task 3 영속 기반 → Task 4 공용 제어 →
    Task 5 durable 명령 → Task 6 운영 이벤트 → Task 7 sender →
-   Task 8 다이제스트 → Task 9 lifespan 조립(완료) →
-   **Task 10 수용·회고(다음)** →
-   Task 8 다이제스트 → Task 9 lifespan → Task 10 수용·회고.
+   Task 8 다이제스트 → Task 9 lifespan 조립 → Task 10 수용·회고는 완료했다.
+   Task 10은 `.env.example`/Compose DB password fail-fast, 실제 command
+   흐름의 비밀 로그 회귀, 0012→0013→0014 임시 SQLite 왕복, 운영 절차·문서와
+   4인 최종 재검토를 마쳤다. **전용 테스트 bot·모의계좌·명시적 사용자 승인
+   없이는 아래 live 수용을 시작하지 않는다.**
 2. **7b-⑤ 재부팅 캐치업 검증**(비거래일 가능 — 아래 절차). 세션이
    끊기므로 여유 있을 때.
 3. Phase 6 회고록 §3 7b 절 마무리 → Phase 6 종결.

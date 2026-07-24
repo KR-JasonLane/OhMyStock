@@ -1,7 +1,7 @@
 # 마스터 아키텍처 청사진 — OhMyStock
 
 - **작성일:** 2026-07-15
-- **상태:** Phase 0 완료 (2026-07-17)
+- **상태:** Phase 8 텔레그램 봇 구현·비라이브 수용 준비 완료 (2026-07-24)
 - **역할:** 이 문서는 이후 모든 Phase(1~8)의 spec이 참조하는 **마스터 청사진**이다.
   개별 Phase spec은 이 문서의 관련 절을 인용하고, 그 Phase에 국한된 세부 설계만
   추가한다.
@@ -24,7 +24,7 @@ Windows 전용이라 크로스플랫폼 Electron UI와 호환되지 않기 때�
 ## 2. 컨테이너 토폴로지
 
 런타임 아키텍처는 **컨테이너 Python 백엔드 + 호스트 네이티브 Electron UI**(안 A)다.
-백엔드와 DB(추후 Ollama)는 `docker-compose`로 실행하고, Electron UI는 데스크톱 GUI
+백엔드와 DB는 `docker-compose`로 실행하고, Ollama는 호스트 네이티브로, Electron UI는 데스크톱 GUI
 특성상 컨테이너화하지 않고 호스트에서 직접 실행되어 `localhost`로 백엔드에 접속한다.
 이 구도 덕분에 트레이딩 엔진은 UI 창이 닫혀도 계속 동작한다. (출처: docs/reference/project-context.md §3,
 spec §1.3~1.4)
@@ -46,20 +46,25 @@ Phase 0 계획서(Task 6)에 정의된 실제 compose 토폴로지는 다음과 
 │                              │        │   alembic upgrade head   named volume    │
 │                              │        │   → uvicorn 기동          "pgdata"       │
 │                              │        │                                         │
-│                              │        │  (Phase 4: ollama 서비스 추가 예정)       │
+│                              │        │  (Ollama는 호스트 네이티브로 연결)         │
 └─────────────────────────────┘        └───────────────────────────────────────┘
 ```
 
 핵심 규칙:
-- **서비스:** `db`(`postgres:16`, `POSTGRES_USER/PASSWORD/DB=ohmystock`, named volume
-  `pgdata`, `healthcheck: pg_isready -U ohmystock -d ohmystock`)와 `backend`
-  (`build: ./backend`, `env_file: .env`, `DATABASE_URL`을 `db` 서비스명으로 조립,
-  호스트 포트 **8000:8000**).
+- **서비스:** `db`(`postgres:16`, `POSTGRES_USER/DB=ohmystock`,
+  `POSTGRES_PASSWORD=.env`의 필수 고유값, named volume `pgdata`, `healthcheck:
+  pg_isready -U ohmystock -d ohmystock`)와 `backend`(`build: ./backend`,
+  `env_file: .env`, URL에 password를 넣지 않은 `DATABASE_URL` + `PGPASSWORD`로
+  `db` 서비스에 연결, 호스트 포트 **8000:8000**).
 - **기동 순서:** `backend`는 `depends_on: db (condition: service_healthy)`로 DB
   헬스체크를 기다린 뒤에만 시작해 레이스 컨디션을 방지한다.
 - **자동 마이그레이션:** 백엔드 컨테이너의 `CMD`는
   `alembic upgrade head && uvicorn app.main:create_app --factory --host 0.0.0.0 --port 8000`
   — 기동 시마다 마이그레이션을 자동 적용한 뒤 서버를 띄운다.
+- **Telegram 경계(Phase 8):** backend 안의 `TelegramService`가 공식 Bot API에
+  long polling과 `sendMessage`로만 **outbound** 연결한다. webhook·추가 inbound
+  포트·별도 worker는 없으며, Telegram 장애는 trading/scheduler와 독립된 loop에서
+  격리한다. 운영 배포는 backend replica 1개와 Uvicorn worker 1개를 유지한다.
 - **프론트엔드:** compose에 포함되지 않는다. 호스트에서 `pnpm dev` / `pnpm start`로
   별도 실행되어 `http://127.0.0.1:8000`(HTTP)과 `ws://127.0.0.1:8000/ws`(WebSocket)로
   접속한다.
@@ -83,13 +88,13 @@ Phase 0 계획서(Task 6)에 정의된 실제 compose 토폴로지는 다음과 
 백엔드(`backend/app/`)는 5개 계층으로 나뉘며, 각 계층은 명확한 단일 책임을 가진다
 (출처: docs/reference/project-context.md §3, 실제 코드 `backend/app/*`):
 
-| 계층 | 책임 | Phase 0 구현 상태 |
+| 계층 | 책임 | 현재 구현 상태 |
 |---|---|---|
 | `api/` | FastAPI 라우트 / WebSocket 핸들러 — **전송(transport)만** 담당, 비즈니스 로직 없음 | `health.py`(`GET /health`), `ws.py`(`WS /ws`) |
-| `core/` | 설정, 로깅, 레이트리밋, 스케줄링 등 공통 기반 요소 | `config.py`(`Settings`, `get_settings`) |
-| `adapters/` | 외부 연동 구현체를 포트 인터페이스 뒤에 숨김 (예: 키움 REST 구현체) | `kiwoom/` — `errors`·`auth`(TokenManager)·`rate_limiter`·`client`·`broker` (Phase 1 Task 3~7) |
-| `domain/` | 순수 비즈니스 로직 (포트 프로토콜, 전략, 스코어링, 매매 규칙) — 외부 I/O에 의존하지 않음 | `broker.py`(`BrokerPort` + Quote/Candle/Deposit/Position/Balance, Phase 1 Task 2) |
-| `store/` | 영속화 (SQLAlchemy 모델, 마이그레이션) | `db.py`(`create_db_engine`, `check_db`) + Alembic |
+| `core/` | 설정, 로깅, 레이트리밋, 스케줄링 등 공통 기반 요소 | `config.py`, `operations_control.py`, `telegram_service.py` |
+| `adapters/` | 외부 연동 구현체를 포트 인터페이스 뒤에 숨김 (예: 키움 REST 구현체) | `kiwoom/`과 `telegram/client.py`(고정 Bot API origin) |
+| `domain/` | 순수 비즈니스 로직 (포트 프로토콜, 전략, 스코어링, 매매 규칙) — 외부 I/O에 의존하지 않음 | `broker.py`, `notifications/`(명령·인증·사건·포맷) |
+| `store/` | 영속화 (SQLAlchemy 모델, 마이그레이션) | `db.py`, Alembic, Telegram inbox/intent/outbox/event 저장소 |
 
 **확장 원칙 (헥사고날 아키텍처):** 포트(인터페이스) `BrokerPort`는 `domain/broker.py`가
 소유하고, `adapters/`는 그 구현체(키움 등)를 제공한다. 이렇게 설계하면 `domain/`이 어댑터를
@@ -107,7 +112,10 @@ Phase 0 계획서(Task 6)에 정의된 실제 compose 토폴로지는 다음과 
 앱 팩토리다. 모듈 임포트만으로 환경변수를 요구하지 않도록 팩토리 함수로 분리했으며,
 컨테이너에서는 `uvicorn app.main:create_app --factory`로 기동한다. settings는
 `create_app()` 생성 시점에 `app.state.settings`로 설정되고, DB 엔진만 `lifespan`에서
-생성/해제된다(`app.state.engine`).
+생성/해제된다(`app.state.engine`). Phase 8은 정상 Telegram 설정에서만 같은
+lifespan에 client·store·`OperationsControl`·`TelegramService`를 한 번 조립한다.
+종료 순서는 Telegram 신규 수신/claim 차단 → scheduler → trading → Telegram
+projector/sender drain이며, Telegram 추가 drain은 10초를 넘기지 않는다.
 
 ## 4. 8개 서브시스템 (로드맵 Phase 1~8)
 
@@ -182,8 +190,22 @@ Phase 0은 실제 키움 API 호출·데이터 수집·매매 로직 없이, 상
                      ▲ 전체 타임라인 구동: 스케줄러/오케스트레이터 (Phase 6)
                      └────────────────────────────────────────────────────
 [React/Electron 대시보드 (Phase 7)] ◄── REST/WS 상태·결과 조회 ──► [백엔드]
-[텔레그램 봇 (Phase 8)]            ◄── 알림/제어 ──────────────► [백엔드]
+[Telegram Bot API]                 ◄── HTTPS long poll/send ───► [TelegramService]
+                                                                  │
+                                                  [PostgreSQL inbox/intent/
+                                                   operational-event/outbox]
 ```
+
+### 5.3 Phase 8 Telegram 알림·제어 흐름
+
+`TelegramService`의 poller는 인증된 개인 채팅 update만 durable inbox와 offset에
+같이 기록한다. command worker는 REST와 같은 `OperationsControl`을 호출하며,
+`/resume`·`/liquidate_all`은 hash만 저장하는 1회용 확인과 durable intent를 거친다.
+거래·스케줄러는 Telegram DTO를 알지 않고 append-only operational event만 기록한다.
+projector가 이를 outbox로 바꾸고 sender가 lease·재시도·dead-letter·민감 payload
+scrub을 담당한다. 외부 전송은 at-least-once라 성공 기록 직전 크래시 때 중복될 수
+있지만, 안정 상관 ID로 식별한다. 실제 Bot API·키움 모의 수용은 사용자 승인 전까지
+실행하지 않는다.
 
 ## 6. 일일 운영 타임라인
 
@@ -229,18 +251,15 @@ https://github.com/younghwan91/kiwoom-rest-api
 | Phase | 이름 | 의존 | 상태 |
 |---|---|---|---|
 | 0 | 워킹 스켈레톤 & 기반 | — | **완료** |
-| 1 | 키움 브로커 어댑터(모의투자), `BrokerPort` 뒤에 구현 | 0 | 착수 전 |
-| 2 | 데이터 수집 파이프라인 (장 마감 후, 6개월 일봉, 섹터 맵) | 1 | 착수 전 |
-| 3 | 스코어링 엔진 (섹터별·전략별 수익률, 자정) | 2 | 착수 전 |
-| 4 | AI 멀티에이전트 분석 (LangGraph + Ollama: economist + trader → 필터) | 2, 3 | 착수 전 |
-| 5 | 트레이딩 엔진 (신호 진입 + 클라이언트측 TP/SL/Stop 모니터링) | 1 | 착수 전 |
-| 6 | 스케줄러/오케스트레이터 (일일 타임라인) | 2–5 | 착수 전 |
-| 7 | React/Electron 대시보드 | 1–6 | 착수 전 (Phase 0 골격만 존재) |
-| 8 | 텔레그램 봇 | 1–6 | 착수 전 |
+| 1 | 키움 브로커 어댑터(모의투자), `BrokerPort` 뒤에 구현 | 0 | 완료 |
+| 2 | 데이터 수집 파이프라인 (장 마감 후, 6개월 일봉, 섹터 맵) | 1 | 완료 |
+| 3 | 스코어링 엔진 (섹터별·전략별 수익률, 자정) | 2 | 완료 |
+| 4 | AI 멀티에이전트 분석 (LangGraph + Ollama: economist + trader → 필터) | 2, 3 | 완료 |
+| 5 | 트레이딩 엔진 (신호 진입 + 클라이언트측 TP/SL/Stop 모니터링) | 1 | 구현·리플레이/모의 검증 완료, 실전 전환 별도 게이트 |
+| 6 | 스케줄러/오케스트레이터 (일일 타임라인) | 2–5 | 완료, 재부팅 캐치업 실환경 검증 보류 |
+| 7 | React/Electron 대시보드 | 1–6 | 미착수 (Phase 0 골격만 존재) |
+| 8 | 텔레그램 봇 | 1–6 | 구현·비라이브 수용 준비 완료; 모의 Bot API·키움 수용은 별도 사용자 승인 필요 |
 
-Phase 0 내부적으로는 백엔드 Task 1~5(패키지 뼈대, 설정 로더, DB 연결, Alembic
-마이그레이션, `/health`, `/ws`)와 프론트엔드 Task 7~8(electron-vite 스캐폴드,
-`StatusPanel`, `useBackendStatus`)에 이어 Task 6(Dockerfile + compose 기동 검증)과
-Task 10(E2E 검증 + 회고록)까지 모두 완료되었다. 다음 단계는 Phase 1 spec
-브레인스토밍이며, 키움 `openapi.kiwoom.com` 가입과 app key/secret 발급, 모의투자
-신청이 선행 조건으로 블로킹되어 있다(출처: `docs/STATUS.md`).
+현재 재개 순서와 남은 운영 검증은 `docs/STATUS.md`를 단일 기준으로 삼는다.
+Phase 8의 실제 모의 Bot API·키움 수용은 별도 사용자 승인과 명시적 범위가 있을 때만
+실행하며, Phase 6 재부팅 캐치업 검증도 독립 운영 절차로 남아 있다.
