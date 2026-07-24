@@ -180,6 +180,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         "포지션이 리플레이 reconcile로 감시 이탈(CLOSED 오판)"
                         "될 수 있어 기동을 거부합니다. 리플레이는 별도 "
                         "DATABASE_URL을 사용하세요(§4-1).")
+            # 좀비 run 정정(P6 Task 7d — 2026-07-24 실측): 컨테이너가
+            # graceful 타임아웃을 넘겨 죽으면 finish_run이 못 돌아 run이
+            # 영구 'running'으로 남고 그 run의 warnings(0012)가 소실된다.
+            # 기동 시점엔 이 프로세스에 실행 중 run이 없으므로(at-most-one
+            # 인프로세스 가드) DB의 running은 전부 stale이다.
+            # 실패는 격리한다(fail-open): 좀비 정정은 감사 **위생** 작업이지
+            # 자금 안전 게이트가 아니다 — 리플레이 교차 오염 검사(아래,
+            # fail-loud)와 성격이 다르다. 스키마 미적용 DB(마이그레이션 선행
+            # 전·테스트 부팅)에서 이 위생 작업이 기동을 막으면 안 된다.
+            try:
+                stale = await asyncio.to_thread(
+                    app.state.trading_store.close_stale_runs,
+                    settings.run_environment)
+                if stale:
+                    logger.warning(
+                        "closed %d stale trade run(s) left 'running' by an "
+                        "unclean shutdown (failure_reason=process_restart) — "
+                        "their in-memory warnings were lost", stale)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("stale trade run cleanup skipped (%s)",
+                               type(exc).__name__)
+
             trade_limits = (settings.trade_max_single_order_krw,
                             settings.trade_max_daily_orders,
                             settings.trade_max_daily_order_krw,

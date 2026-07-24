@@ -29,6 +29,11 @@ class FakeTrading:
     def request_stop(self, mode):
         self.stop_mode = mode
 
+    async def request_stop_durable(self, mode):
+        """API가 쓰는 진입점(P6-T7d) — 인메모리 정지 + DB 영속."""
+        self.request_stop(mode)
+        self.persisted_stop = mode
+
     def progress(self):
         return TradingProgress(run_id=7, status="running" if self._running
                                else "succeeded",

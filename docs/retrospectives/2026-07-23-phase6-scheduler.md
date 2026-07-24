@@ -231,6 +231,91 @@ speed=1.0, 시드 035760. 증거 `.superpowers/sdd/p6-task-8-replay-restart.txt`
 
 완료 시 이 절과 STATUS.md를 갱신한다.
 
+### Task 7c — 트레이딩 관측성 (결정 #36 갭 3건, 커밋 02d1753)
+
+사용자 질문("디버깅에 필요한 로그는 충분히 찍고 있나")에서 출발해 실측
+점검한 결과 **결정 #36의 두 축이 트레이딩 경로에서 동시에 깨져 있었다**:
+
+- **갭 A — 진입 판정이 로그에 0건**: `_warn_once`가 warnings 리스트에만
+  append. 7b 관찰의 09:06~09:11 재시도 수십 회가 grep 불가였다.
+- **갭 B — `trade_runs`에 warnings 컬럼 부재**: 판정 사유가 `/trade/status`
+  메모리에만 존재해 run 종료 시 소실. "그날 왜 안 샀나"를 SQL로 물을 수
+  없었다(analysis_runs에는 있는데 트레이딩에만 없던 비대칭).
+- **갭 C — 방어선 상태 전이 무기록**: peak 갱신·트레일링 활성화가 안 남아
+  "손절이 왜 그 가격에 발동했나"의 사후 재구성 불가.
+
+수정: `trade decision:` 로그(dedup 공유), `trade_runs.warnings`(0012 —
+서비스+monitor 두 출처 합성·절단 마커·최신 200건), `defense trailing
+ACTIVATED`(WARNING)/`defense peak updated`(INFO) 전이 로그, `entry filled`
+/`position closed`에 수량·가격·손익 병기(grep 대칭), 컨테이너 로그 회전
+(50MB×5).
+
+**패널이 3라운드로 사각지대를 좁힌 태스크**(각 라운드가 앞 수정의 빈틈을
+찾았다): 보안 — `slot_krw` 원값이 영구 적재되며 계좌 잔액 역산 가능(같은
+함수의 기존 마스킹 원칙 미적용 분기) → 마스킹, "SSOT는 DB" 주석이 방어선
+전이에는 거짓 → 경계 정정. 트레이더 — `finish_run`이 monitor 경고를
+빠뜨려 목적 절반만 달성 → `_all_warnings()`로 progress/finish_run 합성
+단일화, 일일 한도 소진·유령 포지션 알람이 여전히 로그 무기록 →
+`_warn_once` 통일. 개발자 — 진입 성공 로그 부재(청산과 비대칭) → 신설,
+그리고 **"append 12곳 전부 통일"이라는 내 보고가 `.append(` 패턴만 검색해
+`_run_reconcile`의 `.extend()` 경로를 놓쳤음을 적발**(매 run 시작마다 도는
+핵심 경로였다).
+
+### Task 7d — 좀비 run 정정 (실환경이 만든 갭)
+
+7c 재배포(`docker compose up -d`) 자체가 새 결함을 드러냈다: 컨테이너
+교체 시 graceful 타임아웃 초과로 lifespan `finally`가 못 돌아 `finish_run`
+미실행 → `trade_runs`에 `status='running'` 고아 행 2건 잔존 + **그 run의
+warnings가 통째로 소실**(7c가 크래시 경로에서 무력화). 스케줄러는 좀비를
+완료도 실패도 아닌 것으로 무시해 데드락은 없었다(Task 4·5 설계대로).
+
+수정: `TradingStore.close_stale_runs(run_environment)` — 기동 시 running
+행을 `stopped`/`kill_switch=False`/`failure_reason='process_restart'`로
+정정(§4-d상 "미완료=재기동 대상"으로 남아 캐치업 지속). lifespan에서
+호출하되 **fail-open 격리**(감사 위생 작업이지 자금 게이트가 아니다 —
+리플레이 교차 오염 검사의 fail-loud와 대비).
+
+**실환경 실증**: 11:21:28 좀비 2건 정정 → 11:22:28 스케줄러가 미완료로
+판정해 run 4 자동 기동, 킬스위치 run 1은 완료로 유지(§4-d 3분기가 실데이터
+에서 갈림).
+
+**보안이 잡은 킬스위치 경합(근본 수정)**: 정지는 협조적이라
+(§6-5) `/trade/stop` 후 finish_run은 다음 사이클 경계에야 실행된다 — 그
+창에서 크래시하면 좀비 정정이 단순 크래시로 오인해 `kill_switch=False`로
+덮어쓰고, §4-d상 "실패"로 분류돼 **그날 자동 재기동** = Task 7a가 문서화한
+"킬스위치로 멈춘 날은 같은 날 재기동 없음" 보장이 깨진다. 수정:
+`request_stop`이 요청 시점에 `kill_switch_mode`를 DB에 즉시 영속(HTTP 200
+응답 전에 커밋 완료 — 동기 경로), `close_stale_runs`가 그 흔적이 있으면
+`stopped_by_kill_switch=True`(=완료, 재기동 금지)로 정정. DB 실패는
+격리(fail-open — 킬스위치가 자기 안전장치에 막히는 §8-1 C2 역설 방지).
+
+⚠️ **STOP_NEW_ENTRIES 잔여 리스크(트레이더 T7d — 감수하는 트레이드오프)**:
+킬스위치 두 모드 모두 "그날 재기동 없음"으로 처리되는데, `LIQUIDATE_ALL`은
+청산 후 종료라 남을 포지션이 없어 정합하지만 `STOP_NEW_ENTRIES`는 감시를
+계속하는 모드라 그 창에서 크래시하면 **보유 포지션이 그날 무감시로 남는다**.
+그럼에도 재기동을 허용하지 않는 이유: `StopMode`는 run 단위 인메모리라
+재기동한 새 run은 `stop_mode=None`으로 시작해 **신규 진입까지 완전히 재개**
+된다 — 운영자가 막으려던 바로 그것을 되살린다. "무감시 방치"는 유계(다음
+거래일 캐치업·수동 개입)이고 "의도 위반 재기동"은 능동적 악화라, 전자를
+택했다. 근본 해법(정지 모드를 재기동 run에 승계해 "감시만 재개")은 별도
+기능 — 백로그(§5).
+
+⚠️ **닫을 수 없는 잔여 창(보안 T7d 수용)**: 요청 접수 후 DB 커밋 완료
+전 크래시(또는 DB 일시 장애로 record_stop_request가 격리된 뒤 크래시)는
+여전히 "단순 크래시"로 분류된다. 행동과 그 영속 기록을 원자적으로 만들 수
+없는 근본 문제라 2단계 커밋급 과설계 없이는 못 닫는다. 완화: 이 구간
+크래시는 HTTP 요청 자체가 실패/타임아웃해 운영자가 "정지 확정"으로 오인할
+근거가 없고, 최악의 결과도 Task 7d 이전 베이스라인과 같다. **운영 절차:
+`/trade/stop` 호출 후 `/trade/status`로 `stopped` 확정을 확인할 것.**
+
+⚠️ **알려진 트레이드오프(트레이더 T7d)**: 이 수정 **이전에는 좀비가
+스케줄러에 아예 안 보여**(completed=False + last_failure=None) 백오프 없이
+즉시 재기동됐다 — 버그가 우연히 만든 초고속 재기동이었다. 정정 후에는
+`last_failed_finished_at`이 실제 값을 가져 표준 60초 백오프가 처음으로
+적용된다. "재기동이 예전보다 느려졌다"로 재조사되지 않도록 기록해 둔다:
+손상된 상태에 우연히 의존하는 것보다 정상 정책 편입이 낫고, 60초는
+컨테이너 교체 자체의 수십 초~수 분에 더해지는 소폭 증분이다.
+
 ## 4. 프로세스 회고
 
 - **스펙·계획 리뷰가 구현 전에 실결함을 3건 선제 차단**: OrderCaps
@@ -253,7 +338,10 @@ speed=1.0, 시드 035760. 증거 `.superpowers/sdd/p6-task-8-replay-restart.txt`
   자동 재개 정책 재확인(§10-6).
 - **Phase 8(텔레그램) 연계**: scheduler_events·run 테이블이 알림 원천,
   트레이딩 gave_up=감시 공백 최우선 경보, pause/resume 원격 표면.
-- 비차단 백로그: 잡별 일일 트리거 상한(짧은 시간 N회 초과 시 자동
+- 비차단 백로그: **STOP_NEW_ENTRIES 승계 재기동**(정지 모드를 새 run에
+  이어받아 "감시만 재개, 신규 진입은 계속 차단" — 트레이더 T7d),
+  **position_events 테이블**(방어선 전이 이력의 DB 영속 — 현재 로그 전용,
+  회전 시 소실. 보안 T7c), 잡별 일일 트리거 상한(짧은 시간 N회 초과 시 자동
   pause+경보 — 보안 7b: 완료-리터럴 불일치 클래스가 ANALYZE 잡에서
   재발하면 클라우드 LLM·뉴스 API 과금 폭증 방향), status 리터럴 공용
   enum 승격 검토(done vs succeeded 이질성의 구조적 해소),

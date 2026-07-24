@@ -109,6 +109,67 @@ class TradingStore:
             session.flush()
             return run.id
 
+    def record_stop_request(self, run_id: int, mode: str) -> None:
+        """킬스위치 **요청 즉시** kill_switch_mode를 영속(P6 Task 7d 보안
+        Important). 정지는 협조적이라(§6-5) 실제 finish_run은 루프가 다음
+        사이클 경계에 도달해야 실행되는데, 그 사이에 프로세스가 죽으면
+        run이 'running'으로 남아 close_stale_runs가 이를 단순 크래시로
+        오인해 `stopped_by_kill_switch=False`로 덮어쓴다 → §4-d상 "실패"로
+        분류돼 **그날 안에 자동 재기동** = Task 7a가 문서화한 킬스위치
+        보장("같은 날 자동 재기동 없음")이 깨진다. 요청 의도를 먼저 DB에
+        남겨 그 창을 닫는다."""
+        with self._sessions.begin() as session:
+            run = session.get(TradeRunRow, run_id)
+            if run is not None:
+                run.kill_switch_mode = mode
+
+    def close_stale_runs(self, run_environment: str) -> int:
+        """기동 시 잔존 'running' run 정정 — 반환: 정정 건수(P6 Task 7d).
+
+        왜 필요한가(2026-07-24 실측): 컨테이너가 graceful 타임아웃을 넘겨
+        죽으면 lifespan finally가 못 돌아 `finish_run`이 실행되지 않고, run이
+        영구히 `status='running'`으로 남는다. 결과 ① 감사 테이블에 "영원히
+        실행 중"인 고아 행이 쌓이고, ② **그 run의 warnings(0012)가 통째로
+        소실**된다(finish_run이 유일한 기록 지점) — Task 7c의 목적이 크래시
+        경로에서 무력화. 스케줄러 판정은 좀비를 완료도 실패도 아닌 것으로
+        무시해 데드락은 없었지만(설계대로), 감사 공백은 남았다.
+
+        정정 계약: `status='stopped'`, `failure_reason='process_restart'`,
+        `finished_at`=기동 시각(실제 종료 시각은 알 수 없다 — **상한** 근사:
+        이르게 잡으면 백오프가 이미 지난 것으로 오판돼 부팅 즉시 재진입한다.
+        상한이라 크래시 재기동 후 ~60초 유예가 생겨 브로커 연결 등 나머지
+        기동 시퀀스가 안정화될 시간이 확보되는 이점도 있다 — 아키텍트 T7d).
+        `stopped_by_kill_switch`는 **kill_switch_mode 유무로 판정**한다:
+        요청이 이미 영속돼 있으면(record_stop_request) 운영자 의사였으므로
+        True(=완료, 같은 날 재기동 금지 — Task 7a 보장 유지), 아니면
+        False(=미완료, 캐치업 재기동 대상).
+
+        ⚠️ **기동 시에만** 호출할 것: 이 프로세스에 실행 중인 run이 없음이
+        전제다(인프로세스 at-most-one 가드가 진실 — scheduler_store 주석과
+        동일 근거). 실행 중 호출하면 살아있는 run을 죽은 것으로 오기록한다.
+        run_environment 필터로 리플레이/모의 교차 정정도 차단한다(§4-1).
+
+        ⚠️ **다중 인스턴스 위험 악화(§10-4, 아키텍트 T7d)**: 이 함수는
+        프로세스 소유권(PID/lease)이 아니라 환경 필터만으로 무차별 정정한다
+        — 두 번째 백엔드가 같은 DB에 기동하면(배포 규율 위반) 첫 인스턴스의
+        **살아있는** run 행을 즉시 stopped로 오기록하고, 두 번째의 스케줄러가
+        그것을 "실패"로 읽어 중복 트레이딩 엔진을 기동할 수 있다. §10-4가
+        수용한 리스크를 이 함수가 더 빠르고 직접적인 경로로 만든다 —
+        단일 인스턴스 배포 규율의 중요도가 Task 7d로 한 단계 올라갔다."""
+        with self._sessions.begin() as session:
+            rows = session.scalars(
+                select(TradeRunRow)
+                .where(TradeRunRow.status == "running",
+                       TradeRunRow.run_environment == run_environment)).all()
+            for row in rows:
+                row.status = "stopped"
+                row.stopped_by_kill_switch = row.kill_switch_mode is not None
+                row.failure_reason = ("kill_switch_before_crash"
+                                      if row.kill_switch_mode is not None
+                                      else "process_restart")
+                row.finished_at = self._now()
+            return len(rows)
+
     def foreign_open_position_count(self, run_environment: str) -> int:
         """지정 환경 **밖**의 런에 속한 미종결 포지션 수(트레이더 R6
         Critical) — 리플레이 프로필 기동 fail-fast 입력: 같은 DB에 실전/

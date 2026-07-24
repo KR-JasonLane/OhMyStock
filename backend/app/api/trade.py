@@ -61,7 +61,9 @@ async def stop_trading(request: Request, body: dict | None = None) -> dict:
         raise HTTPException(
             status_code=422,
             detail=f"unknown stop mode {raw!r} — one of {sorted(_STOP_MODES)}")
-    service.request_stop(mode)
+    # durable 진입점: 인메모리 정지 + 요청 의도 DB 영속(응답 전 커밋 보장 —
+    # 협조적 정지 대기 중 크래시해도 킬스위치가 무효화되지 않는다, P6-T7d)
+    await service.request_stop_durable(mode)
     logger.warning("trading stop requested: mode=%s", mode.value)
     return {"stopping": True, "mode": mode.value}
 

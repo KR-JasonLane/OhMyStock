@@ -71,6 +71,7 @@ class _StoreLike(Protocol):
     def get_position(self, position_id: int) -> TradePosition | None: ...
     def recent_closed_symbols(self, cutoff: datetime) -> set[str]: ...
     def daily_order_usage(self, day: date, run_environment: str): ...
+    def record_stop_request(self, run_id: int, mode: str) -> None: ...
 
 
 class SingleOrderCapExceeded(ValueError):
@@ -188,6 +189,38 @@ class TradingService(BackgroundRunService):
             daily_order_count=caps.order_count if caps else 0,
             daily_order_krw=caps.order_krw if caps else 0,
             kill_switch=mode.value if mode else None)
+
+    async def request_stop_durable(self, mode: StopMode) -> None:
+        """킬스위치 요청(API 진입점) — 인메모리 플래그 + **DB 영속**.
+
+        왜 별도 비동기 진입점인가: 베이스 `request_stop`은 **동기** 계약이라
+        그 안에서 store를 호출하면 이벤트 루프를 블로킹한다(아키텍트 T7d —
+        이 코드베이스는 store 호출을 예외 없이 to_thread로 감싸왔고, 하필
+        킬스위치는 응답성이 가장 중요한 경로다). 반대로 fire-and-forget으로
+        위임하면 "HTTP 200 응답 시점엔 이미 DB에 남아 있다"는 보장(보안
+        T7d 승인 근거)이 사라진다. 비동기 래퍼가 두 요구를 모두 만족한다 —
+        루프는 안 막고, await로 응답 전 커밋을 보장한다.
+
+        영속이 필요한 이유: 정지는 협조적이라(§6-5) finish_run은 루프가 다음
+        사이클 경계에 도달해야 실행된다. 그 창에서 프로세스가 죽으면 run이
+        'running'으로 남고, 기동 시 close_stale_runs가 단순 크래시로 오인해
+        그날 자동 재기동을 허용한다 — Task 7a의 킬스위치 보장이 깨진다
+        (보안 T7d Important).
+
+        DB 실패는 격리한다(fail-open): 킬스위치가 저장 실패로 막히면
+        "리스크 축소 주문이 자기 안전장치에 막히는" 역설(§8-1 C2와 동일
+        클래스)이 된다 — 인메모리 플래그는 이미 세팅됐고 정상 종료 경로의
+        finish_run이 최종 기록을 남긴다."""
+        self.request_stop(mode)          # 베이스: 인메모리 플래그(즉시 유효)
+        if self._run_id is None:
+            return
+        try:
+            await asyncio.to_thread(self._store.record_stop_request,
+                                    self._run_id, mode.value)
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "kill switch persist failed for run %s — in-memory stop is "
+                "still in effect", self._run_id)
 
     def _all_warnings(self) -> tuple[str, ...]:
         """경고 두 출처 합성 — 서비스 누적(self._warnings)과 monitor의 상시
