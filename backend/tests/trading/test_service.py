@@ -841,6 +841,76 @@ async def test_managed청산은_장마감잔량을_EXIT_FAILED와_terminal결과
     assert persisted.state is PositionState.EXIT_FAILED
 
 
+@pytest.mark.anyio
+async def test_재기동청산대사는_durable_target으로_읽기만하고_재발주하지않는다(store):
+    run_id = store.create_run("{}")
+    pos = TradePosition("005930", "삼성전자", "kospi",
+                        PositionState.ENTERED, 100_000, 3, 100_000, False,
+                        entered_at=T0)
+    pos_id = store.create_position(run_id, pos)
+    store.update_position(pos_id, state=PositionState.CLOSED, closed_at=T0)
+    broker = FakeBroker(open_orders=[None], balances=[Balance((), 0, 0)])
+    service = _service(broker, store, calendar=Cal([True]), latest=None)
+    from app.domain.trading.models import LiquidationTarget
+
+    result = await service.reconcile_control_intent(
+        "telegram_command_confirmation_7",
+        (LiquidationTarget(pos_id, "005930", 3),))
+
+    assert result.status == "succeeded"
+    assert [order for order in broker.placed if order.side is OrderSide.SELL] == []
+
+
+@pytest.mark.anyio
+async def test_확인한_run과_달라지면_managed청산을_시작하지않는다(store):
+    prior_run = store.create_run("{}")
+    current_run = store.create_run("{}")
+    pos = TradePosition("005930", "삼성전자", "kospi",
+                        PositionState.ENTERED, 100_000, 3, 100_000, False,
+                        entered_at=T0)
+    pos_id = store.create_position(current_run, pos)
+    broker = FakeBroker(balances=[Balance((_bpos(qty=3),), 0, 0)])
+    service = _service(broker, store, calendar=Cal([True]), latest=None)
+    service._run_id = current_run
+    service.is_running = lambda: True
+    from app.domain.trading.models import LiquidationTarget
+
+    result = await service.request_managed_liquidation(
+        "telegram_command_confirmation_8",
+        (LiquidationTarget(pos_id, "005930", 3),), expected_run_id=prior_run)
+
+    assert result.status == "needs_attention"
+    assert broker.placed == []
+
+
+@pytest.mark.anyio
+async def test_진행중청산대사는_캐시하지않고_후속_terminal을_관측한다(store):
+    run_id = store.create_run("{}")
+    pos = TradePosition("005930", "삼성전자", "kospi",
+                        PositionState.ENTERED, 100_000, 3, 100_000, False,
+                        entered_at=T0)
+    pos_id = store.create_position(run_id, pos)
+    broker = FakeBroker(open_orders=[None, None],
+                        balances=[Balance((_bpos(qty=3),), 0, 0), Balance((), 0, 0)])
+    service = _service(broker, store, calendar=Cal([True]), latest=None)
+    service._on_accepted()
+    service.is_running = lambda: True
+    service._run_id = run_id
+    from app.domain.trading.models import LiquidationTarget
+    service._managed_liquidation_intent = "telegram_command_confirmation_9"
+    service._managed_liquidation_targets = {
+        pos_id: LiquidationTarget(pos_id, "005930", 3)}
+
+    first = await service.reconcile_control_intent(
+        "telegram_command_confirmation_9")
+    store.update_position(pos_id, state=PositionState.CLOSED, closed_at=T0)
+    second = await service.reconcile_control_intent(
+        "telegram_command_confirmation_9")
+
+    assert first.status == "in_progress"
+    assert second.status == "succeeded"
+
+
 def test_새run은_managed_scope만_clear하고_REST_broad는_전체를읽는다(store):
     run_id = store.create_run("{}")
     first = TradePosition("005930", "삼성전자", "kospi",

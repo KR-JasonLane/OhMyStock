@@ -405,3 +405,115 @@ KST 귀속일·정확도·부분 실패를 함께 표현하는 계약이 없었�
   ABA barrier 테스트는 A 행만 `liquidate_all`, B 행은 NULL임을 직접 검증한다.
 - 최종 focused 66건, 전체 909건 통과, 11건 live deselect와 기존 warning
   1건이다.
+
+## Task 5 — durable 수신·확인·제어 command worker
+
+### 요청과 기존 상태
+
+Task 3은 inbox, confirmation, command intent의 SQL 상태 기계만 제공했고,
+Task 4는 REST와 Telegram이 공유할 OperationsControl 및 managed liquidation을
+제공했다. 그러나 inbox claim을 intent의 선행 영속, 공용 제어 호출, audit,
+재기동 대사로 연결하는 worker는 없었다. 특히 Task 4의 TradingService에는
+`reconcile_control_intent()`가 있었지만 OperationsControl에 같은 공용 경계가
+없어 Telegram 도메인이 구현체 내부로 내려갈 위험이 있었다.
+
+### 설계 판단
+
+- `CommandProcessor`는 raw Telegram text나 broker/order port를 받지 않고
+  정규화된 inbox 행, `TelegramCommandStore`, `OperationsControlPort`만 소비한다.
+  동기 SQLAlchemy 저장소 호출은 모두 `asyncio.to_thread()`로 격리했다.
+- `/pause`, `/stop`과 조회 명령은 update ID 기반 execution intent를 먼저
+  만들고, 해당 ID만 claim하여 `running` 전이 뒤 공용 제어를 호출한다. 다른
+  pending intent를 우연히 claim하는 것을 막아 update 순서와 부수효과 귀속을
+  보존한다. `/account`, `/positions` 결과에는 이후 outbox가 영속 `sensitive`
+  값을 쓰도록 `outbox_sensitive=True`를 명시한다.
+- `/resume`, `/liquidate_all` 첫 요청은 intent나 청산을 만들지 않고 120초
+  confirmation만 발급한다. `/confirm`은 hash·operator·설정 chat hash에
+  귀속된 미사용 confirmation을 먼저 조회하고, 현재 scheduler/관리 target
+  fingerprint가 같은 경우에만 token 소비와 intent 생성을 원자 처리한다.
+  청산 target `(position_id, symbol, quantity)`는 intent JSON snapshot으로
+  보존하고 다시 `LiquidationTarget`으로 복원한다.
+- control 호출 직후의 프로세스 단절이나 예외는 `running → unknown`으로만
+  남긴다. 재기동 `reconcile_unknown()`은 liquidation에 대해
+  `OperationsControl.reconcile_control_intent()`만 호출하며 새 liquidation이나
+  broker SELL을 직접 실행하지 않는다. terminal cache/기존 주문·잔고·DB
+  대사는 Task 4 TradingService 소유로 유지한다. 비청산 unknown은 실행 여부를
+  추측하지 않고 `needs_attention`으로 종결한다.
+- Task 4 경계의 누락은 최소 보완했다. `OperationsControl`은 trading 미조립
+  시 구조화된 `needs_attention`을 반환하고, 그 외에는 TradingService의
+  reconcile만 위임한다. notifications `OperationsControlPort` protocol에도 이
+  계약을 명시해 도메인이 broker 구현에 의존하지 않게 했다.
+
+### 변경 위치
+
+- `backend/app/domain/notifications/commands.py`: inbox lease, immediate/risky
+  command 분기, confirmation fingerprint, intent 실행·unknown reconciliation
+- `backend/app/domain/notifications/ports.py`: 공용 OperationsControl protocol
+- `backend/app/store/telegram_command_store.py`: update 기반 intent 생성,
+  특정 intent claim, confirmation context read, command audit/status 조회
+- `backend/app/core/operations_control.py`: durable liquidation reconcile 위임
+- `backend/tests/notifications/test_commands.py`: intent 선행, 위험 명령,
+  confirm, 재기동 재매도 방지, 전체 command/sensitive 결과 회귀
+- `backend/tests/store/test_telegram_stores.py`: update당 단 하나의 즉시 intent
+- `backend/tests/test_operations_control.py`: 공용 reconcile 위임 계약
+
+### 검증 결과
+
+- RED: `cd backend && uv run pytest tests/notifications/test_commands.py -q`가
+  `ModuleNotFoundError: app.domain.notifications.commands`로 실패함을 먼저
+  확인했다. OperationsControl reconcile wrapper 추가 전에는 같은 단위 테스트가
+  `AttributeError`로 실패함도 확인했다.
+- GREEN/focused: `uv run python -m compileall -q app tests`와
+  `uv run pytest tests/notifications/test_commands.py
+  tests/store/test_telegram_stores.py tests/test_operations_control.py -q`가
+  43건 통과했다.
+- 전체: `uv run pytest -q` 결과 923 passed, 11 deselected, 기존
+  `StarletteDeprecationWarning` 1건이다.
+- 실제 Telegram/키움 API 및 운영 DB는 호출하지 않았다.
+
+### 패널 수정·재검토 전 통합 보완
+
+- command intent ID를 `telegram_command_update_<update_id>`와
+  `telegram_command_confirmation_<confirmation_id>`로 통일했다. Task 4
+  TradingService가 공용 제어 ID에 허용하는 `[A-Za-z0-9_-]{1,64}`와 맞추므로
+  `/stop`과 확정 청산이 validation 오류로 unknown에 남지 않는다.
+- control 호출이 30초보다 길어져도 `running` lease가 살아 있도록 worker가
+  10초 heartbeat CAS 갱신을 수행한다. 갱신 fence를 잃으면 terminal 성공을
+  기록하지 않고 durable recovery로 넘긴다. 느린 pause 동안 시계를 lease보다
+  넘긴 뒤 concurrent reconciliation을 호출하는 회귀가 terminal 전이를 막음을
+  검증했다.
+- 프로세스 재기동에서는 in-memory managed scope가 없으므로,
+  `reconcile_control_intent(intent_id, targets)`가 durable target snapshot을
+  TradingService에 전달하도록 OperationsControl 경계를 확장했다. 서비스는
+  broker 잔고·기존 미체결 SELL·DB position 상태만 읽어 `succeeded` 또는
+  `needs_attention`을 판정하고 신규 주문을 절대 내지 않는다. fresh service
+  회귀는 broker 잔고 0/미체결 없음/DB CLOSED에서 성공과 SELL 0건을 고정했다.
+- `/stop`의 control 반환 `False`는 성공으로 감사하지 않고 `needs_attention`으로
+  종결한다. 비청산 unknown은 현재 scheduler paused 및 trading kill-switch
+  snapshot만 읽어 pause/resume/stop의 성공 여부를 판정하고, 원래 부수효과를
+  재호출하지 않는다. reconciliation audit도 sentinel `0` 대신 실제 원본
+  update ID를 기록한다.
+- confirmation fingerprint의 run ID는 해시 검증에만 쓰지 않고 intent target
+  context에도 보존한다. `OperationsControl → TradingService`는 이
+  `expected_run_id`를 lock 안에서 현재 run과 다시 비교하므로 confirmation 뒤
+  run 교체가 있으면 신규 청산을 시작하지 않는다.
+- managed liquidation이 `accepted`를 반환하면 command worker는 별도 감독 task로
+  running lease를 갱신하고 Task 4의 read-only reconciliation이 terminal을 줄
+  때만 종결한다. active managed scope의 잔량/미체결은 `in_progress`로 남겨
+  정상 SELL 폴링을 조기 `needs_attention`으로 오기록하지 않는다. heartbeat
+  종료는 in-flight DB renewal까지 join한 뒤 version fence를 사용한다.
+- `process_claimed()` 공개 진입점을 추가해 Task 7 TelegramService가 inbox claim
+  뒤 query/control lane으로 분배할 수 있게 했다. 간단한 `process_next()`는
+  단일 worker 편의 API로 유지한다.
+- 마지막으로 `in_progress`는 terminal cache에 저장하지 않게 했다. 따라서
+  accepted 감독이 매 heartbeat에서 실제 broker/DB 상태를 다시 읽고, 실제
+  TradingService 회귀의 `in_progress → DB CLOSED·broker 잔고 0 → succeeded`
+  전이가 확인된다.
+- 통합 수정 focused는 command/store/operations/trading service 85건 통과,
+  전체는 930 passed, 11 deselected, 기존 warning 1건이다. 이 변경은 broker
+  adapter/TR 요청 형식을 바꾸지 않았고 실제 API·운영 DB 호출도 하지 않았다.
+- 최종 5인 패널(senior-developer, senior-trader, architecture-expert,
+  security-expert, broker-api-expert)은 각각 Critical 0, Important 0으로
+  승인했다. Minor는 후속 TelegramService 종료 시 accepted-monitor drain/unknown
+  전이를 lifecycle 테스트로 소유하고, notification port의 `Any`를 점진적 DTO로
+  바꾸라는 항목만 남았다.

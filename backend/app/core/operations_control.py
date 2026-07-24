@@ -160,7 +160,8 @@ class OperationsControl:
         return await self.trading.request_stop_once(
             intent_id, StopMode.STOP_NEW_ENTRIES)
 
-    async def liquidate_managed(self, intent_id: str, targets):
+    async def liquidate_managed(self, intent_id: str, targets,
+                                *, expected_run_id: int | None = None):
         targets = tuple(targets)
         if not targets:
             return LiquidationResult(
@@ -169,7 +170,7 @@ class OperationsControl:
             return LiquidationResult(
                 "needs_attention", False, "trading service is not running")
         result = await self.trading.request_managed_liquidation(
-            intent_id, targets)
+            intent_id, targets, expected_run_id=expected_run_id)
         preview = await self.liquidation_preview()
         if preview.unmanaged_symbols:
             warning = result.warning or ""
@@ -177,3 +178,16 @@ class OperationsControl:
             return LiquidationResult(
                 result.status, False, f"{warning}; {suffix}".strip("; "))
         return result
+
+    async def reconcile_control_intent(self, intent_id: str, targets=()) -> LiquidationResult:
+        """Delegate durable Telegram liquidation recovery to TradingService.
+
+        Command workers deliberately do not inspect broker orders or issue SELL
+        requests themselves.  The trading service owns that reconciliation and
+        its bounded terminal cache; a disabled trading service is an explicit
+        manual-attention result rather than an implicit retry.
+        """
+        if self.trading is None:
+            return LiquidationResult(
+                "needs_attention", False, "trading service is not running")
+        return await self.trading.reconcile_control_intent(intent_id, tuple(targets))

@@ -125,6 +125,19 @@ def test_confirmation은_단일소비하고_실제_update에_intent를_원자생
             digest, OP, CHAT, "resume", "fp", NOW, update_id=999)
 
 
+def test_즉시명령은_update당_하나의_durable_intent만_만든다(stores):
+    inbox, commands, *_ = stores
+    inbox.persist_batch_and_offset([update(21, "stop")], 22)
+
+    first = commands.create_intent_for_update(21, "stop")
+    second = commands.create_intent_for_update(21, "stop")
+    claimed = commands.claim_intent_by_id(first.id, "worker")
+
+    assert first.id == second.id == "telegram_command_update_21"
+    assert claimed is not None and claimed.id == first.id
+    assert commands.claim_intent("other") is None
+
+
 def test_confirmation_CSPRNG_2분귀속과_이전토큰무효화(stores):
     inbox, commands, *_ = stores
     first = commands.issue_confirmation(OP, CHAT, "resume", "fp")

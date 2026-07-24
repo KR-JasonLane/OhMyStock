@@ -284,7 +284,8 @@ class TradingService(BackgroundRunService):
 
     async def request_managed_liquidation(
             self, intent_id: str,
-            targets: tuple[LiquidationTarget, ...]) -> LiquidationResult:
+            targets: tuple[LiquidationTarget, ...], *,
+            expected_run_id: int | None = None) -> LiquidationResult:
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", intent_id):
             raise ValueError("invalid intent_id")
         completed = self._managed_results.get(intent_id)
@@ -294,6 +295,12 @@ class TradingService(BackgroundRunService):
             return LiquidationResult(
                 "succeeded", False, "no managed liquidation targets; no-op")
         async with self._control_intent_lock:
+            if expected_run_id is not None and self._run_id != expected_run_id:
+                result = LiquidationResult(
+                    "needs_attention", False,
+                    "run changed before managed liquidation started")
+                self._remember_managed_result(intent_id, result)
+                return result
             expected_run_id = self._run_id
             prior_mode = self._control_intents.get(intent_id)
             if prior_mode is not None and prior_mode is not StopMode.LIQUIDATE_ALL:
@@ -420,11 +427,26 @@ class TradingService(BackgroundRunService):
                     "manual action required")
         return None
 
-    async def reconcile_control_intent(self, intent_id: str) -> LiquidationResult:
+    async def reconcile_control_intent(
+            self, intent_id: str,
+            targets: tuple[LiquidationTarget, ...] | None = None
+            ) -> LiquidationResult:
+        """Read-only recovery for a durable managed-liquidation intent.
+
+        After a process restart the in-memory managed scope is intentionally
+        gone.  Task 5 supplies the immutable command snapshot in that case;
+        this method only reads broker/DB/open-order state and never invokes the
+        liquidation path or places another SELL.
+        """
         completed = self._managed_results.get(intent_id)
         if completed is not None:
             return completed
-        if intent_id != self._managed_liquidation_intent:
+        active_scope = intent_id == self._managed_liquidation_intent
+        if active_scope:
+            target_map = self._managed_liquidation_targets
+        elif targets:
+            target_map = {target.position_id: target for target in targets}
+        else:
             return LiquidationResult(
                 "needs_attention", False, "unknown liquidation intent")
         try:
@@ -441,10 +463,10 @@ class TradingService(BackgroundRunService):
                    if order.side is OrderSide.SELL and order.unfilled_qty > 0}
         rows = await asyncio.to_thread(
             self._store.open_positions_by_ids,
-            list(self._managed_liquidation_targets), self._run_environment)
+            list(target_map), self._run_environment)
         states = {pid: pos.state for pid, pos in rows}
         details = []
-        for pid, target in self._managed_liquidation_targets.items():
+        for pid, target in target_map.items():
             qty = held.get(target.symbol, 0)
             unfilled = pending.get(target.symbol, 0)
             state = states.get(pid)
@@ -454,9 +476,16 @@ class TradingService(BackgroundRunService):
                     f"DB상태={state.value if state else 'closed'}; "
                     "잔고·미체결 확인 후 수동 조치")
         if details:
-            return LiquidationResult(
-                "needs_attention", not held, "; ".join(details))
-        return LiquidationResult("succeeded", not held, None)
+            result = LiquidationResult(
+                "in_progress" if active_scope and self.is_running()
+                else "needs_attention", not held, "; ".join(details))
+        else:
+            result = LiquidationResult("succeeded", not held, None)
+        # `in_progress` is a live observation, not a terminal idempotency
+        # result.  Caching it would freeze the command supervisor forever.
+        if result.status != "in_progress":
+            self._remember_managed_result(intent_id, result)
+        return result
 
     def _remember_managed_result(
             self, intent_id: str, result: LiquidationResult) -> None:

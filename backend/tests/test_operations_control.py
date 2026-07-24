@@ -7,7 +7,7 @@ from app.core.background_service import StopMode
 from app.core.operations_control import (AccountSnapshotDeferred,
                                          OperationsControl)
 from app.domain.broker import Balance, Deposit, Position
-from app.domain.trading.models import PositionState, TradePosition
+from app.domain.trading.models import LiquidationTarget, PositionState, TradePosition
 from app.domain.trading.models import LiquidationResult
 
 KST = timezone(timedelta(hours=9))
@@ -44,11 +44,15 @@ class Trading:
         self.mode = mode
         return True
 
-    async def request_managed_liquidation(self, intent_id, targets):
+    async def request_managed_liquidation(self, intent_id, targets, *, expected_run_id=None):
         if not hasattr(self, "managed_results"):
             self.managed_results = {}
         return self.managed_results.get(
             intent_id, LiquidationResult("accepted", False, None))
+
+    async def reconcile_control_intent(self, intent_id, targets=()):
+        self.last_reconcile = (intent_id, tuple(targets))
+        return LiquidationResult("needs_attention", False, f"reconciled:{intent_id}")
 
 
 class Broker:
@@ -153,3 +157,12 @@ async def test_control은_동일intent재조회에서_cached_terminal을_반환�
     second = await control.liquidate_managed("same_intent", preview.targets)
     assert first.status == second.status == "succeeded"
     assert "terminal cached" in second.warning
+
+
+@pytest.mark.anyio
+async def test_청산대사는_공용control을거쳐_trading에위임한다(control):
+    target = LiquidationTarget(7, "005930", 3)
+    result = await control.reconcile_control_intent("intent_7", (target,))
+    assert result.status == "needs_attention"
+    assert result.warning == "reconciled:intent_7"
+    assert control.trading.last_reconcile == ("intent_7", (target,))
