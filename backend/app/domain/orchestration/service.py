@@ -13,6 +13,7 @@ store는 build_job_facts()/record_event()만(아키텍트 계획 리뷰:
 
 import asyncio
 import logging
+import secrets
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
@@ -41,6 +42,7 @@ class _SchedulerStoreLike(Protocol):
                         today: date) -> dict[Job, JobFacts]: ...
     def record_event(self, job: Job, action: Action, reason: Reason,
                      run_id: int | None = None) -> None: ...
+    def record_scheduler_dead(self, version: str) -> None: ...
 
 
 class SchedulerService:
@@ -62,6 +64,8 @@ class SchedulerService:
         self._dead = False
         self._restart_used = False
         self._task: asyncio.Task | None = None
+        self._dead_event_task: asyncio.Task | None = None
+        self._dead_event_version = f"scheduler-dead:{secrets.token_hex(16)}"
         # 이벤트 중복 억제(스펙 §6 — 틱마다 같은 SKIP/GAVE_UP 재적재 방지):
         # 잡별 마지막 기록 (action, reason, 몫 날짜). TRIGGER/RETRY는 실행
         # 자체가 사건이라 dedup 없이 매번 기록(백오프가 자연 간격).
@@ -91,6 +95,33 @@ class SchedulerService:
         차단)."""
         return self._task
 
+    async def shutdown(self) -> None:
+        """loop done-callback과 dead-event retry 생성 경합까지 모두 회수한다."""
+        task = self._task
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        # 이미 done인 loop의 callback이 아직 큐에 있으면 이 yield에서
+        # _persist_dead_event를 게시한다.
+        await asyncio.sleep(0)
+        follow_up = self._dead_event_task
+        if follow_up is not None and not follow_up.done():
+            # to_thread의 asyncio wrapper만 취소하면 실제 DB worker는
+            # engine.dispose 뒤에도 실행될 수 있다. dead 사건은 최대 3회로
+            # bounded이므로 terminal까지 회수한 뒤 엔진을 폐기한다.
+            try:
+                await asyncio.shield(follow_up)
+            except asyncio.CancelledError:
+                # lifespan 자체가 취소돼도 DB worker를 고아로 남기지 않는다.
+                current = asyncio.current_task()
+                if current is not None:
+                    current.uncancel()
+                await asyncio.shield(follow_up)
+                raise
+
     def _on_task_done(self, task: asyncio.Task) -> None:
         if task.cancelled():
             return  # 정상 셧다운 경로
@@ -102,6 +133,11 @@ class SchedulerService:
             # 1회로 읽으면 30초 간격 무한 크래시-재기동 루프). 회복 경로는
             # 컨테이너 재시작뿐 — /schedule/status가 dead를 영속 표시.
             self._dead = True
+            # loop와 DB persistence의 소유권을 분리한다. shutdown은 loop만
+            # 취소하고 to_thread를 포함한 persistence는 terminal까지
+            # 회수하므로 engine.dispose 뒤 DB 접근이 남지 않는다.
+            self._dead_event_task = asyncio.create_task(
+                self._persist_dead_event())
             logger.critical(
                 "scheduler restart budget exhausted — scheduler is DEAD "
                 "(automation stopped; restart the container to recover)")
@@ -110,6 +146,26 @@ class SchedulerService:
         logger.critical("scheduler restarting (budget: 1 per process life)")
         self._task = asyncio.create_task(self._loop())
         self._task.add_done_callback(self._on_task_done)
+
+    async def _persist_dead_event(self) -> None:
+        """scheduler-dead 사건을 같은 source version으로 제한 재시도한다."""
+        for attempt in range(1, 4):
+            try:
+                await asyncio.to_thread(
+                    self._store.record_scheduler_dead,
+                    self._dead_event_version)
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "scheduler dead event persistence failed "
+                    "(attempt %d/3, error=%s)", attempt,
+                    type(exc).__name__)
+                if attempt < 3:
+                    await self._sleep(1.0)
+        logger.critical(
+            "scheduler dead event persistence exhausted — durable alert missing")
 
     # ── 운영 스위치 (Task 6 API 표면) ──────────────────────────────────
 

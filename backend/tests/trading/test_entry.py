@@ -51,9 +51,11 @@ class FakeOrders(FakeOrderPortBase):
 async def _no_sleep(_): return None
 
 
-def _executor(fake, caps=None, persist=None, on_order=None) -> EntryExecutor:
+def _executor(fake, caps=None, persist=None, on_order=None,
+              on_fill=None) -> EntryExecutor:
     return EntryExecutor(fake, CFG, caps or (lambda *_: None),
                          persist_phase=persist, on_order=on_order,
+                         on_fill=on_fill,
                          sleep=_no_sleep, now=lambda: T0)
 
 
@@ -107,11 +109,18 @@ async def test_부분체결은_체결분만_인정하고_시장가_재발주_없
     # 타임아웃(3s, 1s 폴링)까지 잔량 4 유지 → 취소 → filled 6 인정(§6-1)
     fake = FakeOrders(open_orders_script=[4, 4, 4])
     phases = []
-    out = await _executor(fake, persist=phases.append).execute(PLAN, ask=273_500)
+    fills = []
+    out = await _executor(
+        fake, persist=phases.append,
+        on_fill=lambda pos, facts: fills.append((pos, facts)),
+    ).execute(PLAN, ask=273_500)
     assert out.position is not None and out.position.quantity == 6
     assert phases == [EntryPhase.LIMIT_SUBMITTED, EntryPhase.CANCEL_REQUESTED]
     assert len(fake.placed) == 1  # 시장가 재발주 없음
     assert fake.cancelled == ["ORD1"]
+    assert fills[0][0] == out.position
+    assert fills[0][1]["order_no"] == "ORD1"
+    assert fills[0][1]["remaining_order_state"] == "cancelled"
 
 
 @pytest.mark.anyio
@@ -148,10 +157,16 @@ async def test_시장가_부분체결은_체결분만_인정하고_잔여_취소
     # 시장가 잔량 3 → filled 7 인정 + 잔여 취소(감시 밖 지연 체결 방지 —
     # 개발자 #3/트레이더 I3)
     fake = FakeOrders(open_orders_script=[10, 10, 10, 10, 3, 3])
-    out = await _executor(fake).execute(PLAN, ask=273_500)
+    fills = []
+    out = await _executor(
+        fake, on_fill=lambda pos, facts: fills.append((pos, facts)),
+    ).execute(PLAN, ask=273_500)
     assert out.position is not None and out.position.quantity == 7
     assert out.requires_reconcile is False
     assert fake.cancelled == ["ORD1", "ORD2"]  # 지정가 취소 + 시장가 잔여 취소
+    assert fills[0][0] == out.position
+    assert fills[0][1]["order_no"] == "ORD2"
+    assert fills[0][1]["remaining_order_state"] == "cancelled"
 
 
 @pytest.mark.anyio

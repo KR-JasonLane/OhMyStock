@@ -16,6 +16,7 @@ docs/reference/project-context.md §5)라 정확한 평단은 Task 7이 잔고(k
 정수)로 확정한다(costs.py의 "실측 필드 우선" 원칙과 동일)."""
 
 import asyncio
+import inspect
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -39,6 +40,8 @@ logger = logging.getLogger(__name__)
 # 주문이 아예 나가지 않는 안전한 방향 — 예외를 그대로 전파한다.
 # (on_order 감사 콜백의 격리 계약은 execution.audit_order 참조.)
 PersistPhase = Callable[[EntryPhase], None]
+OnFill = Callable[
+    [TradePosition, dict[str, object]], Awaitable[None] | None]
 
 
 @dataclass(frozen=True)
@@ -60,6 +63,7 @@ class EntryOutcome:
     position: TradePosition | None
     failure_reason: str | None = None
     requires_reconcile: bool = False
+    order_no: str | None = None
 
 
 class EntryExecutor:
@@ -67,6 +71,7 @@ class EntryExecutor:
                  check_order_caps: Callable[[int, OrderSide], None],
                  persist_phase: PersistPhase | None = None,
                  on_order: OnOrder | None = None,
+                 on_fill: OnFill | None = None,
                  sleep: Callable[[float], Awaitable[None]] | None = None,
                  now: Callable[[], datetime] | None = None) -> None:
         self._orders = orders
@@ -74,6 +79,7 @@ class EntryExecutor:
         self._check_caps = check_order_caps
         self._persist = persist_phase or (lambda _phase: None)
         self._on_order = on_order
+        self._on_fill = on_fill
         self._sleep = sleep or asyncio.sleep
         self._now = now or (lambda: datetime.now(timezone.utc))
 
@@ -156,7 +162,8 @@ class EntryExecutor:
         unfilled = await self._poll_unfilled(order_no,
                                              self._config.limit_order_timeout_sec)
         if unfilled == 0:
-            return EntryOutcome(self._position(plan, limit_price))
+            return EntryOutcome(
+                self._position(plan, limit_price), order_no=order_no)
         if unfilled < 0:
             unfilled = plan.quantity
 
@@ -186,7 +193,11 @@ class EntryExecutor:
             # Task 7이 진입 직후 잔고 대사로 재확정한다(트레이더 I4).
             logger.info("entry partial fill %s: %d/%d — remainder cancelled",
                         plan.symbol, filled, plan.quantity)
-            return EntryOutcome(self._position(plan, limit_price, quantity=filled))
+            position = self._position(plan, limit_price, quantity=filled)
+            await self._audit_partial_fill(
+                position, order_no, plan.quantity, filled, limit_price,
+                "cancelled")
+            return EntryOutcome(position, order_no=order_no)
 
         # [4] 0체결 — 시장가 재발주(§6-3.8). ask는 타임아웃 동안 낡았고
         # 미체결 자체가 급변 신호 — caps·평단 추정 모두 재조회 값으로(I1).
@@ -236,8 +247,39 @@ class EntryExecutor:
         if filled < plan.quantity:
             logger.info("entry partial fill (market) %s: %d/%d — remainder "
                         "cancelled", plan.symbol, filled, plan.quantity)
-        return EntryOutcome(self._position(plan, fresh_ask, quantity=filled),
-                            requires_reconcile=cancel_failed)
+            position = self._position(plan, fresh_ask, quantity=filled)
+            await self._audit_partial_fill(
+                position, market_ack.order_no, plan.quantity, filled,
+                fresh_ask, "unknown" if cancel_failed else "cancelled")
+        else:
+            position = self._position(plan, fresh_ask, quantity=filled)
+        return EntryOutcome(
+            position, requires_reconcile=cancel_failed,
+            order_no=market_ack.order_no)
+
+    async def _audit_partial_fill(
+            self, position: TradePosition, order_no: str,
+            order_qty: int, filled: int, avg_fill_price: int,
+            remaining_order_state: str) -> None:
+        if self._on_fill is None:
+            return
+        try:
+            result = self._on_fill(position, {
+                "kind": "entry_partial_fill", "order_no": order_no,
+                "order_qty": order_qty, "fill_qty": filled,
+                "cumulative_fill_qty": filled,
+                "remaining_qty": order_qty - filled,
+                "avg_fill_price": avg_fill_price,
+                "price_confidence": "estimated",
+                "remaining_order_state": remaining_order_state})
+            if inspect.isawaitable(result):
+                await result
+        except Exception as exc:  # noqa: BLE001
+            # 실제 체결·잔량 취소 뒤 감사 DB 오류가 즉시 잔고 대사를 막아서는
+            # 안 된다. TradingService가 outcome을 받아 kt00018로 재확인한다.
+            logger.error("entry partial-fill audit persistence failed for "
+                         "%s (error=%s) — balance reconciliation continues",
+                         position.symbol, type(exc).__name__)
 
     def _limit_price(self, ask: int, market: str) -> int:
         """진입 지정가 = ask − offset틱, 호가단위 스냅(§6-3.6)."""

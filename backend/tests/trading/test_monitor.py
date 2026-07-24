@@ -66,11 +66,12 @@ def _pos(symbol="005930", entry=100_000, peak=None, trailing=False,
                          trailing_active=trailing, entered_at=T0)
 
 
-def _monitor(fake, store, calendar=None, caps=None, on_order=None,
+def _monitor(fake, store, calendar=None, caps=None, on_order=None, on_fill=None,
              lookup=None, sleep=None) -> PositionMonitor:
     return PositionMonitor(fake, CFG, calendar or FakeCalendar(),
                            caps or (lambda *_: None), store.persist,
-                           on_order=on_order, lookup_instrument_state=lookup,
+                           on_order=on_order, on_fill=on_fill,
+                           lookup_instrument_state=lookup,
                            sleep=sleep or _no_sleep, now=lambda: T0)
 
 
@@ -100,8 +101,8 @@ async def test_손절은_즉시_시장가_그리고_실현손익_기록():
         "kospi", 100_000 * 10, 93_900 * 10, CFG)
     assert [r.style for r in fake.placed] == [OrderStyle.MARKET]
     assert fake.placed[0].side is OrderSide.SELL
-    assert store.rows["005930"].state is PositionState.CLOSED
-    assert store.rows["005930"].realized_pnl == act.realized_pnl
+    assert store.rows["005930"].state is PositionState.EXITING
+    assert store.rows["005930"].realized_pnl is None
 
 
 @pytest.mark.anyio
@@ -122,7 +123,7 @@ async def test_trailing_active_DB_왕복_계약():
                        open_orders_script=[None, None])
     acts2 = await _monitor(fake2, store).poll_once(store.open_positions(), T0)
     assert len(acts2) == 1 and acts2[0].reason is ExitReason.TRAILING_STOP
-    assert store.rows["005930"].state is PositionState.CLOSED
+    assert store.rows["005930"].state is PositionState.EXITING
 
 
 @pytest.mark.anyio
@@ -150,7 +151,7 @@ async def test_익절_지정가_미체결은_취소_후_시장가_폴백():
     assert actions[0].state is PositionState.CLOSED
     # 0체결 → 시장가 전량 — 추정가는 스테일 지정가가 아니라 관측 bid(개발자 #2)
     assert actions[0].exit_price == 110_900
-    assert actions[0].requires_reconcile is False
+    assert actions[0].requires_reconcile is True
     assert fake.cancelled == ["ORD1"]
     assert [r.style for r in fake.placed] == [OrderStyle.LIMIT,
                                               OrderStyle.MARKET]
@@ -158,7 +159,7 @@ async def test_익절_지정가_미체결은_취소_후_시장가_폴백():
     phases = [p.exit_phase for p in store.history
               if p.state is PositionState.EXITING]
     assert phases == [ExitPhase.LIMIT_SUBMITTED, ExitPhase.CANCEL_REQUESTED,
-                      ExitPhase.MARKET_SUBMITTED]
+                      ExitPhase.MARKET_SUBMITTED, None]
 
 
 @pytest.mark.anyio
@@ -195,7 +196,7 @@ async def test_시장가_미체결은_취소하지_않고_추적_후_다음_사�
     assert acts2[0].reason is ExitReason.STOP_LOSS
     # 지연 확정 — est_price 스테일 + 미추적 창 체결 → 즉시 대사 표식(트레이더 I6)
     assert acts2[0].requires_reconcile is True
-    assert store.rows["005930"].state is PositionState.CLOSED
+    assert store.rows["005930"].state is PositionState.EXITING
 
 
 @pytest.mark.anyio
@@ -360,6 +361,172 @@ async def test_익절_부분체결_후_폴백_발주_실패는_잔량으로_ENTE
     assert store.rows["005930"].state is PositionState.ENTERED
     assert store.rows["005930"].quantity == 3  # 실보유 잔량으로 복원
     assert fake.cancelled == ["ORD1"]
+
+
+@pytest.mark.anyio
+async def test_익절_부분체결은_order별_누적과_잔량을_관측_callback으로_남긴다():
+    store = FakeStore(_pos())
+    fills = []
+    fake = FakeOrders(
+        quotes_script=[{"005930": _md("005930", 111_000)}],
+        open_orders_script=[3, 3, 3],
+        place_script=[None, RuntimeError("broker down")])
+    await _monitor(
+        fake, store,
+        on_fill=lambda pos, facts: fills.append((pos, facts))).poll_once(
+        store.open_positions(), T0)
+    assert len(fills) == 1
+    snapshot, facts = fills[0]
+    assert snapshot.state is PositionState.EXITING
+    assert snapshot.exit_phase is ExitPhase.CANCEL_REQUESTED
+    assert facts == {
+        "kind": "exit_partial_fill", "order_no": "ORD1", "order_qty": 10,
+        "fill_qty": 7, "cumulative_fill_qty": 7, "remaining_qty": 3,
+        "avg_fill_price": 111_000, "price_confidence": "estimated",
+        "remaining_order_state": "cancelled"}
+
+
+@pytest.mark.anyio
+async def test_시장가_부분체결은_EXITING_snapshot과_open잔량을_함께_넘긴다():
+    store = FakeStore(_pos())
+    fills = []
+    fake = FakeOrders(
+        quotes_script=[{"005930": _md("005930", 94_000, bid=93_900)}],
+        open_orders_script=[3, 3, 3])
+    actions = await _monitor(
+        fake, store,
+        on_fill=lambda pos, facts: fills.append((pos, facts))).poll_once(
+            store.open_positions(), T0)
+    assert actions[0].state is PositionState.EXITING
+    snapshot, facts = fills[0]
+    assert snapshot.state is PositionState.EXITING
+    assert snapshot.exit_phase is None
+    assert facts["order_no"] == "ORD1"
+    assert facts["remaining_qty"] == 3
+    assert facts["remaining_order_state"] == "open"
+
+
+@pytest.mark.anyio
+async def test_부분체결_event저장실패에도_시장가잔량은_pending추적한다():
+    store = FakeStore(_pos())
+    fake = FakeOrders(
+        quotes_script=[{"005930": _md("005930", 94_000, bid=93_900)}],
+        open_orders_script=[3, 3, 3])
+
+    def fail_fill(_pos, _facts):
+        raise RuntimeError("db unavailable")
+
+    monitor = _monitor(fake, store, on_fill=fail_fill)
+    actions = await monitor.poll_once(store.open_positions(), T0)
+    assert actions[0].state is PositionState.EXITING
+    assert "005930" in monitor._pending
+    assert any("partial-fill audit" in warning for warning in monitor.warnings)
+
+
+@pytest.mark.anyio
+async def test_부분체결뒤_장마감잔량사건은_누적수량이_역행하지않는다():
+    store = FakeStore(_pos())
+    fills = []
+    fake = FakeOrders(
+        quotes_script=[{"005930": _md("005930", 94_000, bid=93_900)}],
+        open_orders_script=[3, 3, 3, 3])
+    monitor = _monitor(
+        fake, store, calendar=FakeCalendar(market_open=True),
+        on_fill=lambda pos, facts: fills.append((pos, facts)))
+    await monitor.poll_once(store.open_positions(), T0)
+    monitor._calendar.market_open = False
+    actions = await monitor.poll_once([], T0)
+    assert actions[0].state is PositionState.EXIT_FAILED
+    assert [facts["kind"] for _pos, facts in fills] == [
+        "exit_partial_fill", "exit_remaining_failed"]
+    assert fills[-1][1]["cumulative_fill_qty"] == 7
+    assert fills[-1][1]["remaining_qty"] == 3
+
+
+@pytest.mark.anyio
+async def test_pending주문의_추가부분체결은_delta와_누적을_갱신한다():
+    store = FakeStore(_pos())
+    fills = []
+    fake = FakeOrders(
+        quotes_script=[{"005930": _md("005930", 94_000, bid=93_900)}],
+        open_orders_script=[7, 7, 7, 3])
+    monitor = _monitor(
+        fake, store,
+        on_fill=lambda pos, facts: fills.append((pos, facts)))
+    await monitor.poll_once(store.open_positions(), T0)
+    assert await monitor.poll_once([], T0) == []
+    assert [(facts["fill_qty"], facts["cumulative_fill_qty"],
+             facts["remaining_qty"]) for _pos, facts in fills] == [
+        (3, 3, 7), (4, 7, 3)]
+    assert fills[-1][0].quantity == 3
+
+
+@pytest.mark.anyio
+async def test_pending추가부분체결_event실패_재시도는_마지막성공뒤_delta만_남긴다():
+    store = FakeStore(_pos())
+    saved = []
+    attempts = 0
+
+    def sometimes_fail(pos, facts):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 2:
+            raise RuntimeError("temporary db failure")
+        saved.append((pos, facts))
+
+    fake = FakeOrders(
+        quotes_script=[{"005930": _md("005930", 94_000, bid=93_900)}],
+        open_orders_script=[7, 7, 7, 3, 3])
+    monitor = _monitor(fake, store, on_fill=sometimes_fail)
+    await monitor.poll_once(store.open_positions(), T0)
+    assert await monitor.poll_once([], T0) == []
+    assert await monitor.poll_once([], T0) == []
+    assert [(facts["fill_qty"], facts["cumulative_fill_qty"],
+             facts["remaining_qty"]) for _pos, facts in saved] == [
+        (3, 3, 7), (4, 7, 3)]
+
+
+@pytest.mark.anyio
+async def test_pending부분체결뒤_주문소멸은_누적보존하고_pnl미확정이다():
+    store = FakeStore(_pos())
+    fills = []
+    fake = FakeOrders(
+        quotes_script=[{"005930": _md("005930", 94_000, bid=93_900)}],
+        open_orders_script=[7, 7, 7, None])
+    monitor = _monitor(
+        fake, store,
+        on_fill=lambda pos, facts: fills.append((pos, facts)))
+    await monitor.poll_once(store.open_positions(), T0)
+    actions = await monitor.poll_once([], T0)
+    assert actions[0].state is PositionState.CLOSED
+    assert actions[0].realized_pnl is None
+    assert actions[0].exit_price is None
+    assert fills[-1][1]["kind"] == "exit_unconfirmed"
+    assert fills[-1][1]["cumulative_fill_qty"] == 3
+    assert fills[-1][1]["remaining_qty"] == 7
+
+
+@pytest.mark.anyio
+async def test_익절_시장가_폴백_부분체결은_MARKET_SUBMITTED_snapshot을_넘긴다():
+    store = FakeStore(_pos())
+    fills = []
+    fake = FakeOrders(
+        quotes_script=[{"005930": _md("005930", 111_000)}],
+        open_orders_script=[10, 10, 10, 1, 1, 1])
+    actions = await _monitor(
+        fake, store,
+        on_fill=lambda pos, facts: fills.append((pos, facts))).poll_once(
+            store.open_positions(), T0)
+    assert actions[0].state is PositionState.EXITING
+    assert len(fills) == 1
+    snapshot, facts = fills[0]
+    assert snapshot.state is PositionState.EXITING
+    assert snapshot.exit_phase is ExitPhase.MARKET_SUBMITTED
+    assert facts["order_no"] == "ORD2"
+    assert facts["order_qty"] == 10
+    assert facts["fill_qty"] == 9
+    assert facts["remaining_qty"] == 1
+    assert facts["remaining_order_state"] == "open"
 
 
 @pytest.mark.anyio

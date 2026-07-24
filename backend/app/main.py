@@ -290,11 +290,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 # 엔진에 질의하는 경합 차단. 그 후 4-서비스 정리.
                 scheduler = app.state.scheduler
                 if scheduler is not None:
-                    task = scheduler.current_task()
-                    if task is not None and not task.done():
-                        task.cancel()
-                        with contextlib.suppress(asyncio.CancelledError):
-                            await task
+                    await scheduler.shutdown()
                 services = [app.state.scoring, app.state.collection,
                             app.state.analysis]
                 if app.state.trading is not None:

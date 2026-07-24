@@ -188,7 +188,13 @@ async def test_매수_0건_실패_후_재기동은_정상_신규_진입(tmp_path
     clock.t = datetime(2026, 7, 23, 0, 20, tzinfo=timezone.utc)
     broker = _Broker()
 
+    balance_calls = 0
+
     async def balance_with_position():
+        nonlocal balance_calls
+        balance_calls += 1
+        if balance_calls <= 2:
+            return Balance((), 0, 0)
         pos = Position(symbol="005930", name="삼성전자", quantity=9,
                        avg_price=100_050, current_price=100_050,
                        eval_amount=900_450)

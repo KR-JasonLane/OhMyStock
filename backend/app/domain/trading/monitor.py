@@ -25,6 +25,7 @@ exit_rules.evaluate_exit(순수)가 전담하고 여기는 **저장과 집행만
 """
 
 import asyncio
+import inspect
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
@@ -50,6 +51,8 @@ logger = logging.getLogger(__name__)
 # 죽이면 안 된다. DB가 놓친 상태는 재기동 reconcile(§6-6 ④)이 잔고로 복구).
 # 종목 상태 조회(거래정지 구분용) — Task 7이 list_instruments 기반으로 연결.
 LookupState = Callable[[str], Awaitable[str | None]]
+OnFill = Callable[
+    [TradePosition, dict[str, object]], Awaitable[None] | None]
 
 # 동시호가 진입 시각(15:20 KST) — 이후 주문은 15:30 단일가 매칭까지 대기(§6-4)
 _AUCTION_START = time(15, 20)
@@ -77,6 +80,7 @@ class ExitAction:
     realized_pnl: int | None = None
     detail: str = ""
     requires_reconcile: bool = False
+    ownership_quarantined: bool = False
 
 
 @dataclass(frozen=True)
@@ -97,6 +101,11 @@ class _PendingExit:
     est_price: int | None
     seen_alive: bool = True
     absent_streak: int = 0
+    order_qty: int | None = None
+    remaining_qty: int | None = None
+    reported_cumulative_qty: int = 0
+    fill_event_pending: bool = False
+    ownership_quarantined: bool = False
 
 
 class PositionMonitor:
@@ -111,6 +120,7 @@ class PositionMonitor:
                  check_order_caps: Callable[[int, OrderSide], None],
                  persist_position: PersistPosition,
                  on_order: OnOrder | None = None,
+                 on_fill: OnFill | None = None,
                  lookup_instrument_state: LookupState | None = None,
                  sleep: Callable[[float], Awaitable[None]] | None = None,
                  now: Callable[[], datetime] | None = None) -> None:
@@ -124,6 +134,7 @@ class PositionMonitor:
         self._check_caps = check_order_caps
         self._persist = persist_position
         self._on_order = on_order
+        self._on_fill = on_fill
         self._lookup_state = lookup_instrument_state
         self._sleep = sleep or asyncio.sleep
         self._now = now or (lambda: datetime.now(timezone.utc))
@@ -276,7 +287,11 @@ class PositionMonitor:
     # ── 집행 (§6-2-b) ───────────────────────────────────────────────────
 
     def track_existing_exit(self, pos: TradePosition, order_no: str,
-                            est_price: int | None = None) -> None:
+                            est_price: int | None = None, *,
+                            order_qty: int | None = None,
+                            remaining_qty: int | None = None,
+                            reported_cumulative_qty: int = 0,
+                            fill_event_pending: bool = False) -> None:
         """재기동 reconcile ⑤(청산 **시장가** 주문 생존 — 취소 금지 계약)의
         _pending 시드(6c → Task 7). 인메모리 _pending은 재시작 시 소실되므로
         (보안 P5-T6b #4 고아 갭) reconcile이 식별한 생존 청산 주문을 여기로
@@ -286,8 +301,15 @@ class PositionMonitor:
         reason = pos.exit_reason or ExitReason.STOP_LOSS  # 미상 시 보수 라벨
         # est_price 기본 None — 신뢰할 추정이 없으면 pnl을 기록하지 않는다
         # (트레이더 I4). seen_alive=False — 부재=체결에 연속 2회 확인(보안 #2).
-        self._pending[pos.symbol] = _PendingExit(pos, order_no, reason,
-                                                 est_price, seen_alive=False)
+        tracked = (
+            replace(pos, quantity=remaining_qty)
+            if remaining_qty is not None else pos)
+        self._pending[pos.symbol] = _PendingExit(
+            tracked, order_no, reason, est_price, seen_alive=False,
+            order_qty=order_qty, remaining_qty=remaining_qty,
+            reported_cumulative_qty=reported_cumulative_qty,
+            fill_event_pending=fill_event_pending,
+            ownership_quarantined=pos.exit_reason is None)
         self._warnings[f"pending:{pos.symbol}"] = (
             f"{pos.symbol}: exit order {order_no} restored from reconcile — "
             "tracking")
@@ -347,10 +369,25 @@ class PositionMonitor:
             return self._submit_failed_action(pos, reason, now)
         unfilled = await self._poll(ack.order_no, now)
         if unfilled == 0:
-            return self._close(exiting, est_price, reason, now)
+            return await self._close(
+                exiting, est_price, reason, now, requires_reconcile=True,
+                order_no=ack.order_no, order_qty=pos.quantity)
+        event_saved = True
+        pending_position = exiting
+        if 0 < unfilled < pos.quantity:
+            pending_position = replace(exiting, quantity=unfilled)
+            event_saved = await self._audit_partial_fill(
+                pending_position, ack.order_no, pos.quantity,
+                pos.quantity - unfilled, unfilled, est_price, "open")
         # 미체결/관측 전무 — 취소하지 않고 추적(동시호가·VI — 모듈 docstring)
-        return self._track_pending(exiting, ack.order_no, reason, est_price,
-                                   observed_nothing=unfilled < 0)
+        return self._track_pending(
+            pending_position, ack.order_no, reason, est_price,
+            observed_nothing=unfilled < 0, order_qty=pos.quantity,
+            remaining_qty=(unfilled if 0 <= unfilled <= pos.quantity else None),
+            reported_cumulative_qty=(
+                pos.quantity - unfilled
+                if event_saved and 0 <= unfilled <= pos.quantity else 0),
+            fill_event_pending=not event_saved)
 
     async def _exit_take_profit(self, pos: TradePosition, md: MarketData,
                                 now: datetime) -> ExitAction:
@@ -370,12 +407,15 @@ class PositionMonitor:
             return self._submit_failed_action(pos, reason, now)
         unfilled = await self._poll(ack.order_no, now)
         if unfilled == 0:
-            return self._close(exiting, limit_price, reason, now)
+            return await self._close(
+                exiting, limit_price, reason, now, requires_reconcile=True,
+                order_no=ack.order_no, order_qty=pos.quantity)
         if unfilled < 0:
             # 관측 전무 — 체결 여부 불명. 취소 강행하면 "이미 체결됐는데 취소
             # 실패"와 구분 불가(6a 이중매매 가드와 동일 원리) — 추적으로 위임.
-            return self._track_pending(exiting, ack.order_no, reason,
-                                       limit_price, observed_nothing=True)
+            return self._track_pending(
+                exiting, ack.order_no, reason, limit_price,
+                observed_nothing=True, order_qty=pos.quantity)
 
         # 타임아웃 미체결 — 취소 후 시장가 폴백. 취소 직전 중간 상태를
         # fail-closed 영속(아키텍트 P5-T6b #3 — EntryPhase.CANCEL_REQUESTED와
@@ -391,16 +431,23 @@ class PositionMonitor:
             logger.error("TP limit cancel FAILED %s (order_no=%s): %s — "
                          "market fallback skipped, tracking", pos.symbol,
                          ack.order_no, exc)
-            return self._track_pending(cancel_pos, ack.order_no, reason,
-                                       limit_price, observed_nothing=True)
+            return self._track_pending(
+                replace(cancel_pos, quantity=unfilled), ack.order_no, reason,
+                limit_price, observed_nothing=True, order_qty=pos.quantity,
+                remaining_qty=unfilled)
         audit_order(self._on_order, cancel_ack, req, "cancelled")
 
         filled = pos.quantity - unfilled
         remaining = unfilled
+        if filled > 0:
+            await self._audit_partial_fill(
+                replace(cancel_pos, quantity=remaining), ack.order_no,
+                pos.quantity, filled, remaining, limit_price, "cancelled")
         # ⚠️ 스냅샷 quantity는 원 수량 유지 — 부분체결 시 실보유(remaining)와
         # 다를 수 있는 창(취소~폴백 크래시). reconcile(6c)은 quantity 필드가
         # 아니라 잔고(kt00018) ground truth로 수량을 재확정한다(아키텍트 #2).
-        market_pos = replace(exiting, exit_phase=ExitPhase.MARKET_SUBMITTED)
+        market_pos = replace(exiting, exit_phase=ExitPhase.MARKET_SUBMITTED,
+                             quantity=remaining)
         market_req = OrderRequest(symbol=pos.symbol, side=OrderSide.SELL,
                                   style=OrderStyle.MARKET, quantity=remaining,
                                   ref_price=limit_price)  # caps 추정가와 동일
@@ -431,10 +478,25 @@ class PositionMonitor:
             # 지정가로 치던 왜곡 제거). 부분체결 혼합은 잔고 대사 필수 표식.
             bid = md.bid if md.bid > 0 else md.quote.price
             blended = (filled * limit_price + remaining * bid) // pos.quantity
-            return self._close(market_pos, blended, reason, now,
-                               requires_reconcile=filled > 0)
-        return self._track_pending(market_pos, market_ack.order_no, reason,
-                                   limit_price, observed_nothing=unfilled2 < 0)
+            return await self._close(
+                exiting, blended, reason, now, requires_reconcile=True,
+                order_no=market_ack.order_no, order_qty=remaining)
+        event_saved = True
+        pending_position = market_pos
+        if 0 < unfilled2 < remaining:
+            pending_position = replace(market_pos, quantity=unfilled2)
+            bid = md.bid if md.bid > 0 else md.quote.price
+            event_saved = await self._audit_partial_fill(
+                pending_position, market_ack.order_no, remaining,
+                remaining - unfilled2, unfilled2, bid, "open")
+        return self._track_pending(
+            pending_position, market_ack.order_no, reason, limit_price,
+            observed_nothing=unfilled2 < 0, order_qty=remaining,
+            remaining_qty=(unfilled2 if 0 <= unfilled2 <= remaining else None),
+            reported_cumulative_qty=(
+                remaining - unfilled2
+                if event_saved and 0 <= unfilled2 <= remaining else 0),
+            fill_event_pending=not event_saved)
 
     async def _submit_exit(self, exiting: TradePosition, req: OrderRequest,
                            est_price: int, quantity: int | None = None,
@@ -502,33 +564,107 @@ class PositionMonitor:
                           pos.quantity, requires_reconcile=True,
                           detail="exit submit retry limit exhausted")
 
+    async def _audit_partial_fill(
+            self, position: TradePosition, order_no: str, order_qty: int,
+            filled_now: int, remaining: int, avg_fill_price: int,
+            remaining_order_state: str, *,
+            cumulative_fill_qty: int | None = None) -> bool:
+        """관측된 지정가 부분체결을 vendor-neutral 사실로 내보낸다.
+
+        callback은 snapshot과 사건을 원자 저장하므로 실패를 삼키지 않는다.
+        실제 체결 뒤 감사 저장이 실패하면 상위 run이 중단되고 재기동 대사가
+        broker ground truth로 복구해야 상태만 단독 커밋되는 공백을 막는다.
+        """
+        if self._on_fill is None:
+            return True
+        try:
+            result = self._on_fill(position, {
+                "kind": "exit_partial_fill", "order_no": order_no,
+                "order_qty": order_qty, "fill_qty": filled_now,
+                "cumulative_fill_qty": (
+                    filled_now if cumulative_fill_qty is None
+                    else cumulative_fill_qty),
+                "remaining_qty": remaining,
+                "avg_fill_price": avg_fill_price,
+                "price_confidence": "estimated",
+                "remaining_order_state": remaining_order_state})
+            if inspect.isawaitable(result):
+                await result
+        except Exception as exc:  # noqa: BLE001
+            self._warnings[f"persist:{position.symbol}"] = (
+                f"{position.symbol}: partial-fill audit persistence failed "
+                f"({type(exc).__name__}) — order tracking continues")
+            logger.error(
+                "partial-fill audit persistence failed for %s (error=%s)",
+                position.symbol, type(exc).__name__)
+            return False
+        self._warnings.pop(f"persist:{position.symbol}", None)
+        return True
+
     # ── 체결 확정/추적 ──────────────────────────────────────────────────
 
-    def _close(self, pos: TradePosition, sell_price: int | None,
-               reason: ExitReason, now: datetime,
-               requires_reconcile: bool = False) -> ExitAction:
+    async def _close(
+            self, pos: TradePosition, sell_price: int | None,
+            reason: ExitReason, now: datetime,
+            requires_reconcile: bool = False, *,
+            order_no: str | None = None,
+            order_qty: int | None = None,
+            known_cumulative_qty: int = 0,
+            known_remaining_qty: int | None = None,
+            ownership_quarantined: bool = False) -> ExitAction:
         """청산 확정. requires_reconcile: 추정치 신뢰도가 낮은 경로(부분체결
         혼합·pending 지연 확정)의 즉시 잔고 대사 표식(트레이더 I5/I6).
         sell_price=None(reconcile 시드 — 신뢰할 추정 없음)이면 pnl/exit_price를
         기록하지 않고(None) 잔고 대사를 강제 표식한다(트레이더 I4 — 과소평가
         손실이 확정 숫자처럼 남는 것 방지)."""
+        # 이미 일부 체결된 주문은 polling에 주문별 실제 체결가가 없다.
+        # 잔량만으로 pnl을 계산하면 선행 체결 손익을 누락하므로 미확정으로
+        # 남기고 즉시 잔고 대사에 맡긴다.
+        partially_filled = known_cumulative_qty > 0
+        effective_sell_price = None if partially_filled else sell_price
         pnl = (realized_pnl(pos.market, pos.entry_price * pos.quantity,
-                            sell_price * pos.quantity, self._config)
-               if sell_price is not None else None)
-        closed = replace(pos, state=PositionState.CLOSED, exit_price=sell_price,
-                         exit_reason=reason, realized_pnl=pnl, closed_at=now,
-                         exit_phase=None)
-        needs = requires_reconcile or sell_price is None
+                            effective_sell_price * pos.quantity, self._config)
+               if effective_sell_price is not None else None)
+        # ka10075 주문 소멸은 체결 확정이 아니다. kt00018 성공 전에는
+        # 재기동 스캔 대상인 EXITING을 유지하고, 서비스 잔고 대사가
+        # 무보유를 확인한 뒤에만 CLOSED를 영속한다.
+        unconfirmed = replace(
+            pos, state=PositionState.EXITING, exit_price=None,
+            exit_reason=(None if ownership_quarantined else reason),
+            realized_pnl=None, closed_at=None,
+            exit_phase=None)
+        needs = requires_reconcile or effective_sell_price is None
+        if (self._on_fill is not None and order_no is not None
+                and order_qty is not None):
+            try:
+                result = self._on_fill(unconfirmed, {
+                    "kind": "exit_unconfirmed", "order_no": order_no,
+                    "order_qty": order_qty, "fill_qty": 0,
+                    "cumulative_fill_qty": known_cumulative_qty,
+                    "remaining_qty": (
+                        order_qty if known_remaining_qty is None
+                        else known_remaining_qty),
+                    "avg_fill_price": None,
+                    "price_confidence": "estimated",
+                    "remaining_order_state": "unknown"})
+                if inspect.isawaitable(result):
+                    await result
+            except Exception as exc:  # noqa: BLE001
+                needs = True
+                logger.error(
+                    "exit terminal audit persistence failed for %s "
+                    "(error=%s) — balance reconciliation continues",
+                    pos.symbol, type(exc).__name__)
         try:
-            self._persist(closed)  # 체결 후 — 격리(모듈 상단 PersistPosition 계약)
+            self._persist(unconfirmed)
         except Exception as exc:  # noqa: BLE001
             needs = True
             logger.error("persist CLOSED failed for %s: %s — reconcile will "
                          "recover from balance", pos.symbol, exc)
-        self._clear_symbol_state(pos.symbol)
         return ExitAction(pos.symbol, reason, PositionState.CLOSED,
-                          pos.quantity, exit_price=sell_price,
-                          realized_pnl=pnl, requires_reconcile=needs)
+                          pos.quantity, exit_price=effective_sell_price,
+                          realized_pnl=pnl, requires_reconcile=needs,
+                          ownership_quarantined=ownership_quarantined)
 
     def _clear_symbol_state(self, symbol: str) -> None:
         """포지션 종결(CLOSED/EXIT_FAILED 확정) 시 심볼 귀속 카운터·경고 정리
@@ -540,14 +676,25 @@ class PositionMonitor:
         for prefix in ("exit", "quote", "pending", "persist", "corrupt"):
             self._warnings.pop(f"{prefix}:{symbol}", None)
 
+    def finalize_exit_reconciliation(self, symbol: str) -> None:
+        """서비스 kt00018 대사가 끝난 심볼의 pending/경고 상태를 정리한다."""
+        self._pending.pop(symbol, None)
+        self._clear_symbol_state(symbol)
+
     def _track_pending(self, pos: TradePosition, order_no: str,
-                       reason: ExitReason, est_price: int,
-                       observed_nothing: bool) -> ExitAction:
+                       reason: ExitReason, est_price: int | None,
+                       observed_nothing: bool, *, order_qty: int | None = None,
+                       remaining_qty: int | None = None,
+                       reported_cumulative_qty: int = 0,
+                       fill_event_pending: bool = False) -> ExitAction:
         # 관측 전무(observed_nothing) pending은 등록 자체가 미확인 — 부재=체결
         # 판정에 연속 2회 확인 요구(보안 P5-T6c #2, C1 방어 대칭)
         self._pending[pos.symbol] = _PendingExit(
             pos, order_no, reason, est_price,
-            seen_alive=not observed_nothing)
+            seen_alive=not observed_nothing, order_qty=order_qty,
+            remaining_qty=remaining_qty,
+            reported_cumulative_qty=reported_cumulative_qty,
+            fill_event_pending=fill_event_pending)
         self._warnings[f"pending:{pos.symbol}"] = (
             f"{pos.symbol}: exit order {order_no} unfilled — tracking "
             "(auction/VI window not cancelled)")
@@ -577,15 +724,49 @@ class PositionMonitor:
             return []
         self._pending_check_failures = 0
         self._warnings.pop("pending:check", None)
-        alive = {o.order_no for o in open_orders}
+        alive = {o.order_no: o for o in open_orders}
         actions: list[ExitAction] = []
         for symbol, pending in list(self._pending.items()):
-            if pending.order_no in alive and not pending.seen_alive:
+            open_order = alive.get(pending.order_no)
+            if open_order is not None:
+                current_remaining = open_order.unfilled_qty
+                previous_remaining = pending.remaining_qty
+                current_position = pending.position
+                if (previous_remaining is not None
+                        and 0 <= current_remaining < previous_remaining):
+                    current_position = replace(
+                        current_position,
+                        quantity=max(
+                            0, current_position.quantity
+                            - (previous_remaining - current_remaining)))
+                should_emit = (
+                    pending.order_qty is not None
+                    and current_remaining < pending.order_qty
+                    and (pending.fill_event_pending
+                         or (previous_remaining is not None
+                             and current_remaining < previous_remaining)))
+                event_saved = not pending.fill_event_pending
+                if should_emit:
+                    target_cumulative = pending.order_qty - current_remaining
+                    event_saved = await self._audit_partial_fill(
+                        current_position, pending.order_no, pending.order_qty,
+                        target_cumulative - pending.reported_cumulative_qty,
+                        current_remaining, pending.est_price or 0, "open",
+                        cumulative_fill_qty=target_cumulative)
+                else:
+                    target_cumulative = pending.reported_cumulative_qty
+                self._pending[symbol] = replace(
+                    pending, position=current_position, seen_alive=True,
+                    absent_streak=0, remaining_qty=current_remaining,
+                    reported_cumulative_qty=(
+                        target_cumulative if event_saved
+                        else pending.reported_cumulative_qty),
+                    fill_event_pending=not event_saved)
+                pending = self._pending[symbol]
+            if open_order is not None and not pending.seen_alive:
                 # 등록 관측 확정 — 이후 부재는 즉시 체결 판정 가능
-                self._pending[symbol] = replace(pending, seen_alive=True,
-                                                absent_streak=0)
                 continue
-            if pending.order_no not in alive:
+            if open_order is None:
                 if not pending.seen_alive and pending.absent_streak + 1 < 2:
                     # 미관측 pending의 첫 부재 — 체결/미전파/오시드 구분 불가
                     # (보안 P5-T6c #2): 연속 2회 확인 전에는 CLOSED 금지
@@ -595,15 +776,46 @@ class PositionMonitor:
                 del self._pending[symbol]
                 # est_price가 제출 시점 관측치라 지연 확정일수록 괴리가 큼
                 # (트레이더 I6) + 미추적 창 체결 — 즉시 잔고 대사 표식.
-                actions.append(self._close(pending.position, pending.est_price,
-                                           pending.reason, now,
-                                           requires_reconcile=True))
+                actions.append(await self._close(
+                    pending.position, pending.est_price,
+                    pending.reason, now, requires_reconcile=True,
+                    order_no=pending.order_no,
+                    order_qty=pending.order_qty,
+                    known_cumulative_qty=(
+                        (pending.order_qty - pending.remaining_qty)
+                        if pending.order_qty is not None
+                        and pending.remaining_qty is not None else 0),
+                    known_remaining_qty=pending.remaining_qty,
+                    ownership_quarantined=(
+                        pending.ownership_quarantined)))
             elif not self._calendar.is_market_hours(now):
                 # 장 마감 — 미체결 주문은 당일로 소멸. 청산 실패 고정.
                 del self._pending[symbol]
                 failed = replace(pending.position,
                                  state=PositionState.EXIT_FAILED,
                                  exit_phase=None)
+                if (self._on_fill is not None
+                        and pending.order_qty is not None
+                        and pending.remaining_qty is not None):
+                    try:
+                        result = self._on_fill(failed, {
+                            "kind": "exit_remaining_failed",
+                            "order_no": pending.order_no,
+                            "order_qty": pending.order_qty,
+                            "fill_qty": 0,
+                            "cumulative_fill_qty": (
+                                pending.order_qty - pending.remaining_qty),
+                            "remaining_qty": pending.remaining_qty,
+                            "avg_fill_price": pending.est_price,
+                            "price_confidence": "estimated",
+                            "remaining_order_state": "open"})
+                        if inspect.isawaitable(result):
+                            await result
+                    except Exception as exc:  # noqa: BLE001
+                        logger.error(
+                            "remaining-failed audit persistence failed for "
+                            "%s (error=%s)", symbol,
+                            type(exc).__name__)
                 try:
                     self._persist(failed)
                 except Exception as exc:  # noqa: BLE001
@@ -616,7 +828,9 @@ class PositionMonitor:
                 actions.append(ExitAction(
                     symbol, pending.reason, PositionState.EXIT_FAILED,
                     pending.position.quantity, requires_reconcile=True,
-                    detail="exit order unfilled at market close"))
+                    detail="exit order unfilled at market close",
+                    ownership_quarantined=(
+                        pending.ownership_quarantined)))
         return actions
 
     # ── 시세 조회/실패 구분 (§6-4) ──────────────────────────────────────

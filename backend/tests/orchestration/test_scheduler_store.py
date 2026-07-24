@@ -16,6 +16,7 @@ from app.domain.orchestration.timeline import (Action, Job, Reason,
 from app.store.analysis_store import AnalysisStore
 from app.store.collection_store import CollectionStore
 from app.store.models import Base
+from app.store.notification_store import NotificationStore
 from app.store.scheduler_store import SchedulerStore
 from app.store.scoring_store import ScoringStore
 from app.store.trading_store import TradingStore
@@ -48,9 +49,11 @@ def stores(tmp_path, clock):
     scoring = ScoringStore(engine, now=clock)
     analysis = AnalysisStore(engine, now=clock)
     trading = TradingStore(engine, now=clock)
+    notifications = NotificationStore(engine, now=clock)
     scheduler = SchedulerStore(engine, collection, scoring, analysis, trading,
-                               run_environment="mock", now=clock)
-    return scheduler, collection, scoring, analysis, trading, clock
+                               run_environment="mock", now=clock,
+                               notifications=notifications)
+    return scheduler, collection, scoring, analysis, trading, notifications, clock
 
 
 # ── UTC/KST 날짜 경계 (개발자 Critical) ────────────────────────────────
@@ -58,7 +61,7 @@ def stores(tmp_path, clock):
 def test_아침_0820_시작_분석런은_당일로_판정된다(stores):
     """UTC 저장(수 23:20Z) = 목 08:20 KST — 목요일 몫으로 판정돼야 한다.
     naive DATE() 비교였다면 수요일로 오분류돼 창 내 반복 재트리거."""
-    scheduler, _, scoring, analysis, _, clock = stores
+    scheduler, _, scoring, analysis, _, _notifications, clock = stores
     score_run = scoring.create_run(WED, "{}")
     scoring.finish_run(score_run, "succeeded")
     clock.t = THU_0820_KST_AS_UTC
@@ -104,7 +107,7 @@ def test_스코어링은_reference_date로_판정(stores):
 def test_트레이딩_완료는_킬스위치_stopped만(stores):
     """succeeded/kill-stopped=완료, 셧다운 stopped/failed=미완료+백오프
     대상(개발자 계획 Critical — 컬럼 미검사 시 크래시 재기동이 완료 오판)."""
-    *_, trading, clock = stores
+    *_, trading, _notifications, clock = stores
     run1 = trading.create_run("{}", "mock")
     trading.finish_run(run1, "stopped", stopped_by_kill_switch=False,
                        failure_reason="cancelled (shutdown)")
@@ -119,7 +122,7 @@ def test_트레이딩_완료는_킬스위치_stopped만(stores):
 def test_트레이딩런_KST_경계(stores):
     """전 스토어 UTC 경계 요구(계획 Task 4)의 트레이딩 분 — 목 08:20 KST
     (=수 23:20Z) 시작 run은 목요일 몫(개발자 T4 Important)."""
-    *_, trading, clock = stores
+    *_, trading, _notifications, clock = stores
     clock.t = THU_0820_KST_AS_UTC
     run_id = trading.create_run("{}", "mock")
     trading.finish_run(run_id, "succeeded")
@@ -128,7 +131,7 @@ def test_트레이딩런_KST_경계(stores):
 
 
 def test_트레이딩_리플레이_런은_모의_몫에_불산입(stores):
-    *_, trading, _clock = stores
+    *_, trading, _notifications, _clock = stores
     replay = trading.create_run("{}", "replay")
     trading.finish_run(replay, "succeeded")
     assert trading.has_completed_run(WED, "mock") is False
@@ -139,7 +142,7 @@ def test_트레이딩_리플레이_런은_모의_몫에_불산입(stores):
 
 def test_build_job_facts는_R과_today를_분리해_합성(stores):
     """collect/score 몫=R(수), analyze/trade 몫=today(목) — §4-b 계약."""
-    scheduler, collection, scoring, analysis, trading, clock = stores
+    scheduler, collection, scoring, analysis, trading, _notifications, clock = stores
     run = collection.create_run()
     # 수집 완료 리터럴은 "done"(P2 유래 — 타 서비스 "succeeded"와 다름).
     # "succeeded"로 가정한 원 테스트가 실사고(무한 재트리거)를 못 잡았다 —
@@ -169,6 +172,27 @@ def test_record_event_왕복과_최근순(stores):
     assert [e["job"] for e in events] == ["trade", "collect"]
     assert events[0]["reason"] == "conflict"
     assert events[1]["run_id"] == 7
+
+
+def test_gave_up은_scheduler_event와_operational_event를_같이_남긴다(stores):
+    scheduler, *_before, notifications, _clock = stores
+    scheduler.record_event(Job.TRADE, Action.GAVE_UP, Reason.WINDOW_CLOSED)
+    event = notifications.latest_operational_event()
+    assert event.kind == "pipeline_gave_up"
+    assert list(event.payload["notification_kinds"]) == [
+        "pipeline_gave_up", "trading_monitoring_gap"]
+
+
+def test_gave_up_event_append실패는_scheduler_event도_rollback한다(stores, monkeypatch):
+    scheduler, *_before, notifications, _clock = stores
+
+    def fail(*_args, **_kwargs):
+        raise RuntimeError("outbox unavailable")
+
+    monkeypatch.setattr(notifications, "append_event_in_session", fail)
+    with pytest.raises(RuntimeError, match="outbox unavailable"):
+        scheduler.record_event(Job.TRADE, Action.GAVE_UP, Reason.WINDOW_CLOSED)
+    assert scheduler.recent_events() == []
 
 
 def test_record_event는_enum만_수용(stores):

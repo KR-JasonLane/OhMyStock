@@ -6,6 +6,7 @@ timeline 테스트가 소유. 핵심: TRIGGER 실행/START_REJECTED, SKIP·GAVE_
 
 import asyncio
 import logging
+import threading
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
@@ -54,6 +55,9 @@ class FakeStore:
         self.events: list[tuple] = []
         self.build_calls = 0
         self.fail_build = False
+        self.dead_events = 0
+        self.dead_attempts = 0
+        self.dead_failures = 0
 
     def build_job_facts(self, reference, today):
         self.build_calls += 1
@@ -63,6 +67,12 @@ class FakeStore:
 
     def record_event(self, job, action, reason, run_id=None):
         self.events.append((job, action, reason))
+
+    def record_scheduler_dead(self, version):
+        self.dead_attempts += 1
+        if self.dead_attempts <= self.dead_failures:
+            raise ConnectionError("temporary db failure")
+        self.dead_events += 1
 
 
 def _svc(now, *, facts=None, trade=None, others_done=True):
@@ -181,13 +191,62 @@ async def test_재기동_예산은_프로세스당_1회_소진_후_dead():
             raise RuntimeError("boom")
 
     scheduler, _store, _ = _svc(_dt(9, 30), trade=FakeService())
-    crashing = Crashing({job: FakeService() for job in Job}, FakeStore(),
+    dead_store = FakeStore()
+    crashing = Crashing({job: FakeService() for job in Job}, dead_store,
                         ScheduleConfig(), Cal(), sleep=lambda _s:
                         asyncio.sleep(0), now=lambda: _dt(9, 30))
     crashing.start()
     for _ in range(10):
         await asyncio.sleep(0)       # 1차 사망 → 재기동 → 2차 사망
     assert crashing.dead is True     # 예산(1회) 소진 — 영속 dead
+    assert dead_store.dead_events == 1  # false→true 전이만 durable event
+
+
+@pytest.mark.anyio
+async def test_scheduler_dead_event는_첫_DB실패뒤_같은전이를_재시도한다():
+    class Crashing(SchedulerService):
+        async def _loop(self):
+            raise RuntimeError("boom")
+
+    store = FakeStore()
+    store.dead_failures = 1
+    crashing = Crashing(
+        {job: FakeService() for job in Job}, store, ScheduleConfig(), Cal(),
+        sleep=lambda _s: asyncio.sleep(0), now=lambda: _dt(9, 30))
+    crashing.start()
+    assert await _until(lambda: crashing.dead)
+    assert await _until(lambda: store.dead_events == 1)
+    assert store.dead_attempts == 2
+
+
+@pytest.mark.anyio
+async def test_shutdown은_scheduler_dead_DB_worker가_끝날때까지_회수한다():
+    class Crashing(SchedulerService):
+        async def _loop(self):
+            raise RuntimeError("boom")
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    class BlockingStore(FakeStore):
+        def record_scheduler_dead(self, version):
+            entered.set()
+            assert release.wait(timeout=2)
+            super().record_scheduler_dead(version)
+
+    store = BlockingStore()
+    crashing = Crashing(
+        {job: FakeService() for job in Job}, store, ScheduleConfig(), Cal(),
+        sleep=lambda _s: asyncio.sleep(0), now=lambda: _dt(9, 30))
+    crashing.start()
+    assert await _until(lambda: crashing.dead)
+    assert await asyncio.to_thread(entered.wait, 2)
+    shutdown = asyncio.create_task(crashing.shutdown())
+    await asyncio.sleep(0)
+    assert not shutdown.done()
+    release.set()
+    await asyncio.wait_for(shutdown, timeout=2)
+    assert store.dead_events == 1
 
 
 @pytest.mark.anyio

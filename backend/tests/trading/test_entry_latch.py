@@ -169,7 +169,10 @@ async def test_분석_늦은_도착이면_창_내_재시도로_진입한다(tmp_
     """P5 결함 재현+수정 검증: 1사이클 분석 부재 → 래치 미세팅 → 2사이클
     분석 도착 → 진입 성공. 경고는 중복 없이 1회."""
     analysis = _Analysis([None, FRESH])
-    broker = _Broker(quotes=[HAPPY_BOOK], balances=[Balance((_bpos(),), 0, 0)])
+    broker = _Broker(
+        quotes=[HAPPY_BOOK],
+        balances=[Balance((), 0, 0), Balance((), 0, 0),
+                  Balance((_bpos(),), 0, 0)])
     service, store = _service(tmp_path, analysis, broker,
                               [True, True, False])
     await service.run()
@@ -184,10 +187,53 @@ async def test_분석_늦은_도착이면_창_내_재시도로_진입한다(tmp_
 @pytest.mark.anyio
 async def test_낡은_신호는_재시도_후_신선_도착시_진입(tmp_path):
     analysis = _Analysis([STALE, FRESH])
-    broker = _Broker(quotes=[HAPPY_BOOK], balances=[Balance((_bpos(),), 0, 0)])
+    broker = _Broker(
+        quotes=[HAPPY_BOOK],
+        balances=[Balance((), 0, 0), Balance((), 0, 0),
+                  Balance((_bpos(),), 0, 0)])
     service, _ = _service(tmp_path, analysis, broker, [True, True, False])
     await service.run()
     assert len([r for r in broker.placed if r.side is OrderSide.BUY]) == 1
+
+
+@pytest.mark.anyio
+async def test_시작대사에서_DB밖_기존보유가_있으면_중복진입을_막는다(tmp_path):
+    analysis = _Analysis([FRESH])
+    broker = _Broker(
+        quotes=[HAPPY_BOOK], balances=[Balance((_bpos(qty=2),), 0, 0)])
+    service, _ = _service(tmp_path, analysis, broker, [True, False])
+    await service.run()
+    assert [r for r in broker.placed if r.side is OrderSide.BUY] == []
+    assert any("already held" in warning
+               for warning in service.progress().warnings)
+
+
+@pytest.mark.anyio
+async def test_시작뒤_주문직전_수동보유가_생기면_신규진입을_막는다(tmp_path):
+    analysis = _Analysis([FRESH])
+    class RequoteRaceBroker(_Broker):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.quote_calls = 0
+
+        async def get_quotes(self, symbols):
+            self.quote_calls += 1
+            return await super().get_quotes(symbols)
+
+        async def get_balance(self):
+            if len(self._balances) == 1:
+                # 두 번째 잔고 확인은 requote 뒤여야 한다.
+                assert self.quote_calls >= 2
+            return await super().get_balance()
+
+    broker = RequoteRaceBroker(
+        quotes=[HAPPY_BOOK], balances=[
+            Balance((), 0, 0), Balance((_bpos(qty=2),), 0, 0)])
+    service, _ = _service(tmp_path, analysis, broker, [True, False])
+    await service.run()
+    assert [r for r in broker.placed if r.side is OrderSide.BUY] == []
+    assert any("immediately before order" in warning
+               for warning in service.progress().warnings)
 
 
 @pytest.mark.anyio
@@ -206,8 +252,10 @@ async def test_전_후보_기술_드롭이면_재시도_quote_도착시_진입(t
     """1사이클 빈 quote(전 후보 기술 드롭) → 래치 미세팅 → 2사이클 quote
     도착 → 진입(스펙 §4-c ③ — degenerate quote 전례)."""
     analysis = _Analysis([FRESH])
-    broker = _Broker(quotes=[{}, HAPPY_BOOK],
-                     balances=[Balance((_bpos(),), 0, 0)])
+    broker = _Broker(
+        quotes=[{}, HAPPY_BOOK],
+        balances=[Balance((), 0, 0), Balance((), 0, 0),
+                  Balance((_bpos(),), 0, 0)])
     service, _ = _service(tmp_path, analysis, broker, [True, True, False])
     await service.run()
     assert len([r for r in broker.placed if r.side is OrderSide.BUY]) == 1

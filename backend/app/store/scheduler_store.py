@@ -17,7 +17,9 @@ from sqlalchemy import Engine, select
 from sqlalchemy.orm import sessionmaker
 
 from app.domain.orchestration.timeline import Action, Job, JobFacts, Reason
+from app.domain.notifications.models import OperationalEvent
 from app.store.models import SchedulerEventRow
+from app.store.notification_store import NotificationStore
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +47,8 @@ class SchedulerStore:
     def __init__(self, engine: Engine, collection: _DayJudged,
                  scoring: _DayJudged, analysis: _DayJudged,
                  trading: _TradeJudged, run_environment: str,
-                 now: Callable[[], datetime] | None = None) -> None:
+                 now: Callable[[], datetime] | None = None,
+                 notifications: NotificationStore | None = None) -> None:
         self._sessions = sessionmaker(bind=engine)
         self._collection = collection
         self._scoring = scoring
@@ -53,6 +56,8 @@ class SchedulerStore:
         self._trading = trading
         self._run_environment = run_environment
         self._now = now or (lambda: datetime.now(timezone.utc))
+        self._notifications = notifications or NotificationStore(
+            engine, now=self._now)
 
     def build_job_facts(self, reference: date,
                         today: date) -> dict[Job, JobFacts]:
@@ -96,9 +101,38 @@ class SchedulerStore:
         if action is Action.WAIT:
             raise ValueError("WAIT is a state, not an event — refuse to log")
         with self._sessions.begin() as session:
-            session.add(SchedulerEventRow(
+            row = SchedulerEventRow(
                 ts=self._now(), job=job.value, action=action.value,
-                reason=reason.value, run_id=run_id))
+                reason=reason.value, run_id=run_id)
+            session.add(row)
+            session.flush()
+            if action is Action.GAVE_UP:
+                notification_kinds = ["pipeline_gave_up"]
+                if job is Job.TRADE:
+                    notification_kinds.append("trading_monitoring_gap")
+                self._notifications.append_event_in_session(
+                    session, OperationalEvent(
+                        kind="pipeline_gave_up", source_type="scheduler_event",
+                        source_id=row.id, version=f"{row.id}:pipeline_gave_up",
+                        payload={"job": job.value, "reason": reason.value,
+                                 "run_id": run_id,
+                                 "notification_kinds": notification_kinds},
+                        occurred_at=row.ts))
+
+    def record_scheduler_dead(self, version: str) -> None:
+        """재기동 예산 소진 사건을 재시도 안전한 source version으로 기록한다.
+
+        기존 scheduler_events.job은 VARCHAR(8)이라 ``scheduler``(9자)를
+        PostgreSQL에 넣을 수 없다. dead는 timeline Job 판정이 아니라 서비스
+        수명주기 사건이므로 operational event를 직접 원천으로 삼는다.
+        """
+        with self._sessions.begin() as session:
+            self._notifications.append_event_in_session(
+                session, OperationalEvent(
+                    kind="scheduler_dead", source_type="scheduler_service",
+                    source_id=0, version=version,
+                    payload={"reason": "restart_budget_exhausted"},
+                    occurred_at=self._now()))
 
     def recent_events(self, limit: int = 20) -> list[dict]:
         """최근 이벤트(신규→과거) — /schedule/status 표면(Task 6)."""

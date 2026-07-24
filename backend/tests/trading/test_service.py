@@ -630,7 +630,8 @@ async def test_진입_해피패스와_잔고_대사_교정(store):
                 {"005930": _md("005930", 100_500)}],  # 감시 사이클
         open_orders=[None,          # reconcile
                      None, None],   # 진입 지정가 체결 확인(부재 2회)
-        balances=[Balance((_bpos(qty=9, avg=100_050),), 0, 0)])
+            balances=[Balance((), 0, 0), Balance((), 0, 0),
+                      Balance((_bpos(qty=9, avg=100_050),), 0, 0)])
     service = _service(broker, store, calendar=Cal([True, False]))
     await service.run()
     run = store.latest_run()
@@ -656,6 +657,8 @@ async def test_잔고에_없는_진입은_유령으로_즉시_해소(store):
     rows, _ = store.open_positions()
     assert rows == []  # CLOSED — 감시 대상 아님
     assert any("phantom" in w for w in service.progress().warnings)
+    with pytest.raises(LookupError, match="no operational event"):
+        store.latest_operational_event()
 
 
 @pytest.mark.anyio
@@ -825,7 +828,9 @@ async def test_managed청산은_장마감잔량을_EXIT_FAILED와_terminal결과
                         PositionState.ENTERED, 100_000, 9, 100_000, False,
                         entered_at=T0)
     pos_id = store.create_position(run_id, pos)
-    broker = FakeBroker(open_orders=[9, 9, 9],
+    # 제출 직후 3회 poll뿐 아니라 장마감 poll에서도 주문 잔량이 실제로
+    # 살아 있어야 exit_remaining_failed/EXIT_FAILED 계약을 검증한다.
+    broker = FakeBroker(open_orders=[9, 9, 9, 9],
                         balances=[Balance((_bpos(qty=9),), 0, 0)])
     service = _service(broker, store, calendar=Cal([False]), latest=None)
     service._on_accepted()
@@ -839,6 +844,25 @@ async def test_managed청산은_장마감잔량을_EXIT_FAILED와_terminal결과
     assert result.status == "needs_attention"
     persisted = store.get_position(pos_id)
     assert persisted.state is PositionState.EXIT_FAILED
+
+
+@pytest.mark.anyio
+async def test_킬스위치_pending장마감은_needs_attention으로_종결한다(store):
+    run_id = store.create_run("{}")
+    pos = TradePosition("005930", "삼성전자", "kospi",
+                        PositionState.ENTERED, 100_000, 9, 100_000, False,
+                        entered_at=T0)
+    pos_id = store.create_position(run_id, pos)
+    broker = FakeBroker(
+        quotes=[{"005930": _md("005930", 100_000)}],
+        open_orders=[3, 3, 3, 3],
+        balances=[Balance((_bpos(qty=3),), 0, 0)])
+    service = _service(broker, store, calendar=Cal([False]), latest=None)
+    service._on_accepted()
+    service._run_id = run_id
+    service._pos_ids["005930"] = pos_id
+    await service._liquidate_all(T0)
+    assert service._kill_switch_needs_attention is True
 
 
 @pytest.mark.anyio
@@ -859,6 +883,97 @@ async def test_재기동청산대사는_durable_target으로_읽기만하고_재
 
     assert result.status == "succeeded"
     assert [order for order in broker.placed if order.side is OrderSide.SELL] == []
+
+
+@pytest.mark.anyio
+async def test_재기동_생존청산주문은_실잔량과_마지막누적을_service에서_복원한다(
+        store):
+    run_id = store.create_run("{}", "mock")
+    exiting = TradePosition(
+        "005930", "삼성전자", "kospi", PositionState.EXITING,
+        100_000, 10, 100_000, False, entered_at=T0,
+        exit_reason=ExitReason.STOP_LOSS)
+    pos_id = store.create_position(run_id, exiting)
+    store.record_order(
+        run_id, pos_id, order_no="S1", symbol="005930", side="sell",
+        order_style="market", req_price=0, req_qty=10,
+        status="submitted", resp_body={})
+
+    class RestartBroker(FakeBroker):
+        async def get_open_orders(self):
+            return [OpenOrder(
+                "S1", "005930", OrderSide.SELL, 10, 4, 0, "접수")]
+
+    broker = RestartBroker(
+        balances=[Balance((_bpos(qty=4),), 0, 0)])
+    service = _service(broker, store, calendar=Cal([True]), latest=None)
+    service._on_accepted()
+    service._run_id = run_id
+    await service._reconcile_startup()
+
+    pending = service._monitor._pending["005930"]
+    assert pending.order_qty == 10
+    assert pending.remaining_qty == 4
+    assert pending.reported_cumulative_qty == 0
+    assert pending.fill_event_pending is True
+    assert await service._monitor.poll_once([], T0) == []
+    event = store.latest_operational_event()
+    assert event.kind == "exit_partial_fill"
+    assert event.payload["fill_qty"] == 6
+    assert event.payload["cumulative_fill_qty"] == 6
+    assert event.payload["remaining_qty"] == 4
+    assert store.get_position(pos_id).quantity == 4
+
+
+@pytest.mark.anyio
+async def test_audit_gap뒤_재기동은_마지막성공event_뒤_delta를_재생한다(store):
+    run_id = store.create_run("{}", "mock")
+    entered = TradePosition(
+        "005930", "삼성전자", "kospi", PositionState.ENTERED,
+        100_000, 10, 100_000, False, entered_at=T0)
+    pos_id = store.create_position(run_id, entered)
+    order_id = store.record_order(
+        run_id, pos_id, order_no="S1", symbol="005930", side="sell",
+        order_style="market", req_price=0, req_qty=10,
+        status="submitted", resp_body={})
+    first = TradePosition(
+        "005930", "삼성전자", "kospi", PositionState.EXITING,
+        100_000, 7, 100_000, False, entered_at=T0,
+        exit_reason=ExitReason.STOP_LOSS)
+    store.save_position_snapshot_with_fill_event(
+        pos_id, first, order_id=order_id, kind="exit_partial_fill",
+        order_qty=10, fill_qty=3, cumulative_fill_qty=3, remaining_qty=7,
+        avg_fill_price=99_000, price_confidence="estimated",
+        remaining_order_state="open")
+    # 다음 누적 7 event append 실패 뒤 state-only fallback이 잔량 3을
+    # 앞당겨 저장한 crash 상태.
+    gap = TradePosition(
+        "005930", "삼성전자", "kospi", PositionState.EXITING,
+        100_000, 3, 100_000, False, entered_at=T0,
+        exit_reason=ExitReason.STOP_LOSS)
+    store.save_position_snapshot_with_audit_gap(
+        pos_id, gap, gap_kind="exit_fill_event_unavailable")
+
+    class RestartBroker(FakeBroker):
+        async def get_open_orders(self):
+            return [OpenOrder(
+                "S1", "005930", OrderSide.SELL, 10, 3, 0, "접수")]
+
+    broker = RestartBroker(
+        balances=[Balance((_bpos(qty=3),), 0, 0)])
+    service = _service(broker, store, calendar=Cal([True]), latest=None)
+    service._on_accepted()
+    service._run_id = run_id
+    await service._reconcile_startup()
+    pending = service._monitor._pending["005930"]
+    assert pending.reported_cumulative_qty == 3
+    assert pending.fill_event_pending is True
+
+    assert await service._monitor.poll_once([], T0) == []
+    event = store.latest_operational_event()
+    assert event.payload["fill_qty"] == 4
+    assert event.payload["cumulative_fill_qty"] == 7
+    assert event.payload["remaining_qty"] == 3
 
 
 @pytest.mark.anyio
@@ -939,8 +1054,9 @@ async def test_유령_판정은_유예_재조회_후에만(store):
     broker = FakeBroker(
         quotes=[{"005930": _md("005930", 100_000)}],
         open_orders=[None, None, None],
-        balances=[Balance((), 0, 0),                       # 1차 결측(지연)
-                  Balance((_bpos(qty=9, avg=100_050),), 0, 0)])  # 재조회 발견
+            balances=[Balance((), 0, 0), Balance((), 0, 0),
+                      Balance((), 0, 0),                       # 1차 결측(지연)
+                      Balance((_bpos(qty=9, avg=100_050),), 0, 0)])  # 재조회 발견
     service = _service(broker, store, calendar=Cal([True, False]))
     await service.run()
     rows, _ = store.open_positions()
@@ -950,22 +1066,20 @@ async def test_유령_판정은_유예_재조회_후에만(store):
 
 
 @pytest.mark.anyio
-async def test_하드게이트_재오픈은_원본_market을_보존한다(store):
-    """트레이더 P5-T7 C3 — open_positions는 CLOSED를 제외하므로 방금 닫힌
-    행의 market을 kospi로 폴백하면 코스닥/ETF 틱·세율이 오적용된다.
-    실제 순서(모니터가 CLOSED persist → _post_actions) 그대로 재현."""
+async def test_하드게이트_소유권불명은_원본_market과_EXITING을_보존한다(store):
+    """주문 소멸 뒤 잔고 양수는 자동 재오픈하지 않고 원 snapshot을 보존한다."""
     run_id = store.create_run("{}")
     pos = TradePosition(symbol="247540", name="에코프로비엠", market="kosdaq",
                         state=PositionState.ENTERED, entry_price=100_000,
                         quantity=9, peak_price=100_000, trailing_active=False,
                         entered_at=T0)
     pid = store.create_position(run_id, pos)
-    # 모니터가 이미 CLOSED로 영속한 상태를 재현
+    # monitor가 주문 소멸을 관측해 exit_unconfirmed와 함께 저장한 실제 순서.
     store.save_position_snapshot(pid, TradePosition(
         symbol="247540", name="에코프로비엠", market="kosdaq",
-        state=PositionState.CLOSED, entry_price=100_000, quantity=9,
+        state=PositionState.EXITING, entry_price=100_000, quantity=9,
         peak_price=100_000, trailing_active=False, entered_at=T0,
-        exit_reason=ExitReason.STOP_LOSS, closed_at=T0))
+        exit_reason=ExitReason.STOP_LOSS))
     broker = FakeBroker(balances=[Balance(
         (Position(symbol="247540", name="에코프로비엠", quantity=9,
                   avg_price=100_000, current_price=100_000,
@@ -977,9 +1091,11 @@ async def test_하드게이트_재오픈은_원본_market을_보존한다(store)
     action = ExitAction("247540", ExitReason.STOP_LOSS, PositionState.CLOSED,
                         9, exit_price=None, requires_reconcile=True)
     await service._post_actions([action])
-    reopened = store.get_position(pid)
-    assert reopened.state is PositionState.ENTERED
-    assert reopened.market == "kosdaq"  # kospi 폴백 오분류 금지
+    unresolved = store.get_position(pid)
+    assert unresolved.state is PositionState.EXITING
+    assert unresolved.market == "kosdaq"
+    assert service._pos_ids["247540"] == pid
+    assert service._kill_switch_needs_attention is True
 
 
 @pytest.mark.anyio
@@ -1005,7 +1121,9 @@ async def test_단건_상한_위반은_해당_후보만_스킵하고_배치_계�
                 {"005930": _md("005930", 100_000)},   # 후보1 재조회
                 {"000660": _md("000660", 530_000)}],  # 후보2 재조회
         open_orders=[None, None, None],
-        balances=[Balance((_bpos("000660", 1, 530_000),), 0, 0)])
+            balances=[Balance((), 0, 0), Balance((), 0, 0),
+                      Balance((), 0, 0),
+                      Balance((_bpos("000660", 1, 530_000),), 0, 0)])
     service = TradingService(broker, broker, store, cfg, Cal([True, False]),
                              lambda: latest, sleep=_yield_sleep,
                              now=lambda: T0)
@@ -1055,24 +1173,127 @@ async def test_순수_진입_실패는_ENTRY_FAILED로_확정(store):
 
 
 @pytest.mark.anyio
-async def test_requires_reconcile_CLOSED는_잔고_잔존시_재오픈(store):
-    """하드 게이트(P5-T6c 보안 #2) — CLOSED 확정 전 잔고 교차 검증."""
+async def test_requires_reconcile_잔고잔존은_EXITING과_attention을_유지한다(store):
+    """주문 소멸+잔고 양수는 소유권 불명 — 자동 재오픈/재매도 금지."""
     run_id = store.create_run("{}")
     pos = TradePosition(symbol="005930", name="삼성전자", market="kospi",
-                        state=PositionState.ENTERED, entry_price=100_000,
+                        state=PositionState.EXITING, entry_price=100_000,
                         quantity=9, peak_price=100_000, trailing_active=False,
-                        entered_at=T0)
+                        entered_at=T0, exit_reason=ExitReason.STOP_LOSS)
     pid = store.create_position(run_id, pos)
     broker = FakeBroker(balances=[Balance((_bpos(qty=9, avg=100_000),), 0, 0)])
     service = _service(broker, store)
     service._on_accepted()
     service._run_id = run_id
     service._pos_ids = {"005930": pid}
+    service._monitor._warnings["pending:005930"] = "unfilled — tracking"
     action = ExitAction("005930", ExitReason.STOP_LOSS, PositionState.CLOSED,
                         9, exit_price=None, requires_reconcile=True)
     await service._post_actions([action])
     rows, _ = store.open_positions()
-    [(rid, reopened)] = rows
-    assert rid == pid and reopened.state is PositionState.ENTERED
-    assert reopened.quantity == 9
-    assert any("overturned" in w for w in service.progress().warnings)
+    [(rid, unresolved)] = rows
+    assert rid == pid and unresolved.state is PositionState.EXITING
+    assert service._pos_ids["005930"] == pid
+    assert service._kill_switch_needs_attention is True
+    assert any("ownership is ambiguous" in w
+               for w in service.progress().warnings)
+
+
+@pytest.mark.anyio
+async def test_exit_unconfirmed뒤_잔고조회실패는_EXITING을_유지한다(store):
+    run_id = store.create_run("{}")
+    exiting = TradePosition(
+        symbol="005930", name="삼성전자", market="kospi",
+        state=PositionState.EXITING, entry_price=100_000,
+        quantity=9, peak_price=100_000, trailing_active=False,
+        entered_at=T0, exit_reason=ExitReason.STOP_LOSS)
+    pid = store.create_position(run_id, exiting)
+    class FailingBalanceBroker(FakeBroker):
+        async def get_balance(self):
+            raise RuntimeError("kt00018 unavailable")
+
+    broker = FailingBalanceBroker()
+    service = _service(broker, store)
+    service._on_accepted()
+    service._run_id = run_id
+    service._pos_ids = {"005930": pid}
+    action = ExitAction(
+        "005930", ExitReason.STOP_LOSS, PositionState.CLOSED, 9,
+        requires_reconcile=True)
+
+    with pytest.raises(RuntimeError, match="kt00018 unavailable"):
+        await service._post_actions([action])
+    restored = store.get_position(pid)
+    assert restored is not None
+    assert restored.state is PositionState.EXITING
+    rows, _ = store.open_positions("mock")
+    assert [row_id for row_id, _pos in rows] == [pid]
+
+
+@pytest.mark.anyio
+async def test_exit_unconfirmed은_잔고0_확인뒤에만_CLOSED가_된다(store):
+    run_id = store.create_run("{}")
+    exiting = TradePosition(
+        symbol="005930", name="삼성전자", market="kospi",
+        state=PositionState.EXITING, entry_price=100_000,
+        quantity=9, peak_price=100_000, trailing_active=False,
+        entered_at=T0, exit_reason=ExitReason.STOP_LOSS)
+    pid = store.create_position(run_id, exiting)
+    broker = FakeBroker(balances=[Balance((), 0, 0)])
+    service = _service(broker, store)
+    service._on_accepted()
+    service._run_id = run_id
+    service._pos_ids = {"005930": pid}
+    service._monitor._warnings["pending:005930"] = "unfilled — tracking"
+    action = ExitAction(
+        "005930", ExitReason.STOP_LOSS, PositionState.CLOSED, 9,
+        exit_price=99_000, realized_pnl=-10_000,
+        requires_reconcile=True)
+    await service._post_actions([action])
+    closed = store.get_position(pid)
+    assert closed is not None
+    assert closed.state is PositionState.CLOSED
+    assert closed.exit_price == 99_000
+    assert closed.realized_pnl == -10_000
+    assert all("tracking" not in warning
+               for warning in service.progress().warnings)
+
+
+@pytest.mark.anyio
+async def test_잔고0_CLOSED확정중_cancel은_DBworker_terminal뒤_전파한다(
+        store, monkeypatch):
+    run_id = store.create_run("{}")
+    exiting = TradePosition(
+        symbol="005930", name="삼성전자", market="kospi",
+        state=PositionState.EXITING, entry_price=100_000,
+        quantity=9, peak_price=100_000, trailing_active=False,
+        entered_at=T0, exit_reason=ExitReason.STOP_LOSS)
+    pid = store.create_position(run_id, exiting)
+    broker = FakeBroker(balances=[Balance((), 0, 0)])
+    service = _service(broker, store)
+    service._on_accepted()
+    service._run_id = run_id
+    service._pos_ids = {"005930": pid}
+    entered_worker = threading.Event()
+    release_worker = threading.Event()
+    original = store.save_position_snapshot_state_only
+
+    def blocked_save(*args, **kwargs):
+        entered_worker.set()
+        assert release_worker.wait(timeout=2)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        store, "save_position_snapshot_state_only", blocked_save)
+    action = ExitAction(
+        "005930", ExitReason.STOP_LOSS, PositionState.CLOSED, 9,
+        requires_reconcile=True)
+    task = asyncio.create_task(service._post_actions([action]))
+    assert await asyncio.to_thread(entered_worker.wait, 2)
+    task.cancel()
+    await asyncio.sleep(0)
+    assert not task.done()
+    release_worker.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=2)
+    assert store.get_position(pid).state is PositionState.CLOSED

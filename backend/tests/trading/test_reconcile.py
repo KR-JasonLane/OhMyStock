@@ -28,11 +28,12 @@ async def _no_sleep(_):
     return None
 
 
-def _seed_monitor(fake, store) -> PositionMonitor:
+def _seed_monitor(fake, store, on_fill=None) -> PositionMonitor:
     """reconcile 시드 검증용 최소 monitor(conftest fake 조립 — 테스트 모듈 간
     직접 import 결합 금지, 개발자 P5-T6c #4)."""
     return PositionMonitor(fake, MON_CFG, FakeCalendar(), lambda *_: None,
-                           store.persist, sleep=_no_sleep, now=lambda: T0)
+                           store.persist, on_fill=on_fill,
+                           sleep=_no_sleep, now=lambda: T0)
 
 
 def _pos(symbol="005930", state=PositionState.PENDING_ENTRY,
@@ -53,8 +54,9 @@ def _balance(*holdings: tuple[str, int]) -> Balance:
     return Balance(positions=positions, total_eval=0, total_profit=0)
 
 
-def _open(order_no: str, symbol="005930") -> OpenOrder:
-    return OpenOrder(order_no=order_no, symbol=symbol, side=OrderSide.BUY,
+def _open(order_no: str, symbol="005930",
+          side=OrderSide.BUY) -> OpenOrder:
+    return OpenOrder(order_no=order_no, symbol=symbol, side=side,
                      order_qty=10, unfilled_qty=10, order_price=100_000,
                      status="접수")
 
@@ -67,19 +69,20 @@ def _decide_one(db, orders=(), balance=None, in_window=True):
 
 # ── 진입 계열 (①②③) ─────────────────────────────────────────────────────
 
-def test_분기1_주문소멸_보유있음은_ENTERED_승격():
+def test_분기1_주문소멸_양수잔고는_소유권불명_EXITING격리():
     db = DbPosition(_pos(entry_phase=EntryPhase.LIMIT_SUBMITTED), ("ORD1",))
     [a] = _decide_one(db, balance=_balance(("005930", 7)))
-    assert a.kind is ReconcileKind.PROMOTE_ENTERED
-    assert a.position.state is PositionState.ENTERED
-    assert a.position.quantity == 7          # 수량은 잔고 ground truth
-    assert a.position.entry_phase is None
+    assert a.kind is ReconcileKind.OWNERSHIP_AMBIGUOUS
+    assert a.position.state is PositionState.EXITING
+    assert a.position.quantity == 10
+    assert a.alarm is True
 
 
-def test_분기1은_시장가_미확정도_흡수():
+def test_분기1_시장가_미확정_양수잔고도_EXITING격리():
     db = DbPosition(_pos(entry_phase=EntryPhase.MARKET_SUBMITTED), ("ORD1",))
     [a] = _decide_one(db, balance=_balance(("005930", 10)))
-    assert a.kind is ReconcileKind.PROMOTE_ENTERED
+    assert a.kind is ReconcileKind.OWNERSHIP_AMBIGUOUS
+    assert a.position.state is PositionState.EXITING
 
 
 def test_분기2_진입주문_생존_창안은_감시재개():
@@ -94,18 +97,18 @@ def test_분기2_창밖은_취소만_시장가_재발주_금지():
     [a] = _decide_one(db, orders=[_open("ORD1")], in_window=False)
     assert a.kind is ReconcileKind.CANCEL_AND_SETTLE_ENTRY
     assert a.cancel_order_no == "ORD1"
-    assert a.position.state is PositionState.ENTRY_FAILED
+    assert a.position is None  # 취소 성공 뒤 fresh balance로 terminal 결정
 
 
-def test_분기2_창밖_부분체결은_취소_후_잔고수량_ENTERED():
-    # kind는 액션 형태(취소 후 잔고 확정), 성패는 position.state가 말한다
-    # (개발자 #2 — "FAIL" 명명과 ENTERED 결과의 모순 해소)
+def test_분기2_창밖_양수잔고는_취소후_EXITING격리():
     db = DbPosition(_pos(entry_phase=EntryPhase.LIMIT_SUBMITTED), ("ORD1",))
     [a] = _decide_one(db, orders=[_open("ORD1")],
                       balance=_balance(("005930", 4)), in_window=False)
-    assert a.kind is ReconcileKind.CANCEL_AND_SETTLE_ENTRY
-    assert a.position.state is PositionState.ENTERED
-    assert a.position.quantity == 4
+    assert a.kind is ReconcileKind.OWNERSHIP_AMBIGUOUS
+    assert a.cancel_order_no == "ORD1"
+    assert a.cancel_side is OrderSide.BUY
+    assert a.position.state is PositionState.EXITING
+    assert a.position.quantity == 10
 
 
 def test_취소미완_주문생존은_창안에서도_취소_의도_유지():
@@ -121,19 +124,31 @@ def test_분기3_고아취소는_ENTRY_FAILED_알람():
     assert a.position.state is PositionState.ENTRY_FAILED
 
 
-def test_취소요청_후_체결분_발견은_ENTERED_승격():
+def test_취소요청_후_양수잔고_발견도_EXITING격리():
     db = DbPosition(_pos(entry_phase=EntryPhase.CANCEL_REQUESTED), ("ORD1",))
     [a] = _decide_one(db, balance=_balance(("005930", 3)))
-    assert a.kind is ReconcileKind.PROMOTE_ENTERED
-    assert a.position.quantity == 3
+    assert a.kind is ReconcileKind.OWNERSHIP_AMBIGUOUS
+    assert a.position.state is PositionState.EXITING
+    assert a.position.quantity == 10
 
 
 def test_주문연결은_주문번호_명시_매칭_symbol_매칭_아님():
     # 같은 심볼의 남의 주문(ORD9 미보유)이 살아있어도 내 주문(ORD1)이 아니면
-    # 생존으로 판정하지 않는다(§6-6.② — 개발자 델타 이월)
+    # 전략 주문으로 승격하지 않되 terminal도 금지하고 수동 대사로 격리한다.
     db = DbPosition(_pos(entry_phase=EntryPhase.LIMIT_SUBMITTED), ("ORD1",))
     [a] = _decide_one(db, orders=[_open("ORD9")])
-    assert a.kind is ReconcileKind.FAIL_ENTRY  # 주문·보유 없음 취급
+    assert a.kind is ReconcileKind.OWNERSHIP_AMBIGUOUS
+    assert a.position.state is PositionState.EXITING
+
+
+def test_귀속_미귀속_BUY가_동시생존하면_귀속주문만_취소하고_격리():
+    db = DbPosition(_pos(entry_phase=EntryPhase.LIMIT_SUBMITTED), ("ORD1",))
+    [a] = _decide_one(
+        db, orders=[_open("ORD1"), _open("ORD9")])
+    assert a.kind is ReconcileKind.OWNERSHIP_AMBIGUOUS
+    assert a.cancel_order_no == "ORD1"
+    assert a.cancel_side is OrderSide.BUY
+    assert a.position.state is PositionState.EXITING
 
 
 # ── 보유 계열 (⑥-b) ──────────────────────────────────────────────────────
@@ -150,11 +165,23 @@ def test_분기6b_ENTERED인데_무보유는_외부처분_CLOSED_알람():
     assert a.position.state is PositionState.CLOSED
 
 
-def test_분기6b_수량_불일치는_잔고로_정합_후_감시():
+def test_분기6b_수량_불일치는_소유권불명_EXITING으로_격리():
     db = DbPosition(_pos(state=PositionState.ENTERED))
     [a] = _decide_one(db, balance=_balance(("005930", 6)))
-    assert a.kind is ReconcileKind.REWATCH and a.alarm is True
-    assert a.position.quantity == 6
+    assert a.kind is ReconcileKind.OWNERSHIP_AMBIGUOUS and a.alarm is True
+    assert a.position.state is PositionState.EXITING
+    assert a.position.quantity == 10
+
+
+def test_unmanaged혼합_ENTERED는_계좌합계가_정확해도_EXITING으로_격리():
+    db = DbPosition(
+        _pos(state=PositionState.ENTERED, qty=3),
+        unmanaged_qty=2)
+    [a] = _decide_one(db, balance=_balance(("005930", 5)))
+    assert a.kind is ReconcileKind.OWNERSHIP_AMBIGUOUS
+    assert a.position.state is PositionState.EXITING
+    assert a.position.quantity == 3
+    assert a.alarm is True
 
 
 # ── 청산 계열 (④⑤⑤-b⑦) ────────────────────────────────────────────────
@@ -167,11 +194,82 @@ def test_분기4_청산완료는_CLOSED():
     assert a.position.state is PositionState.CLOSED
 
 
+def test_unmanaged혼합_EXITING은_baseline동일잔고도_CLOSED로_확정하지않는다():
+    db = DbPosition(
+        _pos(state=PositionState.EXITING, qty=3,
+             exit_reason=ExitReason.STOP_LOSS),
+        ("ORD2",), unmanaged_qty=2)
+    [a] = _decide_one(db, balance=_balance(("005930", 2)))
+    assert a.kind is ReconcileKind.OWNERSHIP_AMBIGUOUS
+    assert a.position.state is PositionState.EXITING
+    assert a.alarm is True
+
+
+def test_EXITING에서_귀속_BUY는_SELL감시로_오인하지않고_격리():
+    db = DbPosition(
+        _pos(state=PositionState.EXITING,
+             exit_reason=ExitReason.STOP_LOSS), ("BUY1",))
+    [a] = _decide_one(db, orders=[_open("BUY1")])
+    assert a.kind is ReconcileKind.OWNERSHIP_AMBIGUOUS
+    assert a.watch_order_no is None
+    assert a.position.state is PositionState.EXITING
+
+
+def test_EXITING재기동도_미귀속_live_BUY가_있으면_잔고0_CLOSED금지():
+    db = DbPosition(
+        _pos(state=PositionState.EXITING,
+             exit_reason=ExitReason.STOP_LOSS))
+    [a] = _decide_one(db, orders=[_open("BROKER_ONLY")])
+    assert a.kind is ReconcileKind.OWNERSHIP_AMBIGUOUS
+    assert a.position.state is PositionState.EXITING
+
+
+@pytest.mark.parametrize("balance", [_balance(), _balance(("005930", 3))])
+def test_ownership격리_EXITING은_BUY소멸뒤_잔고와무관하게_수동해제까지유지(
+        balance):
+    quarantined = _pos(
+        state=PositionState.EXITING, exit_reason=None)
+    [a] = _decide_one(DbPosition(quarantined), balance=balance)
+    assert a.kind is ReconcileKind.OWNERSHIP_AMBIGUOUS
+    assert a.position.state is PositionState.EXITING
+    assert a.position.exit_reason is None
+
+
+def test_ownership격리_LIMIT_SELL생존은_취소재평가없이_기존주문만_추적():
+    quarantined = _pos(
+        state=PositionState.EXITING,
+        exit_phase=ExitPhase.LIMIT_SUBMITTED,
+        exit_reason=None)
+    [a] = _decide_one(
+        DbPosition(quarantined, ("SELL1",)),
+        orders=[_open("SELL1", side=OrderSide.SELL)],
+        balance=_balance(("005930", 10)))
+    assert a.kind is ReconcileKind.OWNERSHIP_AMBIGUOUS
+    assert a.watch_order_no == "SELL1"
+    assert a.cancel_order_no is None
+    assert a.position.state is PositionState.EXITING
+
+
+@pytest.mark.anyio
+async def test_ownership격리_SELL소멸도_exit_reason과_action표식을_보존():
+    quarantined = _pos(
+        state=PositionState.EXITING, exit_reason=None)
+    store = FakeStore(quarantined)
+    monitor = _seed_monitor(FakeOrderPortBase(), store)
+    action = await monitor._close(
+        quarantined, None, ExitReason.STOP_LOSS, T0,
+        requires_reconcile=True, ownership_quarantined=True)
+    assert action.ownership_quarantined is True
+    assert store.rows["005930"].state is PositionState.EXITING
+    assert store.rows["005930"].exit_reason is None
+
+
 def test_분기5_익절지정가_생존은_취소_후_감시복귀():
     db = DbPosition(_pos(state=PositionState.EXITING,
                          exit_phase=ExitPhase.LIMIT_SUBMITTED,
                          exit_reason=ExitReason.TAKE_PROFIT), ("ORD2",))
-    [a] = _decide_one(db, orders=[_open("ORD2")],
+    [a] = _decide_one(
+        db, orders=[_open("ORD2", side=OrderSide.SELL)],
                       balance=_balance(("005930", 10)))
     assert a.kind is ReconcileKind.CANCEL_AND_REWATCH
     assert a.cancel_order_no == "ORD2"
@@ -179,11 +277,26 @@ def test_분기5_익절지정가_생존은_취소_후_감시복귀():
     assert a.position.exit_phase is None and a.position.exit_reason is None
 
 
+def test_익절지정가_생존중_잔고불일치는_취소후_EXITING격리():
+    db = DbPosition(_pos(state=PositionState.EXITING,
+                         exit_phase=ExitPhase.LIMIT_SUBMITTED,
+                         exit_reason=ExitReason.TAKE_PROFIT), ("ORD2",))
+    [a] = _decide_one(
+        db, orders=[_open("ORD2", side=OrderSide.SELL)],
+                      balance=_balance(("005930", 12)))
+    assert a.kind is ReconcileKind.OWNERSHIP_AMBIGUOUS
+    assert a.cancel_order_no == "ORD2"
+    assert a.cancel_side is OrderSide.SELL
+    assert a.position.state is PositionState.EXITING
+    assert a.position.quantity == 10
+
+
 def test_분기5_시장가_청산_생존은_취소금지_추적재개():
     # 손절 시장가(ExitPhase 없음) — 6b "매도 취소 금지" 계약 유지
     db = DbPosition(_pos(state=PositionState.EXITING,
                          exit_reason=ExitReason.STOP_LOSS), ("ORD2",))
-    [a] = _decide_one(db, orders=[_open("ORD2")],
+    [a] = _decide_one(
+        db, orders=[_open("ORD2", side=OrderSide.SELL)],
                       balance=_balance(("005930", 10)))
     assert a.kind is ReconcileKind.RESUME_EXIT_WATCH
     assert a.watch_order_no == "ORD2" and a.cancel_order_no is None
@@ -197,7 +310,8 @@ def test_취소미완_익절지정가_생존은_취소_재시도():
     db = DbPosition(_pos(state=PositionState.EXITING,
                          exit_phase=ExitPhase.CANCEL_REQUESTED,
                          exit_reason=ExitReason.TAKE_PROFIT), ("ORD2",))
-    [a] = _decide_one(db, orders=[_open("ORD2")],
+    [a] = _decide_one(
+        db, orders=[_open("ORD2", side=OrderSide.SELL)],
                       balance=_balance(("005930", 10)))
     assert a.kind is ReconcileKind.CANCEL_AND_REWATCH
     assert a.cancel_order_no == "ORD2"
@@ -210,7 +324,8 @@ def test_분기5_지정가_생존인데_잔고0은_취소없이_추적():
     db = DbPosition(_pos(state=PositionState.EXITING,
                          exit_phase=ExitPhase.LIMIT_SUBMITTED,
                          exit_reason=ExitReason.TAKE_PROFIT), ("ORD2",))
-    [a] = _decide_one(db, orders=[_open("ORD2")])
+    [a] = _decide_one(
+        db, orders=[_open("ORD2", side=OrderSide.SELL)])
     assert a.kind is ReconcileKind.RESUME_EXIT_WATCH
     assert a.position is None
 
@@ -221,7 +336,8 @@ def test_취소미완_지정가_생존_잔고0도_취소없이_추적():
     db = DbPosition(_pos(state=PositionState.EXITING,
                          exit_phase=ExitPhase.CANCEL_REQUESTED,
                          exit_reason=ExitReason.TAKE_PROFIT), ("ORD2",))
-    [a] = _decide_one(db, orders=[_open("ORD2")])
+    [a] = _decide_one(
+        db, orders=[_open("ORD2", side=OrderSide.SELL)])
     assert a.kind is ReconcileKind.RESUME_EXIT_WATCH
     assert a.cancel_order_no is None
 
@@ -230,19 +346,21 @@ def test_분기5_익절_시장가_폴백_생존도_취소금지():
     db = DbPosition(_pos(state=PositionState.EXITING,
                          exit_phase=ExitPhase.MARKET_SUBMITTED,
                          exit_reason=ExitReason.TAKE_PROFIT), ("ORD3",))
-    [a] = _decide_one(db, orders=[_open("ORD3")],
+    [a] = _decide_one(
+        db, orders=[_open("ORD3", side=OrderSide.SELL)],
                       balance=_balance(("005930", 10)))
     assert a.kind is ReconcileKind.RESUME_EXIT_WATCH
 
 
-def test_분기5b_취소요청_후_주문없음_보유잔존은_감시복귀():
+def test_분기5b_취소요청_후_주문없음_보유잔존은_EXITING격리():
     db = DbPosition(_pos(state=PositionState.EXITING,
                          exit_phase=ExitPhase.CANCEL_REQUESTED,
                          exit_reason=ExitReason.TAKE_PROFIT), ("ORD2",))
     [a] = _decide_one(db, balance=_balance(("005930", 3)))
-    assert a.kind is ReconcileKind.REWATCH
-    assert a.position.state is PositionState.ENTERED
-    assert a.position.quantity == 3  # 부분 체결 반영 — 잔고 ground truth
+    assert a.kind is ReconcileKind.OWNERSHIP_AMBIGUOUS
+    assert a.position.state is PositionState.EXITING
+    assert a.position.quantity == 10
+    assert a.alarm is True
 
 
 def test_분기7_EXIT_FAILED_무보유는_CLOSED_확정():
@@ -251,6 +369,18 @@ def test_분기7_EXIT_FAILED_무보유는_CLOSED_확정():
     [a] = _decide_one(db)
     assert a.kind is ReconcileKind.CLOSE
     assert a.position.state is PositionState.CLOSED
+
+
+@pytest.mark.parametrize("balance", [_balance(), _balance(("005930", 3))])
+def test_ownership격리_EXIT_FAILED도_잔고와무관하게_EXITING수동격리(balance):
+    quarantined = _pos(
+        state=PositionState.EXIT_FAILED, exit_reason=None)
+    [a] = _decide_one(
+        DbPosition(quarantined, unmanaged_qty=4), balance=balance)
+    assert a.kind is ReconcileKind.OWNERSHIP_AMBIGUOUS
+    assert a.position.state is PositionState.EXITING
+    assert a.position.exit_reason is None
+    assert "unmanaged_baseline=4" in a.note
 
 
 def test_분기7_EXIT_FAILED_보유잔존은_자동재청산_금지_경고만():
@@ -271,7 +401,7 @@ def test_분기6_DB에_없는_브로커_보유는_경고():
 # ── apply (부수효과 정책) ────────────────────────────────────────────────
 
 @pytest.mark.anyio
-async def test_apply_취소성공은_영속과_감사_수행():
+async def test_apply_진입취소성공은_fresh잔고전_terminal영속없이_감사만수행():
     db = DbPosition(_pos(entry_phase=EntryPhase.LIMIT_SUBMITTED), ("ORD1",))
     actions = _decide_one(db, orders=[_open("ORD1")], in_window=False)
     fake = FakeOrderPortBase()
@@ -281,28 +411,31 @@ async def test_apply_취소성공은_영속과_감사_수행():
         record_cancel=lambda ack, act: recorded.append(
             (act.symbol, act.cancel_order_no)))
     assert fake.cancelled == ["ORD1"]
-    assert [p.state for p in persisted] == [PositionState.ENTRY_FAILED]
+    assert persisted == []
     # 감사에 실제 심볼·원주문 전달(보안 P5-T7 Minor — 하드코딩 금지)
     assert recorded == [("005930", "ORD1")]
     assert len(applied) == 1 and warnings == []
 
 
 @pytest.mark.anyio
-async def test_apply_취소실패는_상태를_바꾸지_않고_경고():
+async def test_apply_취소실패는_상태를_바꾸지않고_FATAL_marker와_경고():
     db = DbPosition(_pos(entry_phase=EntryPhase.LIMIT_SUBMITTED), ("ORD1",))
     actions = _decide_one(db, orders=[_open("ORD1")], in_window=False)
     fake = FakeOrderPortBase(cancel_script=[RuntimeError("rejected")])
     persisted = []
     applied, warnings = await apply_reconcile(actions, fake, persisted.append)
     assert persisted == []       # 주문 상태 불명 — 영속 금지
-    assert applied == []
+    assert [action.kind for action in applied] == [
+        ReconcileKind.CANCEL_FAILED]
     assert any("cancel failed" in w for w in warnings)
 
 
 @pytest.mark.anyio
 async def test_apply_영속실패는_경고_후_다음_액션_계속():
-    a1 = DbPosition(_pos(state=PositionState.EXIT_FAILED))            # ⑦ CLOSE
-    a2 = DbPosition(_pos(symbol="000660", state=PositionState.EXIT_FAILED))
+    a1 = DbPosition(_pos(state=PositionState.EXIT_FAILED,
+                         exit_reason=ExitReason.STOP_LOSS))           # ⑦ CLOSE
+    a2 = DbPosition(_pos(symbol="000660", state=PositionState.EXIT_FAILED,
+                         exit_reason=ExitReason.STOP_LOSS))
     actions = reconcile_decide([a1, a2], [], _balance(), True)
     fails = {"005930"}
 
@@ -348,7 +481,8 @@ async def test_apply_취소_감사_실패는_경고로_노출():
 async def test_apply_RESUME_계열은_IO_없이_통과():
     db = DbPosition(_pos(state=PositionState.EXITING,
                          exit_reason=ExitReason.STOP_LOSS), ("ORD2",))
-    actions = _decide_one(db, orders=[_open("ORD2")],
+    actions = _decide_one(
+        db, orders=[_open("ORD2", side=OrderSide.SELL)],
                           balance=_balance(("005930", 10)))
     fake = FakeOrderPortBase()
     persisted = []
@@ -377,7 +511,7 @@ async def test_track_existing_exit는_pending을_복원해_다음_폴이_확정(
     assert acts2[0].state is PositionState.CLOSED
     assert acts2[0].reason is ExitReason.STOP_LOSS
     assert acts2[0].requires_reconcile is True  # 지연 확정 — 잔고 대사 표식
-    assert store.rows["005930"].state is PositionState.CLOSED
+    assert store.rows["005930"].state is PositionState.EXITING
     assert acts2[0].exit_price == 99_000  # est 명시 시에만 추정 기록
 
 
@@ -413,3 +547,25 @@ async def test_시드_est_없으면_pnl을_확정_숫자로_기록하지_않는�
     assert acts[0].exit_price is None and acts[0].realized_pnl is None
     assert acts[0].requires_reconcile is True
     assert store.rows["005930"].realized_pnl is None
+
+
+@pytest.mark.anyio
+async def test_재기동_pending은_원주문량과_미기록부분체결을_복원한다():
+    exiting = _pos(state=PositionState.EXITING,
+                   exit_reason=ExitReason.STOP_LOSS)
+    store = FakeStore(exiting)
+    observed = []
+    fake = FakeOrderPortBase(open_orders_script=[4])
+    fake._order_seq = 7
+    mon = _seed_monitor(
+        fake, store,
+        on_fill=lambda pos, facts: observed.append((pos, facts)))
+    mon.track_existing_exit(
+        exiting, "ORD7", order_qty=10, remaining_qty=4,
+        reported_cumulative_qty=0, fill_event_pending=True)
+    assert await mon.poll_once([], T0) == []
+    snapshot, facts = observed[0]
+    assert snapshot.quantity == 4
+    assert facts["fill_qty"] == 6
+    assert facts["cumulative_fill_qty"] == 6
+    assert facts["remaining_qty"] == 4

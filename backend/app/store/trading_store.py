@@ -22,8 +22,11 @@ from app.store.kst_time import (as_aware_utc, coarse_utc_bounds,
 
 from app.domain.trading.models import (EntryPhase, ExitPhase, ExitReason,
                                        PositionState, TradePosition)
-from app.store.models import (CandleRow, InstrumentRow, TradeFillRow,
-                              TradeOrderRow, TradePositionRow, TradeRunRow)
+from app.domain.notifications.models import OperationalEvent
+from app.store.models import (CandleRow, InstrumentRow, OperationalEventRow,
+                              TradeFillRow, TradeOrderRow, TradePositionRow,
+                              TradeRunRow)
+from app.store.notification_store import NotificationStore
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +97,7 @@ class TradingStore:
                  now: Callable[[], datetime] | None = None) -> None:
         self._sessions = sessionmaker(bind=engine)
         self._now = now or (lambda: datetime.now(timezone.utc))
+        self._notifications = NotificationStore(engine, now=self._now)
 
     # ---------- 런 ----------
 
@@ -122,6 +126,11 @@ class TradingStore:
             run = session.get(TradeRunRow, run_id)
             if run is not None:
                 run.kill_switch_mode = mode
+                self._notifications.append_event_in_session(
+                    session, OperationalEvent(
+                        kind="kill_switch_requested", source_type="trade_run",
+                        source_id=run_id, version=f"kill_switch_requested:{mode}",
+                        payload={"mode": mode}, occurred_at=self._now()))
 
     def close_stale_runs(self, run_environment: str) -> int:
         """기동 시 잔존 'running' run 정정 — 반환: 정정 건수(P6 Task 7d).
@@ -168,6 +177,20 @@ class TradingStore:
                                       if row.kill_switch_mode is not None
                                       else "process_restart")
                 row.finished_at = self._now()
+                if row.kill_switch_mode is not None:
+                    self._notifications.append_event_in_session(
+                        session, OperationalEvent(
+                            kind="kill_switch_needs_attention",
+                            source_type="trade_run", source_id=row.id,
+                            version=(
+                                "kill_switch_needs_attention:"
+                                f"{row.kill_switch_mode}:process_restart"),
+                            payload={
+                                "mode": row.kill_switch_mode,
+                                "run_status": "stopped",
+                                "needs_attention": True,
+                                "failure_kind": "kill_switch_before_crash"},
+                            occurred_at=self._now()))
             return len(rows)
 
     def foreign_open_position_count(self, run_environment: str) -> int:
@@ -188,6 +211,7 @@ class TradingStore:
     def finish_run(self, run_id: int, status: str,
                    stopped_by_kill_switch: bool = False,
                    kill_switch_mode: str | None = None,
+                   kill_switch_needs_attention: bool = False,
                    failure_reason: str | None = None,
                    warnings: str | None = None) -> None:
         """킬 스위치 감사(§9 보안 패널) — Task 7이 _run() 종료 시
@@ -206,7 +230,28 @@ class TradingStore:
             run.stopped_by_kill_switch = stopped_by_kill_switch
             run.kill_switch_mode = kill_switch_mode
             run.failure_reason = failure_reason
-            run.warnings = warnings
+            # 실행 중 state-only 안전 폴백이 남긴 durable audit-gap을 종료
+            # 경고가 덮어쓰지 않게 병합한다.
+            existing = [
+                line for line in (run.warnings or "").splitlines() if line]
+            incoming = [
+                line for line in (warnings or "").splitlines() if line]
+            run.warnings = (
+                "\n".join(dict.fromkeys(existing + incoming)) or None)
+            if stopped_by_kill_switch:
+                kind = ("kill_switch_failed" if status == "failed"
+                        else "kill_switch_needs_attention"
+                        if kill_switch_needs_attention or failure_reason is not None
+                        else "kill_switch_completed")
+                self._notifications.append_event_in_session(
+                    session, OperationalEvent(
+                        kind=kind, source_type="trade_run", source_id=run_id,
+                        version=f"{kind}:{kill_switch_mode or 'unknown'}:{status}",
+                        payload={"mode": kill_switch_mode,
+                                 "run_status": status,
+                                 "needs_attention": kill_switch_needs_attention,
+                                 "failure_kind": failure_reason},
+                        occurred_at=self._now()))
 
     def daily_order_usage(self, day: date,
                           run_environment: str) -> DailyOrderUsage:
@@ -388,6 +433,35 @@ class TradingStore:
                        TradeOrderRow.status == "submitted")).all()
             return tuple(rows)
 
+    def submitted_order_id(self, position_id: int, order_no: str) -> int | None:
+        """재기동 감시가 기존 broker order_no를 정확한 감사 원천 ID로 복원한다."""
+        with self._sessions() as session:
+            return session.scalar(select(TradeOrderRow.id).where(
+                TradeOrderRow.trade_position_id == position_id,
+                TradeOrderRow.order_no == order_no,
+                TradeOrderRow.status == "submitted").order_by(
+                    TradeOrderRow.id.desc()).limit(1))
+
+    def latest_fill_cumulative(self, order_id: int) -> int:
+        """append-only 사건에서 주문별 마지막 성공 누적 체결량을 복원한다."""
+        with self._sessions() as session:
+            payloads = session.scalars(
+                select(OperationalEventRow.payload)
+                .where(OperationalEventRow.source_type == "trade_order",
+                       OperationalEventRow.source_id == order_id,
+                       OperationalEventRow.kind.in_({
+                           "exit_partial_fill", "exit_unconfirmed",
+                           "exit_remaining_failed"}))
+                .order_by(OperationalEventRow.id.desc())).all()
+        for raw in payloads:
+            try:
+                value = json.loads(raw).get("cumulative_fill_qty")
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if type(value) is int and value >= 0:
+                return value
+        return 0
+
     def entry_context(self, symbols: list[str], signal_date: date,
                       avg_days: int = 20) -> dict[str, "EntryContext"]:
         """진입 후보 조인(§6-3 — selection 입력 재료). collection 소유 테이블
@@ -468,21 +542,152 @@ class TradingStore:
             row = session.get(TradePositionRow, position_id)
             if row is None:
                 raise ValueError(f"unknown trade position: {position_id}")
-            row.state = pos.state.value
-            row.entry_phase = (pos.entry_phase.value
-                               if pos.entry_phase is not None else None)
-            row.exit_phase = (pos.exit_phase.value
-                              if pos.exit_phase is not None else None)
-            row.entry_price = pos.entry_price
-            row.quantity = pos.quantity
-            row.peak_price = pos.peak_price
-            row.trailing_active = pos.trailing_active
-            row.exit_price = pos.exit_price
-            row.exit_reason = (pos.exit_reason.value
-                               if pos.exit_reason is not None else None)
-            row.realized_pnl = pos.realized_pnl
-            row.entered_at = pos.entered_at
-            row.closed_at = pos.closed_at
+            previous_state = row.state
+            previous_quantity = row.quantity
+            self._write_position_snapshot(row, pos)
+            self._append_snapshot_event(session, row, previous_state,
+                                        previous_quantity, pos)
+
+    def save_position_snapshot_state_only(
+            self, position_id: int, pos: TradePosition) -> None:
+        """외부 ground-truth 확인 뒤 상태만 확정하는 명시적 저장 경로."""
+        with self._sessions.begin() as session:
+            row = session.get(TradePositionRow, position_id)
+            if row is None:
+                raise ValueError(f"unknown trade position: {position_id}")
+            self._write_position_snapshot(row, pos)
+
+    def save_position_snapshot_with_audit_gap(
+            self, position_id: int, pos: TradePosition, *,
+            gap_kind: str, unmanaged_qty: int = 0) -> None:
+        """알림 append 장애 뒤 감시를 보존하는 명시적 state-only 폴백.
+
+        snapshot과 검색 가능한 run warning을 같은 transaction에 기록한다.
+        일반 ``save_position_snapshot``과 달리 operational event를 만들지
+        않으므로 append subsystem 장애가 반복돼도 보유 감시 상태를 잃지
+        않는다. 정상 경로는 반드시 fill-event 원자 API를 사용한다.
+        """
+        allowed = {
+            "entry_fill_event_unavailable",
+            "exit_fill_event_unavailable",
+        }
+        if gap_kind not in allowed:
+            raise ValueError("invalid trading audit gap kind")
+        if type(unmanaged_qty) is not int or unmanaged_qty < 0:
+            raise ValueError("unmanaged_qty must be a non-negative integer")
+        marker = f"[audit-gap] {gap_kind} position_id={position_id}"
+        ownership = (
+            f"[ownership-baseline] position_id={position_id} "
+            f"unmanaged_qty={unmanaged_qty}"
+            if gap_kind == "entry_fill_event_unavailable" else None)
+        with self._sessions.begin() as session:
+            row = session.get(TradePositionRow, position_id)
+            if row is None:
+                raise ValueError(f"unknown trade position: {position_id}")
+            run = session.get(TradeRunRow, row.trade_run_id)
+            if run is None:
+                raise ValueError(f"unknown trade run: {row.trade_run_id}")
+            self._write_position_snapshot(row, pos)
+            lines = [line for line in (run.warnings or "").splitlines()
+                     if line]
+            if marker not in lines:
+                lines.append(marker)
+            if ownership is not None and ownership not in lines:
+                lines.append(ownership)
+            run.warnings = "\n".join(lines)
+
+    @staticmethod
+    def _write_position_snapshot(row: TradePositionRow,
+                                 pos: TradePosition) -> None:
+        row.state = pos.state.value
+        row.entry_phase = (pos.entry_phase.value
+                           if pos.entry_phase is not None else None)
+        row.exit_phase = (pos.exit_phase.value
+                          if pos.exit_phase is not None else None)
+        row.entry_price = pos.entry_price
+        row.quantity = pos.quantity
+        row.peak_price = pos.peak_price
+        row.trailing_active = pos.trailing_active
+        row.exit_price = pos.exit_price
+        row.exit_reason = (pos.exit_reason.value
+                           if pos.exit_reason is not None else None)
+        row.realized_pnl = pos.realized_pnl
+        row.entered_at = pos.entered_at
+        row.closed_at = pos.closed_at
+
+    def _append_snapshot_event(self, session, row: TradePositionRow,
+                               previous_state: str, previous_quantity: int,
+                               pos: TradePosition) -> None:
+        """상태 전이와 함께만 기록 가능한 vendor-neutral fill 사건.
+
+        이 경로의 주문 조회는 주문별 거래소 체결 상세가 아니라 polling 결과다.
+        따라서 가격 신뢰도는 언제나 estimated이고, broker_reconciled 승격은
+        별도 잔고 대사 사실을 받은 경로만 수행할 수 있다.
+        """
+        if previous_state == pos.state.value:
+            return
+        if (previous_state == PositionState.PENDING_ENTRY.value
+                and pos.state is PositionState.ENTERED):
+            if pos.quantity < previous_quantity:
+                # EntryExecutor가 cancel 결과까지 관측한 partial-fill callback을
+                # 별도 append한다. 여기서 다시 추론하면 원 주문/잔량 상태가
+                # 약한 중복 사건이 된다.
+                return
+            side, kind = "buy", "entry_filled"
+        elif (pos.state is PositionState.CLOSED
+              and previous_state in {PositionState.ENTERED.value,
+                                     PositionState.EXITING.value}):
+            # ka10075의 주문 소멸은 체결가·fill ID를 주지 않는다. 주문 상세를
+            # 본 것처럼 exit_filled/broker_reconciled로 과장하지 않는다.
+            side, kind = "sell", "exit_unconfirmed"
+        elif pos.state is PositionState.EXIT_FAILED:
+            side, kind = "sell", "exit_remaining_failed"
+        else:
+            return
+        order = session.scalar(select(TradeOrderRow).where(
+            TradeOrderRow.trade_position_id == row.id,
+            TradeOrderRow.side == side,
+            TradeOrderRow.status == "submitted").order_by(
+                TradeOrderRow.id.desc()).limit(1))
+        if order is None:
+            if kind != "exit_remaining_failed":
+                return  # reconcile-only 전이는 order 원천이 없어 사건을 추정하지 않는다.
+            source_type, source_id, order_qty = "trade_position", row.id, pos.quantity
+        else:
+            source_type, source_id, order_qty = "trade_order", order.id, order.req_qty
+        if kind == "exit_remaining_failed":
+            remaining = min(pos.quantity, order_qty)
+            cumulative = order_qty - remaining
+            fill_qty = 0
+            remaining_state = "unknown"
+            price: int | None = None
+        elif kind == "exit_unconfirmed":
+            # ka10075에서 주문이 사라졌다는 관측만으로는 체결·취소·전파
+            # 지연을 구분할 수 없다. 전량 체결 수량/가격을 꾸며 넣지 않는다.
+            cumulative = fill_qty = 0
+            remaining = order_qty
+            remaining_state = "unknown"
+            price = None
+        else:
+            cumulative = min(pos.quantity, order_qty)
+            fill_qty = cumulative
+            remaining = order_qty - cumulative
+            remaining_state = "none" if remaining == 0 else "unknown"
+            price = pos.entry_price if side == "buy" else pos.exit_price
+        self._notifications.append_event_in_session(
+            session, OperationalEvent(
+                kind=kind, source_type=source_type, source_id=source_id,
+                version=f"snapshot:{kind}:{cumulative}:{remaining}", payload={
+                    "order_qty": order_qty, "fill_qty": fill_qty,
+                    "cumulative_fill_qty": cumulative,
+                    "remaining_qty": remaining, "avg_fill_price": price,
+                    "price_confidence": "estimated",
+                    "remaining_order_state": remaining_state,
+                    "exit_reason": (pos.exit_reason.value
+                                    if pos.exit_reason is not None else None),
+                    "realized_pnl": pos.realized_pnl,
+                    "pnl_confidence": ("estimated" if side == "sell" else None)},
+                occurred_at=self._now()))
 
     def open_positions(self, run_environment: str | None = None,
                        ) -> tuple[list[tuple[int, TradePosition]], list[int]]:
@@ -609,6 +814,142 @@ class TradingStore:
             session.add(row)
             session.flush()
             return row.id
+
+    def save_position_snapshot_with_fill_event(
+            self, position_id: int, pos: TradePosition, *, order_id: int,
+            kind: str, order_qty: int, fill_qty: int,
+            cumulative_fill_qty: int, remaining_qty: int,
+            avg_fill_price: int | None,
+            price_confidence: str, remaining_order_state: str,
+            unmanaged_qty: int = 0) -> int:
+        """부분체결 snapshot과 operational event를 한 transaction에 기록한다.
+
+        주문별 체결 상세가 없는 polling 관측이므로 현재 caller는
+        ``price_confidence=estimated``만 사용한다. append가 실패하면 snapshot
+        갱신도 함께 rollback되어 상태만 앞서가는 감사 공백을 만들지 않는다.
+        """
+        if kind not in {"entry_partial_fill", "entry_filled",
+                        "exit_partial_fill", "exit_unconfirmed",
+                        "exit_remaining_failed"}:
+            raise ValueError("invalid fill event kind")
+        if any(type(value) is not int or value < 0 for value in
+               (order_qty, fill_qty, cumulative_fill_qty, remaining_qty,
+                unmanaged_qty)):
+            raise ValueError("fill facts must be non-negative integers")
+        if (avg_fill_price is not None
+                and (type(avg_fill_price) is not int or avg_fill_price < 0)):
+            raise ValueError("avg_fill_price must be a non-negative integer or None")
+        if cumulative_fill_qty + remaining_qty != order_qty:
+            raise ValueError("cumulative and remaining quantities must equal order_qty")
+        if fill_qty > cumulative_fill_qty:
+            raise ValueError("fill_qty cannot exceed cumulative_fill_qty")
+        if kind != "entry_filled" and remaining_qty == 0:
+            raise ValueError("fill event requires a positive remaining quantity")
+        if kind == "entry_filled" and remaining_qty != 0:
+            raise ValueError("entry filled event requires zero remaining quantity")
+        if kind in {"exit_remaining_failed", "exit_unconfirmed"} \
+                and fill_qty != 0:
+            raise ValueError("unconfirmed/remaining event cannot claim a new fill")
+        if price_confidence not in {"estimated", "broker_reconciled"}:
+            raise ValueError("invalid price_confidence")
+        if remaining_order_state not in {
+                "open", "cancel_pending", "cancelled", "none", "unknown"}:
+            raise ValueError("invalid remaining_order_state")
+        with self._sessions.begin() as session:
+            position = session.get(TradePositionRow, position_id)
+            if position is None:
+                raise ValueError(f"unknown trade position: {position_id}")
+            order = session.get(TradeOrderRow, order_id)
+            if order is None:
+                raise ValueError(f"unknown trade order: {order_id}")
+            if order.trade_position_id != position_id:
+                raise ValueError("trade order does not belong to position")
+            if order.symbol != position.symbol or pos.symbol != position.symbol:
+                raise ValueError("fill snapshot symbol does not match order position")
+            if order.req_qty != order_qty:
+                raise ValueError("fill order quantity does not match source order")
+            if order.status != "submitted":
+                raise ValueError("fill source order must be submitted")
+            expected_side = (
+                "buy" if kind in {"entry_partial_fill", "entry_filled"}
+                else "sell")
+            if order.side != expected_side:
+                raise ValueError("fill event kind does not match order side")
+            expected_state = (
+                PositionState.ENTERED
+                if kind in {"entry_partial_fill", "entry_filled"}
+                else PositionState.EXIT_FAILED
+                if kind == "exit_remaining_failed"
+                else PositionState.EXITING
+                if kind == "exit_unconfirmed"
+                else PositionState.EXITING)
+            if pos.state is not expected_state:
+                raise ValueError("fill snapshot state does not match event kind")
+            self._write_position_snapshot(position, pos)
+            return self._notifications.append_event_in_session(
+                session, OperationalEvent(
+                    kind=kind, source_type="trade_order", source_id=order_id,
+                    version=(
+                        f"{cumulative_fill_qty}:{remaining_qty}:{kind}"),
+                    payload={
+                        "symbol": pos.symbol,
+                        "order_qty": order_qty, "fill_qty": fill_qty,
+                        "cumulative_fill_qty": cumulative_fill_qty,
+                        "remaining_qty": remaining_qty,
+                        "avg_fill_price": avg_fill_price,
+                        "price_confidence": price_confidence,
+                        "remaining_order_state": remaining_order_state,
+                        "unmanaged_qty": unmanaged_qty,
+                        "exit_reason": (
+                            pos.exit_reason.value
+                            if pos.exit_reason is not None else None)},
+                    occurred_at=self._now()))
+
+    def unmanaged_quantity(self, position_id: int) -> int:
+        """진입 때 확인된 계좌 내 비전략 보유 baseline을 복원한다."""
+        with self._sessions() as session:
+            position = session.get(TradePositionRow, position_id)
+            run_warnings = ""
+            if position is not None:
+                run = session.get(TradeRunRow, position.trade_run_id)
+                run_warnings = run.warnings or "" if run is not None else ""
+            order_ids = session.scalars(
+                select(TradeOrderRow.id)
+                .where(TradeOrderRow.trade_position_id == position_id,
+                       TradeOrderRow.side == "buy")).all()
+            payloads = (
+                session.scalars(
+                    select(OperationalEventRow.payload)
+                    .where(OperationalEventRow.source_type == "trade_order",
+                           OperationalEventRow.source_id.in_(order_ids),
+                           OperationalEventRow.kind.in_({
+                               "entry_partial_fill", "entry_filled"}))
+                    .order_by(OperationalEventRow.id.desc())).all()
+                if order_ids else [])
+        for raw in payloads:
+            try:
+                value = json.loads(raw).get("unmanaged_qty", 0)
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if type(value) is int and value >= 0:
+                return value
+        prefix = f"[ownership-baseline] position_id={position_id} "
+        for line in reversed(run_warnings.splitlines()):
+            if not line.startswith(prefix):
+                continue
+            raw_value = line.removeprefix(prefix)
+            if not raw_value.startswith("unmanaged_qty="):
+                continue
+            try:
+                value = int(raw_value.removeprefix("unmanaged_qty="))
+            except ValueError:
+                continue
+            if value >= 0:
+                return value
+        return 0
+
+    def latest_operational_event(self) -> OperationalEvent:
+        return self._notifications.latest_operational_event()
 
     # ---------- 조회 (API) ----------
 

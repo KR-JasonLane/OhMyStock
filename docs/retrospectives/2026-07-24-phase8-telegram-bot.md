@@ -505,15 +505,127 @@ Task 4는 REST와 Telegram이 공유할 OperationsControl 및 managed liquidatio
 - `process_claimed()` 공개 진입점을 추가해 Task 7 TelegramService가 inbox claim
   뒤 query/control lane으로 분배할 수 있게 했다. 간단한 `process_next()`는
   단일 worker 편의 API로 유지한다.
-- 마지막으로 `in_progress`는 terminal cache에 저장하지 않게 했다. 따라서
-  accepted 감독이 매 heartbeat에서 실제 broker/DB 상태를 다시 읽고, 실제
-  TradingService 회귀의 `in_progress → DB CLOSED·broker 잔고 0 → succeeded`
-  전이가 확인된다.
-- 통합 수정 focused는 command/store/operations/trading service 85건 통과,
-  전체는 930 passed, 11 deselected, 기존 warning 1건이다. 이 변경은 broker
-  adapter/TR 요청 형식을 바꾸지 않았고 실제 API·운영 DB 호출도 하지 않았다.
-- 최종 5인 패널(senior-developer, senior-trader, architecture-expert,
-  security-expert, broker-api-expert)은 각각 Critical 0, Important 0으로
-  승인했다. Minor는 후속 TelegramService 종료 시 accepted-monitor drain/unknown
-  전이를 lifecycle 테스트로 소유하고, notification port의 `Any`를 점진적 DTO로
-  바꾸라는 항목만 남았다.
+
+## Task 6 — append-only operational events와 체결 정확도
+
+### 요청과 기존 상태
+
+상태 테이블 사후 스캔 대신 append-only 사건을 Telegram outbox 원천으로 쓰고,
+스케줄러 포기·부분체결·청산 잔량·킬스위치를 재기동 뒤에도 투영해야 했다. 0013에는
+`operational_events`, outbox, 범용 `telegram_state`가 이미 있었지만 projector와
+실제 trading/scheduler producer는 없었다.
+
+### 설계 판단과 변경 위치
+
+- `notification_store.py`가 cursor/outbox의 SQLAlchemy transaction을 소유하고,
+  `domain/notifications/projector.py`는 순수 event→outbox 정책과 port만 안다.
+  `telegram_state.event_projector_cursor`와 `operational:{id}:{kind}` 고유키로
+  rewind 중복을 차단했다.
+- `scheduler_store.py`는 GAVE_UP 원천 행 flush 뒤 같은 transaction에서
+  `pipeline_gave_up`을 append하며, trade job에는 monitoring-gap 종류도 넣는다.
+- `entry.py`와 `monitor.py`가 실제 관측한 partial fill을 callback으로 내보내고,
+  `service.py`는 주문 감사 때 보존한 order ID로 `trading_store.py`에 귀속한다.
+  모든 부분체결 payload는 original/fill/cumulative/remaining quantity,
+  remaining order state, estimated 가격을 보존한다.
+- 마지막 원자성 결함은
+  `TradingStore.save_position_snapshot_with_fill_event()`로 해소했다. 같은
+  SQLAlchemy session transaction에서 position/order 귀속을 검증하고 전체
+  position snapshot과 partial-fill event를 함께 기록한다. append를 강제
+  실패시킨 회귀에서 기존 snapshot과 event 0건이 함께 보존되어 rollback을
+  확인했다.
+- EntryExecutor와 PositionMonitor는 진입 지정가·진입 시장가·청산 시장가·
+  익절 지정가·익절 시장가 fallback에서 관측 당시의 `TradePosition`
+  snapshot을 fill facts와 함께 넘긴다. TradingService의 공통 callback만
+  원자 API를 호출한다. 저장 실패 시 원자 transaction은 rollback하되 실제
+  주문의 pending 추적과 진입 잔고 대사는 중단하지 않는다. append 장애가
+  지속되는 비상 경로는 state-only snapshot과 `[audit-gap]` run warning을
+  같은 별도 transaction에 남겨 감시 상태와 검색 가능한 감사 공백을 함께
+  보존한다. 재기동 감시는 기존 order number를 감사 order ID로 재수화한다.
+- pending 주문은 ka10075의 후속 미체결 수량 감소를 버리지 않고 증분·누적·
+  잔량 사건을 갱신한다. 장마감 `exit_remaining_failed`도 마지막 누적을
+  역행시키지 않는다. 재기동 때 원주문량·현재 미체결량·DB의 마지막 성공
+  잔량과 append-only order event의 마지막 성공 누적을 복원해 callback 실패
+  창의 delta도 재생한다. state-only audit-gap snapshot이 앞서가도 event
+  기준선은 오염되지 않는다. 주문 소멸은 체결 확정
+  근거가 아니므로 모든 청산 `CLOSED`가 즉시 kt00018 대사를 요구하고,
+  terminal 사건은 실제 order ID에 마지막 누적/잔량을 보존한다. 부분체결
+  가격이 없는 경우 잔량만으로 손익을 과소 계산하지 않고 미확정 `None`으로
+  둔다. 주문 소멸 직후에는 `EXITING + exit_unconfirmed`만 원자 저장하고,
+  kt00018 잔고 0을 성공 확인한 뒤에만 state-only CLOSED를 확정한다. 잔고
+  조회 실패 시 EXITING이 재기동 스캔에 남는다.
+- 전량 진입 사건은 kt00018 검증 전에는 만들지 않는다. 두 번의 잔고 확인
+  뒤 실제 수량·평단 snapshot과 `entry_filled`/보정된 partial 사건을 함께
+  기록하며, phantom이면 완료 사건을 남기지 않는다. kt00018 종목 합계는
+  단일 주문 fill로 귀속하지 않고 polling 관측 수량을 event에 사용한다.
+  시작 대사에서 DB 밖 기존 보유가 있는 심볼은 신규 진입을 fail-closed하고,
+  실제 BUY 직전 잔고를 다시 확인해 startup 이후 수동/지연 체결 경합도 막는다.
+  체결 후 계좌 종목 합계가 주문 관측 수량보다 크면 초과분은 자동매매 소유로
+  흡수하지 않고 관측 수량만 저장하며 수동 검토 경고를 남긴다.
+  unmanaged baseline은 entry operational event에 영속한다. 혼합 소유가
+  확인되면 진입 사건을 원자 기록한 직후 포지션을 EXITING/manual로 격리해
+  자동 매도를 막는다. 재기동·미니 reconcile·취소 후 잔고 정렬·청산 주문
+  소멸 대사는 모두 같은 소유권 규칙을 쓴다. kt00018 종목 합계의 양수 수량은
+  과거 baseline과 같아도 외부 거래와 전략 체결의 상쇄를 배제할 수 없으므로
+  자동 CLOSED·수량 정렬·재오픈하지 않는다. 실제 합계 0만 CLOSED로 확정하고,
+  그 외에는 EXITING과 kill-switch attention을 유지해 수동 대사로 보낸다.
+  post-entry 검증 전에 죽은 PENDING_ENTRY도 주문별 fill 근거가 없으므로 양수
+  합계를 ENTERED로 승격하지 않는다. ka10075 최초 주문 결측은 잔고 양수
+  여부와 무관하게 유예 뒤 ka10075 주문을 먼저 재조회하고 그 뒤 kt00018을
+  순서대로 확인한다. 주문이 계속 없고 post-absence 잔고도 0이면 다시 유예한
+  최종 잔고까지 0일 때만 terminal 처리한다. DB 감사에서 주문번호를 복원하지
+  못했는데 같은 심볼의 미귀속 live BUY가 있으면 그 주문을 전략 주문으로
+  승격·취소하지 않고 포지션을 EXITING/manual로 격리한다. 격리 뒤 재기동에도
+  BUY를 SELL 감시 주문으로 오인하지 않도록 PENDING은 귀속 BUY, EXITING은
+  귀속 SELL만 주문번호와 방향을 함께 연결한다. 미귀속 BUY와 귀속 BUY가
+  동시에 있으면 미귀속 주문은 건드리지 않고 귀속 BUY만 취소한다. ownership
+  격리는 `EXITING + exit_reason 없음`을 durable discriminator로 사용해 live
+  BUY가 소멸하고 잔고가 일시 0이어도 자동 CLOSED하지 않으며 명시적 수동
+  해제까지 유지한다. 격리 중 귀속 SELL은 취소·재평가하지 않고 기존 주문만
+  추적하며, pending과 ExitAction에도 구조화된 quarantine 표식을 운반해 SELL
+  소멸·잔고 0 뒤에도 exit_reason과 EXITING을 보존한다. 이 표식은 시장
+  마감의 `EXIT_FAILED` 전이에도 유지되며, 다음 reconcile은 잔고와 무관하게
+  수동 `EXITING` 격리로 복구하고 자동 `CLOSED`하지 않는다. 창밖 생존 주문은
+  취소 전 잔고로 ENTRY_FAILED를 확정하지 않고,
+  취소 성공 뒤 대상 심볼만 fresh balance를 두 번 확인해 0일 때만 실패로
+  종결하며 양수면 계획 수량과 같아도 EXITING 격리를 적용한다. 이 후속
+  CLOSED/EXITING DB write도
+  cancellation 중 실제 worker가 terminal이 된 뒤에만 취소를 재전파한다.
+  ownership 격리 snapshot 저장이나 귀속 BUY 취소가 실패하면 marker와
+  attention을 보존한 뒤 거래 run 자체를 fail-closed해 미확정 주문을 둔 채
+  정상 루프로 진행하지 않는다.
+- fill callback은 awaitable로 바꾸고 서비스의 원자 저장과 audit-gap fallback
+  SQL을 모두 `asyncio.to_thread`에서 실행한다. PostgreSQL 지연이 FastAPI,
+  scheduler, Telegram과 공유하는 event loop를 막지 않는다. persistence
+  전체는 취소 안전한 소유 task로 감싸 worker와 fallback terminal 뒤에만
+  취소를 재전파한다. 원자 저장 3회가 모두 실패하면 monitor에도 실패 신호를
+  돌려 같은 process의 다음 poll에서 마지막 성공 누적부터 다시 시도한다.
+  source order ID가 없는 진입 audit-gap도 동일하게 terminal까지 회수하며,
+  terminal 예외/cancellation 경합은 결과 회수 뒤 타입만 로그로 남긴다.
+- ka10075 주문 소멸은 체결가·fill ID를 주지 않으므로 `exit_unconfirmed`에
+  전량 수량이나 가격을 꾸며 넣지 않았다. kt00018은 계좌/종목 단위 집계라
+  동일 종목 복수 주문 중 특정 주문으로 안전하게 귀속할 실측 근거가 없어
+  `broker_reconciled` 승격도 하지 않았다.
+
+### 검증과 패널
+
+- RED는 projector 모듈 부재, 진입 snapshot 사건 부재, 원자 API 부재로
+  확인했다.
+- Task 6 focused 187건, 백엔드 전체 996건이 통과했고 11건은 명시적으로
+  제외됐다. compileall과 `git diff --check`도 통과했다.
+- 초기 5인 독립 리뷰는 실경로 partial-fill 누락, 허위 exit 사실,
+  kill-switch 부재, projector ORM 의존을 Important로 지적했고 수정했다.
+  후속 재검토가 지적한 부분체결 transaction 분리, 재기동 order ID 재수화,
+  잔량이 남은 LIQUIDATE_ALL의 completed 오기록, scheduler-dead producer도
+  수정했다. order 단위 broker-reconciled 승격은 추가 실측 전에는 안전하게
+  보류한다.
+- 최종 패널 1차에서 새로 발견한 callback 저장 실패 무추적, pending 추가
+  체결/장마감 수량 역행, 잔고 검증 전 full-entry 사건, terminal order 오귀속,
+  kill-switch shutdown/process-restart 오신호를 회귀로 재현해 수정했다.
+  scheduler-dead는 `scheduler_events.job VARCHAR(8)`에 9자 임시 값을 넣던
+  PostgreSQL 결함을 제거하고 stable idempotency version으로 최대 3회
+  비동기 재시도한다. loop와 dead-event DB worker를 별도로 소유해 shutdown은
+  실제 worker terminal 뒤에만 engine 폐기로 진행한다.
+- 실제 키움·Telegram API 및 운영 DB 호출은 하지 않았다.
+- 최종 동일 구현 diff는 senior-developer, senior-trader,
+  architecture-expert, security-expert, broker-api-expert가 독립 재검토해
+  모두 Critical 0건, Important 0건으로 승인했다.

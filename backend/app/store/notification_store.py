@@ -11,7 +11,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.domain.notifications.models import OperationalEvent
 from app.store.models import (NotificationDeliveryRow, NotificationOutboxRow,
-                              OperationalEventRow)
+                              OperationalEventRow, TelegramStateRow)
 from app.store.telegram_common import (MAX_DELIVERY_PARTS,
                                        MAX_DELIVERY_TOTAL_BYTES,
                                        aware as _aware, canonical_json,
@@ -95,6 +95,104 @@ class NotificationStore:
     def operational_event_count(self) -> int:
         with self._sessions() as session:
             return session.scalar(select(func.count()).select_from(OperationalEventRow)) or 0
+
+    def latest_operational_event(self) -> OperationalEvent:
+        with self._sessions() as session:
+            row = session.scalar(select(OperationalEventRow).order_by(
+                OperationalEventRow.id.desc()).limit(1))
+            if row is None:
+                raise LookupError("no operational event")
+            occurred_at = row.occurred_at
+            if occurred_at.tzinfo is None or occurred_at.utcoffset() is None:
+                occurred_at = occurred_at.replace(tzinfo=timezone.utc)
+            return OperationalEvent(
+                kind=row.kind, source_type=row.source_type, source_id=row.source_id,
+                version=row.source_version, payload=json.loads(row.payload),
+                occurred_at=occurred_at)
+
+    def events_after_in_session(self, session, event_id: int,
+                                limit: int) -> list[OperationalEventRow]:
+        return list(session.scalars(
+            select(OperationalEventRow)
+            .where(OperationalEventRow.id > event_id)
+            .order_by(OperationalEventRow.id)
+            .limit(limit)))
+
+    def projector_checkpoint_in_session(self, session) -> int:
+        row = session.get(TelegramStateRow, "event_projector_cursor")
+        return int(row.value) if row is not None else 0
+
+    def projector_checkpoint(self) -> int:
+        with self._sessions() as session:
+            return self.projector_checkpoint_in_session(session)
+
+    def set_projector_checkpoint_in_session(self, session, event_id: int) -> None:
+        row = session.get(TelegramStateRow, "event_projector_cursor")
+        if row is None:
+            session.add(TelegramStateRow(
+                key="event_projector_cursor", value=str(event_id),
+                lease_owner=None, lease_until=None, updated_at=_aware(self._now())))
+            return
+        row.value = str(event_id)
+        row.updated_at = _aware(self._now())
+
+    def rewind_projector_checkpoint(self, event_id: int) -> None:
+        if event_id < 0:
+            raise ValueError("event_id must be non-negative")
+        with self._sessions.begin() as session:
+            self.set_projector_checkpoint_in_session(session, event_id)
+
+    def enqueue_outbox_in_session(
+            self, session, idempotency_key: str, payload: Any, *, kind: str,
+            priority: int = 0, occurred_at: datetime) -> tuple[int, bool]:
+        identifier(idempotency_key, "idempotency_key", 128)
+        if occurred_at.tzinfo is None or occurred_at.utcoffset() is None:
+            # SQLite는 timezone=True 값을 naive로 되돌린다. 원천 행은 UTC로
+            # 기록하므로 projector 경계에서 UTC를 복원한다.
+            occurred_at = occurred_at.replace(tzinfo=timezone.utc)
+        occurred = _aware(occurred_at)
+        now = _aware(self._now())
+        return self._insert_outbox(session, dict(
+            idempotency_key=idempotency_key, kind=kind, priority=priority,
+            sensitive=False, payload=canonical_json(payload), status="pending",
+            next_attempt_at=now, occurred_at=occurred, created_at=now,
+            sent_at=None, last_error_kind=None, retention_kind="standard",
+            purge_at=None))
+
+    def project_operational_events(self, project, limit: int = 100) -> int:
+        """project(event_id, OperationalEvent)의 outbox와 cursor를 원자 커밋.
+
+        투영 정책은 domain callback으로 남기고, SQLAlchemy session과 ORM 행은
+        store에 가둔다. callback이 예외를 내면 outbox와 checkpoint 모두 rollback된다.
+        """
+        if not 1 <= limit <= 100:
+            raise ValueError("limit must be between 1 and 100")
+        with self._sessions.begin() as session:
+            cursor = self.projector_checkpoint_in_session(session)
+            rows = self.events_after_in_session(session, cursor, limit)
+            inserted = 0
+            for row in rows:
+                occurred_at = row.occurred_at
+                if occurred_at.tzinfo is None or occurred_at.utcoffset() is None:
+                    occurred_at = occurred_at.replace(tzinfo=timezone.utc)
+                event = OperationalEvent(
+                    kind=row.kind, source_type=row.source_type, source_id=row.source_id,
+                    version=row.source_version, payload=json.loads(row.payload),
+                    occurred_at=occurred_at)
+                for projection in project(row.id, event):
+                    _outbox_id, created = self.enqueue_outbox_in_session(
+                        session, projection.idempotency_key, projection.payload,
+                        kind=projection.kind, priority=projection.priority,
+                        occurred_at=event.occurred_at)
+                    inserted += int(created)
+                self.set_projector_checkpoint_in_session(session, row.id)
+            return inserted
+
+    def outbox_count_by_key(self, idempotency_key: str) -> int:
+        with self._sessions() as session:
+            return session.scalar(select(func.count()).select_from(
+                NotificationOutboxRow).where(
+                    NotificationOutboxRow.idempotency_key == idempotency_key)) or 0
 
     def enqueue_outbox(self, idempotency_key: str, payload: Any, kind: str = "generic",
                        priority: int = 0, sensitive: bool = False,

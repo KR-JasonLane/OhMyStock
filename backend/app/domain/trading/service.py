@@ -12,7 +12,7 @@ store를 만난다(Global Constraints — store 통짜 주입 금지).
   (P5-T6b 트레이더 C2: 리스크 축소 주문이 자기 안전장치에 막히는 역설 방지).
 - requires_reconcile=True → **즉시** 미니 reconcile(잔고 대사 — 재기동 대기
   금지, P5-T6a 트레이더 I2). CLOSED는 잔고 교차 검증 후에만 최종 확정 —
-  잔고 잔존 시 재오픈(하드 게이트, P5-T6c 보안 #2).
+  실제 무보유(0)가 아니면 EXITING/manual로 격리(하드 게이트).
 - EntryOutcome(position=None, requires_reconcile=True)은 확정 ENTRY_FAILED로
   영속하지 않는다(§6-3.8 캐비어트 — 미니 reconcile이 최종 상태 결정).
 - PositionMonitor는 trade_run당 새 인스턴스 + 단일 루프 순차 호출(P5-T6b
@@ -51,6 +51,34 @@ from app.domain.trading.selection import (DropKind, DroppedCandidate,
 logger = logging.getLogger(__name__)
 
 
+async def _await_terminal(awaitable):
+    """취소돼도 소유 작업 전체가 끝날 때까지 회수한 뒤 취소를 전파한다."""
+    worker = asyncio.create_task(awaitable)
+    cancelled = False
+    while not worker.done():
+        try:
+            await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            cancelled = True
+            current = asyncio.current_task()
+            if current is not None:
+                current.uncancel()
+    try:
+        result = worker.result()
+    except Exception as exc:  # noqa: BLE001
+        if not cancelled:
+            raise
+        # terminal 예외도 반드시 회수한다. 원문/traceback은 남기지 않는다.
+        logger.error(
+            "terminal trading persistence failed during cancellation "
+            "(error=%s)", type(exc).__name__)
+        raise asyncio.CancelledError
+    if cancelled:
+        # DB commit/rollback 및 fallback terminal 뒤에만 취소를 재전파한다.
+        raise asyncio.CancelledError
+    return result
+
+
 class _StoreLike(Protocol):
     """서비스가 소비하는 TradingStore 표면(테스트 fake 계약)."""
 
@@ -59,17 +87,28 @@ class _StoreLike(Protocol):
     def finish_run(self, run_id: int, status: str,
                    stopped_by_kill_switch: bool = False,
                    kill_switch_mode: str | None = None,
+                   kill_switch_needs_attention: bool = False,
                    failure_reason: str | None = None,
                    warnings: str | None = None) -> None: ...
     def create_position(self, run_id: int, position: TradePosition) -> int: ...
     def update_position(self, position_id: int, **kwargs) -> None: ...
     def save_position_snapshot(self, position_id: int,
                                pos: TradePosition) -> None: ...
+    def save_position_snapshot_state_only(
+            self, position_id: int, pos: TradePosition) -> None: ...
     def open_positions(self, run_environment: str | None = None): ...
     def submitted_order_nos(self, position_id: int) -> tuple[str, ...]: ...
+    def submitted_order_id(self, position_id: int, order_no: str) -> int | None: ...
+    def latest_fill_cumulative(self, order_id: int) -> int: ...
+    def unmanaged_quantity(self, position_id: int) -> int: ...
     def record_order(self, run_id, position_id, order_no, symbol, side,
                      order_style, req_price, req_qty, status, resp_body,
                      est_krw=0): ...
+    def save_position_snapshot_with_fill_event(
+            self, position_id: int, pos: TradePosition, **kwargs) -> int: ...
+    def save_position_snapshot_with_audit_gap(
+            self, position_id: int, pos: TradePosition, *,
+            gap_kind: str) -> None: ...
     def entry_context(self, symbols, signal_date): ...
     def instrument_state(self, symbol: str) -> str | None: ...
     def get_position(self, position_id: int) -> TradePosition | None: ...
@@ -183,6 +222,8 @@ class TradingService(BackgroundRunService):
         self._managed_liquidation_intent: str | None = None
         self._managed_liquidation_targets: dict[int, LiquidationTarget] = {}
         self._managed_results: OrderedDict[str, LiquidationResult] = OrderedDict()
+        self._broker_held_symbols: set[str] = set()
+        self._unmanaged_baselines: dict[str, int] = {}
 
     # ── 상태 노출 ───────────────────────────────────────────────────────
 
@@ -520,9 +561,13 @@ class TradingService(BackgroundRunService):
         # 필드 대입만(베이스 계약 — 예외 금지)
         self._run_id = None
         self._pos_ids = {}
+        self._order_ids = {}
+        self._entry_fill_observations = {}
+        self._unmanaged_baselines = {}
         self._warnings = []
         self._entries_done = False
         self._final_status = "running"
+        self._kill_switch_needs_attention = False
         self._managed_liquidation_intent = None
         self._managed_liquidation_targets = {}
         self._caps = OrderCaps(self._config)
@@ -531,6 +576,7 @@ class TradingService(BackgroundRunService):
             self._orders, self._config, self._calendar, self._caps.check,
             persist_position=self._persist_by_symbol,
             on_order=self._record_order_by_symbol,
+            on_fill=self._record_fill_observation,
             lookup_instrument_state=self._lookup_state,
             sleep=self._sleep, now=self._clock)
 
@@ -567,6 +613,7 @@ class TradingService(BackgroundRunService):
                     self._store.finish_run, self._run_id, status,
                     stopped_by_kill_switch=mode is not None,
                     kill_switch_mode=mode.value if mode else None,
+                    kill_switch_needs_attention=self._kill_switch_needs_attention,
                     failure_reason=failure,
                     # 판정 경고 영속(P6 Task 7c, 결정 #36) — 메모리 소실
                     # 방지. 상한: 마지막 200건(폭주 방어, 최신 우선).
@@ -658,32 +705,63 @@ class TradingService(BackgroundRunService):
         positions = {pos.symbol: pos for _pid, pos in rows}
         db_positions = []
         for pid, pos in rows:
-            order_nos = await asyncio.to_thread(
-                self._store.submitted_order_nos, pid)
-            db_positions.append(DbPosition(pos, order_nos))
+            order_nos, unmanaged = await asyncio.gather(
+                asyncio.to_thread(self._store.submitted_order_nos, pid),
+                asyncio.to_thread(self._store.unmanaged_quantity, pid))
+            db_positions.append(DbPosition(
+                pos, order_nos, unmanaged_qty=unmanaged))
         applied, open_orders = await self._run_reconcile(db_positions,
                                                          positions)
         live_prices = {o.order_no: o.order_price for o in open_orders}
-        settled = False
+        settled_symbols: set[str] = set()
         for action in applied:
             if action.kind is ReconcileKind.RESUME_ENTRY_WATCH:
+                await self._restore_order_id(action.symbol, action.watch_order_no)
                 await self._resume_entry(positions[action.symbol],
                                          action.watch_order_no,
                                          live_prices.get(action.watch_order_no, 0))
-            elif action.kind in (ReconcileKind.CANCEL_AND_SETTLE_ENTRY,
-                                 ReconcileKind.CANCEL_AND_REWATCH):
-                settled = True
-        if settled:
+            if action.cancel_order_no is not None:
+                settled_symbols.add(action.symbol)
+        if settled_symbols:
             # 취소~적용 사이 추가 체결 레이스 — 잔고 재조회로 최종 수량 재확정
             # (P5-T6c 트레이더 I3)
-            await self._align_open_with_balance()
+            await self._align_open_with_balance(settled_symbols)
 
     async def _run_reconcile(self, db_positions, positions):
         """decide→apply→경고 취합→pos_ids 정합→RESUME_EXIT 시드 — 재기동/
         미니 reconcile 공통 골격(개발자 P5-T7 #3 중복 제거). 브로커 상태를
         못 읽으면 예외 전파(블라인드 기동 금지 — run 실패로 표면화)."""
         open_orders = await self._orders.get_open_orders()
+        live_by_no = {order.order_no: order for order in open_orders}
         balance = await self._account.get_balance()
+        # ka10075의 최초 결측은 잔고가 양수여도 주문 소멸 근거가 아니다.
+        # PENDING_ENTRY는 정상 주문 polling과 같이 연속 부재를 확인하고,
+        # kt00018도 같은 유예 뒤 최신 쌍으로 다시 읽는다.
+        needs_entry_order_recheck = any(
+            db.position.state is PositionState.PENDING_ENTRY
+            and not any(order_no in live_by_no for order_no in db.order_nos)
+            for db in db_positions)
+        if needs_entry_order_recheck:
+            await self._sleep(self._config.poll_interval_sec * 2)
+            # 주문 부재를 먼저 확인한 뒤의 잔고만 terminal 근거로 쓴다.
+            open_orders = await self._orders.get_open_orders()
+            live_by_no = {order.order_no: order for order in open_orders}
+            balance = await self._account.get_balance()
+            held_symbols = {
+                position.symbol for position in balance.positions
+                if position.quantity > 0}
+            needs_post_absence_balance_recheck = any(
+                db.position.state is PositionState.PENDING_ENTRY
+                and db.position.symbol not in held_symbols
+                and not any(
+                    order_no in live_by_no for order_no in db.order_nos)
+                for db in db_positions)
+            if needs_post_absence_balance_recheck:
+                await self._sleep(self._config.poll_interval_sec * 2)
+                balance = await self._account.get_balance()
+        self._broker_held_symbols = {
+            position.symbol for position in balance.positions
+            if position.quantity > 0}
         actions = reconcile_decide(db_positions, open_orders, balance,
                                    self._in_entry_window(self._clock()))
         applied, warnings = await apply_reconcile(
@@ -695,7 +773,16 @@ class TradingService(BackgroundRunService):
         # 매 run 시작과 미니 reconcile 양쪽에서 도는 핵심 경로)
         for warning in warnings:
             self._warn_once(warning)
+        fatal_reconcile = False
         for action in applied:
+            if action.kind in {
+                    ReconcileKind.OWNERSHIP_AMBIGUOUS,
+                    ReconcileKind.CANCEL_FAILED}:
+                self._kill_switch_needs_attention = True
+            if (action.kind is ReconcileKind.CANCEL_FAILED
+                    or (action.kind is ReconcileKind.OWNERSHIP_AMBIGUOUS
+                        and action.position is None)):
+                fatal_reconcile = True
             # 종결 판정(CLOSE/FAIL_ENTRY)은 보유 집합에서 즉시 제거(개발자
             # P5-T7 Critical #1 — 방치 시 그 심볼 재진입이 막히고 stale
             # 항목이 max_positions 슬롯·positions_count를 오염)
@@ -703,10 +790,55 @@ class TradingService(BackgroundRunService):
                     and action.position.state in (PositionState.CLOSED,
                                                   PositionState.ENTRY_FAILED)):
                 self._pos_ids.pop(action.symbol, None)
-            if action.kind is ReconcileKind.RESUME_EXIT_WATCH:
-                self._monitor.track_existing_exit(positions[action.symbol],
-                                                  action.watch_order_no)
+            if (action.watch_order_no is not None
+                    and action.kind in {
+                        ReconcileKind.RESUME_EXIT_WATCH,
+                        ReconcileKind.OWNERSHIP_AMBIGUOUS}):
+                await self._restore_order_id(action.symbol, action.watch_order_no)
+                open_order = live_by_no.get(action.watch_order_no)
+                original = (
+                    action.position
+                    if (action.kind is ReconcileKind.OWNERSHIP_AMBIGUOUS
+                        and action.position is not None)
+                    else positions[action.symbol])
+                if open_order is None:
+                    self._monitor.track_existing_exit(
+                        original, action.watch_order_no)
+                    continue
+                order_id = self._order_ids.get(action.watch_order_no)
+                reported = (
+                    await asyncio.to_thread(
+                        self._store.latest_fill_cumulative, order_id)
+                    if order_id is not None else 0)
+                reported = max(0, min(open_order.order_qty, reported))
+                self._monitor.track_existing_exit(
+                    original, action.watch_order_no,
+                    est_price=(
+                        open_order.order_price
+                        if open_order.order_price > 0 else None),
+                    order_qty=open_order.order_qty,
+                    remaining_qty=open_order.unfilled_qty,
+                    reported_cumulative_qty=reported,
+                    fill_event_pending=(
+                        open_order.order_qty - open_order.unfilled_qty
+                        > reported))
+        if fatal_reconcile:
+            raise RuntimeError(
+                "reconcile safety state could not be established")
         return applied, open_orders
+
+    async def _restore_order_id(self, symbol: str, order_no: str | None) -> None:
+        if order_no is None:
+            return
+        pos_id = self._pos_ids.get(symbol)
+        if pos_id is None:
+            return
+        order_id = await asyncio.to_thread(
+            self._store.submitted_order_id, pos_id, order_no)
+        if order_id is None:
+            logger.error("submitted source order missing for %s", symbol)
+            return
+        self._order_ids[order_no] = order_id
 
     async def _resume_entry(self, pos: TradePosition, order_no: str,
                             limit_price: int) -> None:
@@ -783,7 +915,10 @@ class TradingService(BackgroundRunService):
         quotes = {md.quote.symbol: md
                   for md in await self._orders.get_quotes(symbols)}
         deposit = await self._account.get_deposit()
-        held = set(self._pos_ids)
+        # 시작 대사에서 확인한 DB 밖 수동/고아 보유도 중복 진입을 막는다.
+        # kt00018 종목 합계를 새 주문 체결량으로 오귀속하고 수동 보유까지
+        # 자동 청산하는 위험을 fail-closed한다.
+        held = set(self._pos_ids) | self._broker_held_symbols
         candidates = []
         # select_entries 밖에서 확정되는 드롭(사전 필터·쿨다운)도 전부
         # DroppedCandidate로 수렴 — 래치 판정이 분류 필드만 읽는다(계획
@@ -858,6 +993,16 @@ class TradingService(BackgroundRunService):
                 self._warn_once(
                     f"{plan.symbol}: pre-entry requote failed — using batch "
                     "snapshot")
+            pre_entry_balance = await self._account.get_balance()
+            existing_qty = sum(
+                position.quantity for position in pre_entry_balance.positions
+                if position.symbol == plan.symbol and position.quantity > 0)
+            if existing_qty > 0:
+                self._broker_held_symbols.add(plan.symbol)
+                self._warn_once(
+                    f"{plan.symbol}: entry blocked — broker already holds "
+                    "this symbol immediately before order")
+                continue
             ask = md.ask if md.ask > 0 else md.quote.price
             pending = TradePosition(
                 symbol=plan.symbol, name=plan.name, market=plan.market,
@@ -904,9 +1049,93 @@ class TradingService(BackgroundRunService):
                 symbol, entered.quantity, entered.entry_price,
                 entered.entry_price * entered.quantity,
                 entered.entry_phase.value if entered.entry_phase else "-")
-            await asyncio.to_thread(self._store.save_position_snapshot,
-                                    pos_id, entered)
-            await self._verify_entry_with_balance(pos_id, entered)
+            verified = await self._verify_entry_with_balance(entered)
+            if verified is None:
+                self._entry_fill_observations.pop(entered.symbol, None)
+                await asyncio.to_thread(
+                    self._store.save_position_snapshot, pos_id,
+                    replace(entered, state=PositionState.CLOSED,
+                            closed_at=self._clock()))
+                self._pos_ids.pop(entered.symbol, None)
+                return
+            order_id = (
+                self._order_ids.get(outcome.order_no)
+                if outcome.order_no is not None else None)
+            if order_id is None:
+                self._entry_fill_observations.pop(entered.symbol, None)
+                self._warn_once(
+                    f"{verified.symbol}: verified entry has no recorded "
+                    "source order — fill alert unavailable, monitoring continues")
+                await _await_terminal(asyncio.to_thread(
+                    self._store.save_position_snapshot_with_audit_gap,
+                    pos_id, verified,
+                    gap_kind="entry_fill_event_unavailable",
+                    unmanaged_qty=self._unmanaged_baselines.get(
+                        entered.symbol, 0)))
+                await self._quarantine_mixed_ownership(pos_id, verified)
+                if outcome.requires_reconcile:
+                    await self._mini_reconcile(symbol)
+                return
+            observed = self._entry_fill_observations.get(entered.symbol)
+            # kt00018은 종목 계좌합계이므로 단일 주문 체결수량으로 귀속하지
+            # 않는다. 주문 polling이 관측한 누적을 event facts에 쓰고,
+            # 잔고는 시스템 감시 snapshot 검증에만 사용한다.
+            observed_cumulative = (
+                observed[1].get("cumulative_fill_qty")
+                if observed is not None else None)
+            order_cumulative = (
+                observed_cumulative
+                if type(observed_cumulative) is int
+                else entered.quantity)
+            order_cumulative = max(0, min(plan.quantity, order_cumulative))
+            remaining = plan.quantity - order_cumulative
+            kind = ("entry_partial_fill" if remaining > 0
+                    else "entry_filled")
+            observed_state = (
+                observed[1].get("remaining_order_state")
+                if observed is not None else None)
+            async def persist_entry_fill():
+                last_error = None
+                for _attempt in range(3):
+                    try:
+                        await asyncio.to_thread(
+                            self._store.save_position_snapshot_with_fill_event,
+                            pos_id, verified, order_id=order_id, kind=kind,
+                            order_qty=plan.quantity,
+                            fill_qty=order_cumulative,
+                            cumulative_fill_qty=order_cumulative,
+                            remaining_qty=remaining,
+                            avg_fill_price=verified.entry_price,
+                            price_confidence="estimated",
+                            unmanaged_qty=self._unmanaged_baselines.get(
+                                entered.symbol, 0),
+                            remaining_order_state=(
+                                observed_state
+                                if remaining > 0
+                                and isinstance(observed_state, str)
+                                else "unknown" if remaining > 0 else "none"))
+                        return None
+                    except Exception as exc:  # noqa: BLE001
+                        last_error = exc
+                await asyncio.to_thread(
+                    self._store.save_position_snapshot_with_audit_gap,
+                    pos_id, verified,
+                    gap_kind="entry_fill_event_unavailable",
+                    unmanaged_qty=self._unmanaged_baselines.get(
+                        entered.symbol, 0))
+                return last_error
+
+            last_error = await _await_terminal(persist_entry_fill())
+            if last_error is not None:
+                # 체결 후 알림 저장 장애가 보유 감시를 중단시키지 않게 snapshot
+                # 안전성을 우선한다. audit gap은 warning으로 검색 가능하게
+                # 남기며 다음 재기동 대사가 상태를 계속 추적한다.
+                self._warn_once(
+                    f"{verified.symbol}: entry fill audit persistence failed "
+                    f"({type(last_error).__name__}) — position monitoring "
+                    "continues")
+            await self._quarantine_mixed_ownership(pos_id, verified)
+            self._entry_fill_observations.pop(entered.symbol, None)
             if outcome.requires_reconcile:
                 await self._mini_reconcile(symbol)
             return
@@ -924,8 +1153,8 @@ class TradingService(BackgroundRunService):
         self._warn_once(f"{symbol}: entry failed — "
                               f"{outcome.failure_reason}")
 
-    async def _verify_entry_with_balance(self, pos_id: int,
-                                         entered: TradePosition) -> None:
+    async def _verify_entry_with_balance(
+            self, entered: TradePosition) -> TradePosition | None:
         """진입 직후 잔고 대사(kt00018) — 수량·평단을 실측으로 확정하고 잔고
         결측이면 유령 포지션 해소(6a C1 방어선 ⓒ).
 
@@ -947,84 +1176,133 @@ class TradingService(BackgroundRunService):
             self._warn_once(
                 f"{entered.symbol}: entered but balance shows none "
                 "(2 checks) — phantom position closed (alarm)")
-            await asyncio.to_thread(
-                self._store.save_position_snapshot, pos_id,
-                replace(entered, state=PositionState.CLOSED,
-                        closed_at=self._clock()))
-            self._pos_ids.pop(entered.symbol, None)
-            return
+            return None
+        if broker_pos.quantity > entered.quantity:
+            # kt00018은 계좌 종목 합계다. 주문 관측 수량보다 큰 초과분은
+            # 수동/고아 보유일 수 있으므로 자동매매 소유로 흡수하지 않는다.
+            self._warn_once(
+                f"{entered.symbol}: broker balance exceeds observed entry "
+                "quantity — excess left unmanaged, manual review required")
+            self._unmanaged_baselines[entered.symbol] = (
+                broker_pos.quantity - entered.quantity)
+            return entered
         if (broker_pos.quantity != entered.quantity
                 or broker_pos.avg_price != entered.entry_price):
-            corrected = replace(
+            return replace(
                 entered, quantity=broker_pos.quantity,
-                entry_price=broker_pos.avg_price,
-                peak_price=max(entered.peak_price, broker_pos.avg_price))
-            await asyncio.to_thread(self._store.save_position_snapshot,
-                                    pos_id, corrected)
+                entry_price=(
+                    broker_pos.avg_price
+                    if broker_pos.quantity == entered.quantity
+                    else entered.entry_price),
+                peak_price=max(
+                    entered.peak_price,
+                    broker_pos.avg_price
+                    if broker_pos.quantity == entered.quantity
+                    else entered.entry_price))
+        return entered
+
+    async def _quarantine_mixed_ownership(
+            self, pos_id: int, entered: TradePosition) -> None:
+        """동일 종목 외부 보유가 섞인 전략 포지션은 자동 매도 대상에서 격리."""
+        unmanaged = self._unmanaged_baselines.get(entered.symbol, 0)
+        if unmanaged <= 0:
+            return
+        quarantined = replace(
+            entered, state=PositionState.EXITING, exit_phase=None)
+        await _await_terminal(asyncio.to_thread(
+            self._store.save_position_snapshot_state_only,
+            pos_id, quarantined))
+        self._kill_switch_needs_attention = True
+        self._warn_once(
+            f"{entered.symbol}: mixed managed/unmanaged ownership detected "
+            "after entry — EXITING retained; automatic sell disabled, "
+            "manual reconciliation required")
 
     # ── 감시/청산 후처리 ────────────────────────────────────────────────
 
     async def _post_actions(self, actions: list[ExitAction]) -> None:
-        for action in actions:
-            if action.state is PositionState.CLOSED:
-                # 쿨다운 근거는 DB closed_at(§8-1 — recent_closed_symbols).
-                # 가격·손익 병기(트레이더 T7c 권고): "entry filled"와 grep
-                # 대칭 — 진입은 단가/금액이 보이는데 청산이 사유만 남으면
-                # 하루 매매를 로그로 추적하다 "얼마에 팔았나"에서 끊긴다.
-                # None(추정가 미상 — reconcile 시드 등)은 그대로 노출해
-                # "가격 미상"을 정직하게 남긴다(I4 계약 보존).
-                logger.info(
-                    "position closed: %s (%s) qty=%d price=%s pnl=%s",
-                    action.symbol, action.reason.value, action.quantity,
-                    action.exit_price, action.realized_pnl)
         if not any(a.requires_reconcile for a in actions):
+            for action in actions:
+                if action.state is PositionState.CLOSED:
+                    logger.info(
+                        "position closed: %s (%s) qty=%d price=%s pnl=%s",
+                        action.symbol, action.reason.value, action.quantity,
+                        action.exit_price, action.realized_pnl)
             self._forget_closed(actions)
             return
         balance = await self._account.get_balance()
         held = {p.symbol: p for p in balance.positions if p.quantity > 0}
+        unresolved_symbols: set[str] = set()
         for action in actions:
             if not action.requires_reconcile:
                 continue
             broker_pos = held.get(action.symbol)
-            if (action.state is PositionState.CLOSED
-                    and broker_pos is not None):
-                # 하드 게이트(P5-T6c 보안 #2): CLOSED인데 잔고 잔존 —
-                # 오판 확정. 재오픈해 감시로 복귀.
+            if action.state is PositionState.CLOSED:
+                if action.ownership_quarantined:
+                    unresolved_symbols.add(action.symbol)
+                    self._kill_switch_needs_attention = True
+                    self._warn_once(
+                        f"{action.symbol}: ownership quarantine remains "
+                        "after tracked SELL disappearance — manual release "
+                        "required")
+                    continue
                 pos_id = self._pos_ids.get(action.symbol)
                 if pos_id is None:
-                    # 방어선이 조용히 무력화되면 안 된다(개발자 P5-T7 #6)
-                    logger.error("CLOSED-with-holdings for %s but no tracked "
-                                 "position id — manual intervention",
-                                 action.symbol)
+                    logger.error(
+                        "exit reconciliation for %s has no tracked position "
+                        "id — manual intervention", action.symbol)
+                    unresolved_symbols.add(action.symbol)
+                    self._kill_switch_needs_attention = True
                     self._warn_once(
-                        f"{action.symbol}: CLOSED but balance holds "
-                        f"{broker_pos.quantity} and position id unknown — "
-                        "manual intervention required")
+                        f"{action.symbol}: exit reconciliation has no "
+                        "position id — manual intervention required")
                     continue
-                # market은 방금 CLOSED로 영속된 원본 행에서(트레이더 C3 —
-                # open_positions는 CLOSED 제외라 kospi 폴백 오분류가 났었다)
                 origin = await asyncio.to_thread(self._store.get_position,
                                                  pos_id)
-                reopened = TradePosition(
-                    symbol=action.symbol, name=broker_pos.name,
-                    market=origin.market if origin else "kospi",
-                    state=PositionState.ENTERED,
-                    entry_price=broker_pos.avg_price,
-                    quantity=broker_pos.quantity,
-                    peak_price=broker_pos.avg_price,
-                    trailing_active=False, entered_at=self._clock())
-                await asyncio.to_thread(self._store.save_position_snapshot,
-                                        pos_id, reopened)
-                self._warn_once(
-                    f"{action.symbol}: CLOSED overturned — balance still "
-                    f"holds {broker_pos.quantity}, reopened for watch")
-        self._forget_closed(actions)
+                broker_total = (
+                    broker_pos.quantity if broker_pos is not None else 0)
+                # kt00018은 종목 계좌 합계라 외부 baseline과 전략 체결이
+                # 상쇄됐는지 구분할 수 없다. 실제 무보유(0)만 자동 종결한다.
+                ownership_confirms_exit = broker_total == 0
+                if not ownership_confirms_exit:
+                    # 주문별 체결 근거가 없는 소멸 뒤에는 계좌 합계의 양수
+                    # 잔량을 전략 잔량으로 재개방하거나 외부 baseline만
+                    # 남았다고 단정하지 않는다.
+                    unresolved_symbols.add(action.symbol)
+                    self._kill_switch_needs_attention = True
+                    self._warn_once(
+                        f"{action.symbol}: ownership is ambiguous after exit "
+                        "order disappearance — EXITING retained, manual "
+                        "review required")
+                    continue
+                if origin is None:
+                    unresolved_symbols.add(action.symbol)
+                    self._kill_switch_needs_attention = True
+                    self._warn_once(
+                        f"{action.symbol}: exit balance is zero but position "
+                        "snapshot is missing — manual intervention required")
+                    continue
+                confirmed = replace(
+                    origin, state=PositionState.CLOSED,
+                    exit_price=action.exit_price,
+                    exit_reason=action.reason,
+                    realized_pnl=action.realized_pnl,
+                    closed_at=self._clock(), exit_phase=None)
+                await _await_terminal(asyncio.to_thread(
+                    self._store.save_position_snapshot_state_only,
+                    pos_id, confirmed))
+                self._monitor.finalize_exit_reconciliation(action.symbol)
+                logger.info(
+                    "position closed: %s (%s) qty=%d price=%s pnl=%s",
+                    action.symbol, action.reason.value, action.quantity,
+                    action.exit_price, action.realized_pnl)
+        self._forget_closed([
+            action for action in actions
+            if action.symbol not in unresolved_symbols])
 
     def _forget_closed(self, actions: list[ExitAction]) -> None:
         for action in actions:
             if action.state is PositionState.CLOSED:
-                # 재오픈된 심볼은 위에서 snapshot이 ENTERED로 남으므로 여기서
-                # 매핑을 지워도 다음 사이클 _load_entered가 다시 채운다
                 self._pos_ids.pop(action.symbol, None)
 
     async def _liquidate_all(self, now: datetime) -> None:
@@ -1063,6 +1341,7 @@ class TradingService(BackgroundRunService):
                     self._warn_once(
                         f"{pos.symbol}: liquidation incomplete at market "
                         "close — EXIT_FAILED (still held)")
+                    self._kill_switch_needs_attention = True
                 if self._managed_liquidation_intent is not None:
                     try:
                         balance = await self._account.get_balance()
@@ -1097,6 +1376,9 @@ class TradingService(BackgroundRunService):
             liquidations = list(await asyncio.gather(
                 *[self._monitor.liquidate(pos, now) for pos in entered]))
             liquidations += await self._monitor.poll_once([], now)  # pending 확인
+            if any(action.state is PositionState.EXIT_FAILED
+                   for action in liquidations):
+                self._kill_switch_needs_attention = True
             await self._post_actions(liquidations)
             await self._sleep(self._monitor.recommended_delay(now))
 
@@ -1114,6 +1396,7 @@ class TradingService(BackgroundRunService):
             persist_phase=lambda phase: self._store.update_position(
                 pos_id, entry_phase=phase),
             on_order=self._record_order_for(pos_id),
+            on_fill=self._record_fill_observation,
             sleep=self._sleep, now=self._clock)
 
     def _record_order_for(self, pos_id: int | None):
@@ -1121,13 +1404,20 @@ class TradingService(BackgroundRunService):
             # est_krw = caps.check에 넘긴 발주 시점 추정 금액(지정가=limit,
             # 시장가=ref_price — P6-T1 트레이더 Critical: record_fill 미배선
             # 상태에서 시장가 금액의 유일한 시딩 원천)
-            self._store.record_order(
+            order_id = self._store.record_order(
                 self._run_id, pos_id, order_no=ack.order_no,
                 symbol=req.symbol, side=req.side.value,
                 order_style=req.style.value, req_price=req.limit_price,
                 req_qty=req.quantity, status=status,
                 resp_body={"ord_no": ack.order_no, "return_msg": ack.message},
                 est_krw=(req.limit_price or req.ref_price) * req.quantity)
+            if isinstance(order_id, int):
+                # 단위 테스트/재대사 보조 경로는 BackgroundRunService의
+                # _on_accepted를 거치지 않고 audit callback을 직접 호출한다.
+                # 그 경우에도 원 주문 귀속을 잃지 않게 지연 초기화한다.
+                if not hasattr(self, "_order_ids"):
+                    self._order_ids = {}
+                self._order_ids[ack.order_no] = order_id
         return record
 
     def _record_order_by_symbol(self, ack, req, status: str) -> None:
@@ -1136,11 +1426,71 @@ class TradingService(BackgroundRunService):
         pos_id = self._pos_ids.get(req.symbol)
         self._record_order_for(pos_id)(ack, req, status)
 
+    async def _record_fill_observation(
+            self, pos: TradePosition, facts: dict[str, object]) -> None:
+        """monitor가 실제로 관측한 부분체결만 원천 주문에 귀속한다.
+
+        ka10075에는 fill ID/체결가 detail이 없으므로 이 callback은 관측한
+        수량과 지정가 기반 estimated 가격만 남긴다. source order를 찾지
+        못하면 snapshot만 별도 커밋하지 않도록 fail-loud하고 재기동 대사에
+        맡긴다.
+        """
+        order_no = facts.get("order_no")
+        order_id = self._order_ids.get(order_no) if isinstance(order_no, str) else None
+        if order_id is None:
+            raise ValueError("fill observation has no recorded source order")
+        pos_id = self._pos_ids.get(pos.symbol)
+        if pos_id is None:
+            raise ValueError(f"fill observation has no position: {pos.symbol}")
+        if facts.get("kind") == "entry_partial_fill":
+            # kt00018 검증 전의 poll 수량은 취소 경합/전파 지연으로 바뀔 수
+            # 있다. 사건은 메모리에 보류하고 _apply_entry_outcome이 잔고
+            # 확인 뒤 정확한 snapshot과 함께 원자 저장한다.
+            self._entry_fill_observations[pos.symbol] = (pos, dict(facts))
+            return
+        async def persist_exit_fill():
+            last_error = None
+            for _attempt in range(3):
+                try:
+                    await asyncio.to_thread(
+                        self._store.save_position_snapshot_with_fill_event,
+                        pos_id, pos, order_id=order_id, kind=facts["kind"],
+                        order_qty=facts["order_qty"],
+                        fill_qty=facts["fill_qty"],
+                        cumulative_fill_qty=facts["cumulative_fill_qty"],
+                        remaining_qty=facts["remaining_qty"],
+                        avg_fill_price=facts["avg_fill_price"],
+                        price_confidence=facts["price_confidence"],
+                        remaining_order_state=facts["remaining_order_state"])
+                    return None
+                except Exception as exc:  # noqa: BLE001
+                    last_error = exc
+            await asyncio.to_thread(
+                self._store.save_position_snapshot_with_audit_gap,
+                pos_id, pos, gap_kind="exit_fill_event_unavailable")
+            return last_error
+
+        last_error = await _await_terminal(persist_exit_fill())
+        if last_error is not None:
+            # 체결 뒤 주문 추적/잔고 감시를 중단하지 않는다. 사건은 원자
+            # rollback되고, state-only snapshot과 durable audit-gap만 같은
+            # 후속 transaction에 남긴다.
+            self._warn_once(
+                f"{pos.symbol}: exit fill audit persistence failed "
+                f"({type(last_error).__name__}) — durable audit gap recorded")
+            # monitor가 같은 process의 다음 poll에서도 마지막 성공 누적
+            # 기준으로 재시도하도록 실패 신호를 보존한다.
+            raise RuntimeError("fill event deferred after durable audit gap")
+
     def _record_reconcile_cancel(self, ack, action) -> None:
         # 방향은 액션 유형에서 유추(진입 취소=buy, 청산 취소=sell — 보안
         # P5-T7 Minor: 하드코딩 심볼/방향은 감사 정확성 훼손)
-        side = ("sell" if action.kind is ReconcileKind.CANCEL_AND_REWATCH
-                else "buy")
+        side = (
+            action.cancel_side.value
+            if action.cancel_side is not None
+            else "sell"
+            if action.kind is ReconcileKind.CANCEL_AND_REWATCH
+            else "buy")
         self._store.record_order(
             self._run_id, self._pos_ids.get(action.symbol),
             order_no=ack.order_no, symbol=action.symbol, side=side,
@@ -1163,29 +1513,72 @@ class TradingService(BackgroundRunService):
         if not target:
             return
         pid, pos = target[0]
-        order_nos = await asyncio.to_thread(self._store.submitted_order_nos,
-                                            pid)
-        await self._run_reconcile([DbPosition(pos, order_nos)],
-                                  {pos.symbol: pos})
+        order_nos, unmanaged = await asyncio.gather(
+            asyncio.to_thread(self._store.submitted_order_nos, pid),
+            asyncio.to_thread(self._store.unmanaged_quantity, pid))
+        applied, _open_orders = await self._run_reconcile(
+            [DbPosition(pos, order_nos, unmanaged_qty=unmanaged)],
+            {pos.symbol: pos})
+        settled_symbols = {
+            action.symbol for action in applied
+            if action.cancel_order_no is not None}
+        if settled_symbols:
+            await self._align_open_with_balance(settled_symbols)
 
-    async def _align_open_with_balance(self) -> None:
-        """CANCEL_* 적용 직후 잔고 재확정(P5-T6c 트레이더 I3) — 취소와 체결이
-        경합한 심볼의 수량을 잔고 ground truth로 갱신."""
-        balance = await self._account.get_balance()
-        held = {p.symbol: p.quantity for p in balance.positions}
+    async def _align_open_with_balance(self, symbols: set[str]) -> None:
+        """CANCEL_* 적용 직후 잔고 재확정.
+
+        양수 계좌 합계는 동일 종목 수동 거래와 전략 수량을 분리하지 못하므로
+        불일치를 전략 수량으로 흡수하지 않고 EXITING/manual로 격리한다.
+        """
         rows, _ = await asyncio.to_thread(
             self._store.open_positions, self._run_environment)
-        for pid, pos in rows:
-            if pos.state is not PositionState.ENTERED:
-                continue
+        targets = [
+            (pid, pos) for pid, pos in rows
+            if pos.symbol in symbols and pos.state in {
+                PositionState.PENDING_ENTRY, PositionState.ENTERED}]
+        if not targets:
+            return
+        balance = await self._account.get_balance()
+        held = {p.symbol: p.quantity for p in balance.positions}
+        if any(held.get(pos.symbol, 0) == 0 for _pid, pos in targets):
+            # cancel ack와 kt00018 체결잔고 반영은 동기라는 근거가 없다.
+            await self._sleep(self._config.poll_interval_sec * 2)
+            balance = await self._account.get_balance()
+            held = {p.symbol: p.quantity for p in balance.positions}
+        for pid, pos in targets:
             broker_qty = held.get(pos.symbol, 0)
-            if broker_qty > 0 and broker_qty != pos.quantity:
-                await asyncio.to_thread(
-                    self._store.save_position_snapshot, pid,
-                    replace(pos, quantity=broker_qty))
+            unmanaged = await asyncio.to_thread(
+                self._store.unmanaged_quantity, pid)
+            if broker_qty == 0:
+                terminal = (
+                    replace(
+                        pos, state=PositionState.ENTRY_FAILED,
+                        entry_phase=None)
+                    if pos.state is PositionState.PENDING_ENTRY
+                    else replace(
+                        pos, state=PositionState.CLOSED,
+                        closed_at=self._clock(), entry_phase=None))
+                await _await_terminal(asyncio.to_thread(
+                    self._store.save_position_snapshot, pid, terminal))
+                self._pos_ids.pop(pos.symbol, None)
                 self._warn_once(
-                    f"{pos.symbol}: quantity aligned to balance "
-                    f"({pos.quantity}→{broker_qty})")
+                    f"{pos.symbol}: balance is zero after entry cancel — "
+                    f"{terminal.state.value} confirmed")
+                continue
+            if (pos.state is PositionState.PENDING_ENTRY
+                    or unmanaged > 0 or broker_qty != pos.quantity):
+                quarantined = replace(
+                    pos, state=PositionState.EXITING, exit_phase=None)
+                await _await_terminal(asyncio.to_thread(
+                    self._store.save_position_snapshot, pid, quarantined))
+                self._kill_switch_needs_attention = True
+                self._warn_once(
+                    f"{pos.symbol}: balance ownership is ambiguous after "
+                    f"entry cancel (db_managed={pos.quantity}, "
+                    f"unmanaged_baseline={unmanaged}, "
+                    f"broker_total={broker_qty}) — EXITING retained; "
+                    "automatic sell disabled, manual reconciliation required")
 
     # ── 조회/시간 유틸 ──────────────────────────────────────────────────
 
