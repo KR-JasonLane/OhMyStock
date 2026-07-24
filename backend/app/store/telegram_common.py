@@ -8,6 +8,7 @@ from typing import Any
 from app.domain.notifications.models import CommandKind
 
 HASH_RE = re.compile(r"^[0-9a-f]{64}$")
+VERSIONED_HASH_RE = re.compile(r"^v1:[0-9a-f]{64}$")
 MAX_JSON_BYTES = 64 * 1024
 MAX_JSON_DEPTH = 12
 MAX_JSON_ITEMS = 2_000
@@ -38,6 +39,13 @@ def positive_int(value: object, field: str) -> int:
 def hash64(value: str, field: str) -> str:
     if not HASH_RE.fullmatch(value):
         raise ValueError(f"{field} must be a lowercase SHA-256 hex digest")
+    return value
+
+
+def external_hash(value: str, field: str) -> str:
+    """Only the current keyed external identifier format may be persisted."""
+    if not VERSIONED_HASH_RE.fullmatch(value):
+        raise ValueError(f"{field} must be a versioned HMAC-SHA-256 digest")
     return value
 
 

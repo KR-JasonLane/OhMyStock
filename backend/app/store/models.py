@@ -327,7 +327,7 @@ class TelegramUpdateRow(Base):
         Index("ix_telegram_updates_claim", "status", "lease_until", "update_id"),
         Index("ix_telegram_updates_retention", "status", "finished_at", "update_id"))
     update_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    operator_hash: Mapped[str] = mapped_column(String(64))
+    operator_hash: Mapped[str] = mapped_column(String(67))
     command: Mapped[str] = mapped_column(String(24))
     argument_hash: Mapped[str | None] = mapped_column(String(64))
     status: Mapped[str] = mapped_column(String(24))
@@ -347,8 +347,8 @@ class TelegramConfirmationRow(Base):
         BigInteger().with_variant(Integer, "sqlite"), primary_key=True,
         autoincrement=True)
     token_hash: Mapped[str] = mapped_column(String(64), unique=True)
-    operator_hash: Mapped[str] = mapped_column(String(64))
-    chat_hash: Mapped[str] = mapped_column(String(64))
+    operator_hash: Mapped[str] = mapped_column(String(67))
+    chat_hash: Mapped[str] = mapped_column(String(67))
     command: Mapped[str] = mapped_column(String(24))
     state_fingerprint: Mapped[str] = mapped_column(String(128))
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
@@ -358,7 +358,7 @@ class TelegramConfirmationRow(Base):
 
 class TelegramConfirmationLockRow(Base):
     __tablename__ = "telegram_confirmation_locks"
-    operator_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    operator_hash: Mapped[str] = mapped_column(String(67), primary_key=True)
 
 
 class TelegramCommandExecutionRow(Base):
@@ -398,7 +398,7 @@ class TelegramRejectedUpdateCounterRow(Base):
     __table_args__ = (
         Index("ix_telegram_rejected_retention", "minute", "subject_hash"),)
     minute: Mapped[datetime] = mapped_column(DateTime(timezone=True), primary_key=True)
-    subject_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    subject_hash: Mapped[str] = mapped_column(String(67), primary_key=True)
     count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
 
 

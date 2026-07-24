@@ -21,6 +21,9 @@ class CommandResult:
     kind: str
     outbox_sensitive: bool = False
     confirmation_token: str | None = None
+    response_text: str | None = None
+    ephemeral: bool = False
+    confirmation_expires_at: datetime | None = None
 
 
 class CommandProcessor:
@@ -86,7 +89,18 @@ class CommandProcessor:
         if intent is None:
             status = await asyncio.to_thread(self._commands.intent_status, created.id)
             if status in {"succeeded", "failed", "needs_attention"}:
-                return CommandResult(status)
+                # The control effect may have reached terminal state immediately
+                # before response materialization. Read-only queries are safe to
+                # rebuild; state-changing commands get a conservative terminal
+                # acknowledgement and are never replayed.
+                if kind in {
+                        CommandKind.STATUS, CommandKind.ACCOUNT,
+                        CommandKind.POSITIONS, CommandKind.HELP}:
+                    result, _terminal = await self._call_control(created)
+                    return result
+                return CommandResult(
+                    status,
+                    response_text=self._terminal_response(kind, status))
             return CommandResult("deferred")
         return await self._execute_intent(intent, claimed.update_id)
 
@@ -101,11 +115,35 @@ class CommandProcessor:
         await asyncio.to_thread(
             self._commands.record_audit, claimed.update_id, None,
             "confirmation_issued", "confirmation_required")
-        return CommandResult("confirmation_required", confirmation_token=issued.raw_token)
+        return CommandResult(
+            "confirmation_required",
+            confirmation_token=issued.raw_token,
+            response_text=f"/confirm {issued.raw_token}",
+            ephemeral=True,
+            confirmation_expires_at=issued.expires_at,
+        )
 
     async def _consume_confirmation(self, claimed) -> CommandResult:
+        existing = await asyncio.to_thread(
+            self._commands.intent_for_update, claimed.update_id)
+        if existing is not None:
+            intent, status = existing
+            if status in {"succeeded", "failed", "needs_attention"}:
+                return CommandResult(
+                    status,
+                    response_text=(
+                        f"확인된 {intent.command} 명령의 기존 처리 결과: {status}"))
+            if status in {"pending", "claimed"}:
+                recovered = await asyncio.to_thread(
+                    self._commands.claim_intent_by_id,
+                    intent.id, self._worker_id, self._execution_lease_s)
+                if recovered is not None:
+                    return await self._execute_intent(
+                        recovered, claimed.update_id)
+            return CommandResult("deferred")
         if claimed.argument_hash is None:
-            return CommandResult("confirmation_invalid")
+            return CommandResult(
+                "confirmation_invalid", response_text="확인 토큰이 유효하지 않습니다.")
         pending = await asyncio.to_thread(
             self._commands.pending_confirmation, claimed.argument_hash,
             claimed.operator_hash, self._chat_hash, self._now())
@@ -113,14 +151,16 @@ class CommandProcessor:
             await asyncio.to_thread(
                 self._commands.record_audit, claimed.update_id, None,
                 "confirmation_consumed", "confirmation_invalid")
-            return CommandResult("confirmation_invalid")
+            return CommandResult(
+                "confirmation_invalid", response_text="확인 토큰이 유효하지 않습니다.")
         kind = CommandKind(pending.command)
         if kind is CommandKind.RESUME:
             fingerprint, targets = self._scheduler_fingerprint(), ()
         elif kind is CommandKind.LIQUIDATE_ALL:
             fingerprint, targets = await self._liquidation_context()
         else:  # A confirmation row must only ever represent the two risky commands.
-            return CommandResult("confirmation_invalid")
+            return CommandResult(
+                "confirmation_invalid", response_text="확인 토큰이 유효하지 않습니다.")
         intent = await asyncio.to_thread(
             self._commands.consume_and_create_intent,
             claimed.argument_hash, claimed.operator_hash, self._chat_hash,
@@ -130,7 +170,8 @@ class CommandProcessor:
             await asyncio.to_thread(
                 self._commands.record_audit, claimed.update_id, None,
                 "confirmation_consumed", "confirmation_invalid")
-            return CommandResult("confirmation_invalid")
+            return CommandResult(
+                "confirmation_invalid", response_text="확인 토큰이 유효하지 않습니다.")
         intent = await asyncio.to_thread(
             self._commands.claim_intent_by_id, intent.id, self._worker_id,
             self._execution_lease_s)
@@ -229,6 +270,16 @@ class CommandProcessor:
         finally:
             self._accepted_monitors.pop(intent.id, None)
 
+    async def shutdown_accepted_monitors(self) -> None:
+        """Stop accepted monitors and persist unfinished execution as unknown."""
+        tasks = tuple(self._accepted_monitors.values())
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        await asyncio.to_thread(
+            self._commands.mark_owned_running_unknown, self._worker_id)
+
     async def _maintain_execution_lease(self, intent_id: str, version: list[int],
                                         stopped: asyncio.Event,
                                         lease_lost: asyncio.Event) -> None:
@@ -247,38 +298,155 @@ class CommandProcessor:
     async def _call_control(self, intent) -> tuple[CommandResult, str | None]:
         kind = CommandKind(intent.command)
         if kind is CommandKind.STATUS:
-            await self._control.system_status()
-            return CommandResult("status"), "succeeded"
+            status = await self._control.system_status()
+            return CommandResult(
+                "status", response_text=self._render_status(status)), "succeeded"
         if kind is CommandKind.ACCOUNT:
-            await self._control.account_summary()
-            return CommandResult("account", outbox_sensitive=True), "succeeded"
+            summary = await self._control.account_summary()
+            return CommandResult(
+                "account", outbox_sensitive=True,
+                response_text=self._render_account(summary)), "succeeded"
         if kind is CommandKind.POSITIONS:
-            await self._control.open_positions_summary()
-            return CommandResult("positions", outbox_sensitive=True), "succeeded"
+            summary = await self._control.open_positions_summary()
+            return CommandResult(
+                "positions", outbox_sensitive=True,
+                response_text=self._render_positions(summary)), "succeeded"
         if kind is CommandKind.HELP:
-            return CommandResult("help"), "succeeded"
+            return CommandResult(
+                "help",
+                response_text=(
+                    "지원 명령: /status /account /positions /help "
+                    "/pause /stop /resume /liquidate_all /confirm")), "succeeded"
         if kind is CommandKind.PAUSE:
-            await self._control.pause_scheduler()
-            return CommandResult("pause"), "succeeded"
+            snapshot = await self._control.pause_scheduler()
+            if isinstance(snapshot, dict) and snapshot.get("applied") is False:
+                return CommandResult(
+                    "needs_attention",
+                    response_text="스케줄러가 비활성 상태라 일시정지를 적용하지 못했습니다."
+                ), "needs_attention"
+            return CommandResult(
+                "pause", response_text="스케줄러를 일시정지했습니다."), "succeeded"
         if kind is CommandKind.STOP:
             applied = await self._control.stop_new_entries(intent.id)
             if applied:
-                return CommandResult("stop"), "succeeded"
-            return CommandResult("needs_attention"), "needs_attention"
+                return CommandResult(
+                    "stop",
+                    response_text=self._terminal_response(
+                        CommandKind.STOP, "succeeded")), "succeeded"
+            return CommandResult(
+                "needs_attention",
+                response_text="신규 진입 중지를 적용하지 못했습니다."
+            ), "needs_attention"
         if kind is CommandKind.RESUME:
-            await self._control.resume_scheduler(expected=intent.state_fingerprint)
-            return CommandResult("resume"), "succeeded"
+            snapshot = await self._control.resume_scheduler(
+                expected=intent.state_fingerprint)
+            if isinstance(snapshot, dict) and snapshot.get("applied") is False:
+                return CommandResult(
+                    "needs_attention",
+                    response_text="스케줄러가 비활성 상태라 재개하지 못했습니다."
+                ), "needs_attention"
+            return CommandResult(
+                "resume", response_text="스케줄러를 재개했습니다."), "succeeded"
         if kind is CommandKind.LIQUIDATE_ALL:
             outcome = await self._control.liquidate_managed(
                 intent.id, self._targets_for_control(intent.targets),
                 expected_run_id=self._context_run_id(intent.targets))
             if outcome.status in {"succeeded", "failed", "needs_attention"}:
-                return CommandResult(outcome.status), outcome.status
+                return CommandResult(
+                    outcome.status,
+                    response_text=f"청산 요청 결과: {outcome.status}",
+                ), outcome.status
             # "accepted"/"in_progress" means TradingService owns execution.
             # Its terminal reconciliation is deliberately performed after this
             # running intent becomes unknown, never by placing a second sell.
-            return CommandResult("liquidation_accepted"), None
+            return CommandResult(
+                "liquidation_accepted",
+                response_text="관리 포지션 청산 요청을 접수했습니다."), None
         raise ValueError(f"unsupported intent command: {intent.command}")
+
+    @staticmethod
+    def _field(value: Any, name: str, default: Any = None) -> Any:
+        return value.get(name, default) if isinstance(value, dict) else getattr(
+            value, name, default)
+
+    @classmethod
+    def _render_status(cls, status: Any) -> str:
+        scheduler = cls._field(status, "scheduler")
+        trading = cls._field(status, "trading")
+        telegram = cls._field(status, "telegram")
+        poller = cls._field(telegram, "poller")
+        sender = cls._field(telegram, "sender")
+        outbox = cls._field(sender, "outbox")
+        commands = cls._field(telegram, "commands")
+        reconciliation = cls._field(telegram, "reconciliation")
+        degraded = (
+            cls._field(poller, "dead") is True
+            or cls._field(commands, "dead") is True
+            or cls._field(reconciliation, "dead") is True
+            or cls._field(outbox, "state") == "dead")
+        return "\n".join((
+            "시스템 상태",
+            f"- 스케줄러: enabled={cls._field(scheduler, 'enabled', scheduler is not None)}, "
+            f"paused={cls._field(scheduler, 'paused')}, "
+            f"dead={cls._field(scheduler, 'dead')}",
+            f"- 거래: run_id={cls._field(trading, 'run_id')}, "
+            f"status={cls._field(trading, 'status')}, "
+            f"positions={cls._field(trading, 'positions_count')}, "
+            f"kill_switch={cls._field(trading, 'kill_switch')}",
+            f"- Telegram: enabled={cls._field(telegram, 'enabled', False)}, "
+            f"dead={cls._field(telegram, 'dead')}, "
+            f"degraded={degraded}, poller_dead={cls._field(poller, 'dead')}, "
+            f"commands_dead={cls._field(commands, 'dead')}, "
+            f"reconciliation_dead={cls._field(reconciliation, 'dead')}, "
+            f"last_poll={cls._field(poller, 'last_success_at')}, "
+            f"backoff={cls._field(poller, 'backoff_reason')}",
+            f"- Telegram 전달: state={cls._field(outbox, 'state')}, "
+            f"pending={cls._field(outbox, 'pending', 0)}, "
+            f"sending={cls._field(outbox, 'sending', 0)}, "
+            f"dead_letter={cls._field(outbox, 'dead_letter', 0)}",
+        ))
+
+    @staticmethod
+    def _terminal_response(kind: CommandKind, status: str) -> str:
+        if kind is CommandKind.STOP and status == "succeeded":
+            return (
+                "신규 진입만 중지했습니다. 기존 포지션 감시는 계속됩니다. "
+                "이 중지는 현재 실행 범위이며 재기동 또는 다음 거래일에는 "
+                "자동매매가 재개될 수 있습니다. 영속 정지는 설정을 변경하세요.")
+        return f"{kind.value} 명령의 기존 처리 결과: {status}"
+
+    @classmethod
+    def _render_account(cls, summary: Any) -> str:
+        failed = cls._field(summary, "failed_fields", ())
+        return "\n".join((
+            "계좌 요약",
+            f"- 주문가능금액: {cls._field(summary, 'available_deposit')}",
+            f"- 총평가금액: {cls._field(summary, 'total_eval')}",
+            f"- 평가손익: {cls._field(summary, 'total_profit')}",
+            f"- 실현손익: {cls._field(summary, 'realized_pnl')} "
+            f"({cls._field(summary, 'realized_pnl_confidence')})",
+            f"- 기준시각: {cls._field(summary, 'as_of')}",
+            f"- 출처: {cls._field(summary, 'source')}",
+            f"- 조회실패필드: {', '.join(failed) if failed else '없음'}",
+        ))
+
+    @classmethod
+    def _render_positions(cls, summary: Any) -> str:
+        positions = cls._field(summary, "positions", ()) or ()
+        corrupted = cls._field(summary, "corrupted_rows", ()) or ()
+        lines = ["관리 포지션"]
+        if not positions:
+            lines.append("- 없음")
+        for item in positions:
+            position_id, position = item if isinstance(item, tuple) else (None, item)
+            state = cls._field(position, "state")
+            state = getattr(state, "value", state)
+            lines.append(
+                f"- id={position_id}, symbol={cls._field(position, 'symbol')}, "
+                f"state={state}, quantity={cls._field(position, 'quantity')}, "
+                f"entry_price={cls._field(position, 'entry_price')}")
+        lines.append(f"- 손상 행 수: {len(corrupted)}")
+        return "\n".join(lines)
 
     async def reconcile_unknown(self) -> CommandResult | None:
         """Reconcile one abandoned execution without reissuing any command."""

@@ -16,7 +16,8 @@ from app.store.models import (TelegramCommandAuditRow, TelegramCommandExecutionR
                               TelegramConfirmationLockRow, TelegramConfirmationRow,
                               TelegramUpdateRow)
 from app.store.telegram_common import (aware as _aware, canonical_json,
-                                       command as valid_command, hash64,
+                                       command as valid_command, external_hash,
+                                       hash64,
                                        exact_nonnegative_int, identifier, positive_int,
                                        safe_identifier)
 
@@ -25,6 +26,7 @@ from app.store.telegram_common import (aware as _aware, canonical_json,
 class IssuedConfirmation:
     id: int
     raw_token: str
+    expires_at: datetime
 
 
 @dataclass(frozen=True)
@@ -53,8 +55,8 @@ class TelegramCommandStore:
         del expires_in_s  # security invariant: callers cannot weaken or extend the TTL.
         now, token = _aware(self._now()), secrets.token_urlsafe(32)
         digest = hashlib.sha256(token.encode()).hexdigest()
-        hash64(operator_hash, "operator_hash")
-        hash64(chat_hash, "chat_hash")
+        external_hash(operator_hash, "operator_hash")
+        external_hash(chat_hash, "chat_hash")
         valid_command(command)
         identifier(state_fingerprint, "state_fingerprint", 128)
         with self._sessions.begin() as session:
@@ -76,7 +78,7 @@ class TelegramCommandStore:
                 expires_at=now + timedelta(seconds=120), consumed_at=None, created_at=now)
             session.add(row)
             session.flush()
-            return IssuedConfirmation(row.id, token)
+            return IssuedConfirmation(row.id, token, row.expires_at)
 
     def consume_and_create_intent(
             self, argument_hash: str, operator_hash: str, chat_hash: str,
@@ -85,8 +87,8 @@ class TelegramCommandStore:
         now = _aware(now)
         update_id = exact_nonnegative_int(update_id, "update_id")
         hash64(argument_hash, "argument_hash")
-        hash64(operator_hash, "operator_hash")
-        hash64(chat_hash, "chat_hash")
+        external_hash(operator_hash, "operator_hash")
+        external_hash(chat_hash, "chat_hash")
         valid_command(command)
         with self._sessions.begin() as session:
             update_row = session.get(TelegramUpdateRow, update_id)
@@ -165,8 +167,8 @@ class TelegramCommandStore:
         """Return only the non-secret context needed to validate `/confirm`."""
         now = _aware(now)
         hash64(argument_hash, "argument_hash")
-        hash64(operator_hash, "operator_hash")
-        hash64(chat_hash, "chat_hash")
+        external_hash(operator_hash, "operator_hash")
+        external_hash(chat_hash, "chat_hash")
         with self._sessions() as session:
             row = session.scalar(select(TelegramConfirmationRow).where(
                 TelegramConfirmationRow.token_hash == argument_hash,
@@ -298,6 +300,23 @@ class TelegramCommandStore:
             row = session.get(TelegramCommandExecutionRow, intent_id)
             return None if row is None else row.status
 
+    def intent_for_update(
+            self, update_id: int) -> tuple[ClaimedIntent, str] | None:
+        """Read an execution before retrying a consumed confirmation update."""
+        update_id = exact_nonnegative_int(update_id, "update_id")
+        with self._sessions() as session:
+            row = session.scalar(select(TelegramCommandExecutionRow).where(
+                TelegramCommandExecutionRow.update_id == update_id).limit(1))
+            if row is None:
+                return None
+            import json
+            return (
+                ClaimedIntent(
+                    row.id, row.update_id, row.command, row.state_fingerprint,
+                    json.loads(row.targets_json), row.version),
+                row.status,
+            )
+
     def record_audit(self, update_id: int, intent_id: str | None, event: str,
                      result: str, error_kind: str | None = None) -> None:
         update_id = exact_nonnegative_int(update_id, "update_id")
@@ -326,6 +345,18 @@ class TelegramCommandStore:
                     status="unknown", owner=None, lease_until=None,
                     version=TelegramCommandExecutionRow.version + 1,
                     failure_kind="lease_expired"))
+            return result.rowcount
+
+    def mark_owned_running_unknown(self, owner: str) -> int:
+        """Hand this worker's unfinished effects to read-only reconciliation."""
+        owner = safe_identifier(owner, "owner")
+        with self._sessions.begin() as session:
+            result = session.execute(update(TelegramCommandExecutionRow).where(
+                TelegramCommandExecutionRow.status == "running",
+                TelegramCommandExecutionRow.owner == owner).values(
+                    status="unknown", owner=None, lease_until=None,
+                    version=TelegramCommandExecutionRow.version + 1,
+                    failure_kind="process_shutdown"))
             return result.rowcount
 
     def claim_reconciliation(self, owner: str, lease_s: int = 30) -> ClaimedIntent | None:

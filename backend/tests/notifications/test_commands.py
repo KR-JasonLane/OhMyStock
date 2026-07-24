@@ -15,7 +15,8 @@ from app.store.telegram_inbox_store import TelegramInboxStore
 
 
 NOW = datetime(2026, 7, 24, tzinfo=timezone.utc)
-OP = hashlib.sha256(b"operator").hexdigest()
+OP = "v1:" + hashlib.sha256(b"operator").hexdigest()
+CHAT = "v1:" + "0" * 64
 
 
 class Control:
@@ -95,7 +96,7 @@ def processor(tmp_path):
     commands = TelegramCommandStore(engine, now=lambda: NOW)
     calls = []
     return (CommandProcessor(inbox, commands, Control(calls, commands), "worker",
-                             chat_hash="0" * 64, now=lambda: NOW), inbox, commands, calls)
+                             chat_hash=CHAT, now=lambda: NOW), inbox, commands, calls)
 
 
 @pytest.mark.anyio
@@ -142,7 +143,7 @@ async def test_긴control호출동안_heartbeat가_running_lease를_갱신한다
     control = Control([], commands)
     control.delay_pause, control.clock = True, clock
     worker = CommandProcessor(inbox, commands, control, "worker",
-                              chat_hash="0" * 64, now=clock,
+                              chat_hash=CHAT, now=clock,
                               execution_lease_s=1, heartbeat_s=0.005)
     inbox.persist_batch_and_offset([
         {"update_id": 8, "operator_hash": OP, "command": "pause", "received_at": NOW}
@@ -193,6 +194,62 @@ async def test_confirmed_liquidation은_durable_intent를_통해서만_control�
 
 
 @pytest.mark.anyio
+async def test_confirm응답영속실패_재처리는_소비토큰오류나_재청산을_만들지않는다(
+        processor):
+    processor, inbox, _, _ = processor
+    inbox.persist_batch_and_offset([
+        {"update_id": 11, "operator_hash": OP, "command": "liquidate_all",
+         "received_at": NOW}
+    ], 12)
+    issued = await processor.process_next()
+    inbox.persist_batch_and_offset([
+        {"update_id": 12, "operator_hash": OP, "command": "confirm",
+         "argument_hash": hashlib.sha256(
+             issued.confirmation_token.encode()).hexdigest(),
+         "received_at": NOW}
+    ], 13)
+    first_claim = inbox.claim_next("dispatcher")
+    first = await processor.process_claimed(first_claim)
+    assert first.kind == "needs_attention"
+    assert inbox.release(12, "dispatcher", first_claim.version)
+
+    retry_claim = inbox.claim_next("dispatcher")
+    retry = await processor.process_claimed(retry_claim)
+
+    assert retry.kind == "needs_attention"
+    assert "기존 처리 결과" in retry.response_text
+    assert len(processor._control.liquidate_calls) == 1
+
+
+@pytest.mark.anyio
+async def test_confirm소비직후_crash의_pending_intent를_재처리가_회수한다(
+        processor):
+    processor, inbox, commands, _ = processor
+    inbox.persist_batch_and_offset([
+        {"update_id": 21, "operator_hash": OP, "command": "liquidate_all",
+         "received_at": NOW}
+    ], 22)
+    issued = await processor.process_next()
+    digest = hashlib.sha256(issued.confirmation_token.encode()).hexdigest()
+    inbox.persist_batch_and_offset([
+        {"update_id": 22, "operator_hash": OP, "command": "confirm",
+         "argument_hash": digest, "received_at": NOW}
+    ], 23)
+    fingerprint, targets = await processor._liquidation_context()
+    intent = commands.consume_and_create_intent(
+        digest, OP, CHAT, "liquidate_all", fingerprint, NOW,
+        update_id=22, targets=targets)
+    assert commands.intent_status(intent.id) == "pending"
+
+    claimed = inbox.claim_next("dispatcher")
+    result = await processor.process_claimed(claimed)
+
+    assert result.kind == "needs_attention"
+    assert commands.intent_status(intent.id) == "needs_attention"
+    assert len(processor._control.liquidate_calls) == 1
+
+
+@pytest.mark.anyio
 async def test_accepted_liquidation은_terminal대사까지_lease를_유지한다(tmp_path):
     engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'accepted.db'}")
     Base.metadata.create_all(engine)
@@ -202,7 +259,7 @@ async def test_accepted_liquidation은_terminal대사까지_lease를_유지한�
     control.liquidation_status = "accepted"
     control.reconcile_outcomes = ["in_progress", "in_progress", "needs_attention"]
     worker = CommandProcessor(inbox, commands, control, "worker",
-                              chat_hash="0" * 64, now=lambda: NOW,
+                                  chat_hash=CHAT, now=lambda: NOW,
                               execution_lease_s=1, heartbeat_s=0.005)
     inbox.persist_batch_and_offset([
         {"update_id": 41, "operator_hash": OP, "command": "liquidate_all", "received_at": NOW}
@@ -230,14 +287,14 @@ async def test_accepted_liquidation은_terminal대사까지_lease를_유지한�
 @pytest.mark.anyio
 async def test_running_liquidation재기동은_control대사만하고_재청산하지않는다(processor):
     processor, inbox, commands, _ = processor
-    issued = commands.issue_confirmation(OP, "0" * 64, "liquidate_all", "fingerprint")
+    issued = commands.issue_confirmation(OP, CHAT, "liquidate_all", "fingerprint")
     digest = hashlib.sha256(issued.raw_token.encode()).hexdigest()
     inbox.persist_batch_and_offset([
         {"update_id": 70, "operator_hash": OP, "command": "confirm",
          "argument_hash": digest, "received_at": NOW}
     ], 71)
     intent = commands.consume_and_create_intent(
-        digest, OP, "0" * 64, "liquidate_all", "fingerprint", NOW,
+        digest, OP, CHAT, "liquidate_all", "fingerprint", NOW,
         update_id=70, targets=[{"position_id": 7, "symbol": "005930", "quantity": 3}])
     claimed = commands.claim_intent_by_id(intent.id, "old-worker")
     assert commands.mark_running(intent.id, "old-worker", claimed.version)

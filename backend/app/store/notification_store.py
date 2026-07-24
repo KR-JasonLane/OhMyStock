@@ -454,6 +454,20 @@ class NotificationStore:
         with self._sessions() as session:
             return session.scalar(select(func.count()).select_from(NotificationOutboxRow)) or 0
 
+    def delivery_counts(self) -> dict[str, int]:
+        """Aggregate delivery states without loading message bodies."""
+        with self._sessions() as session:
+            rows = session.execute(select(
+                NotificationDeliveryRow.status, func.count()).group_by(
+                    NotificationDeliveryRow.status))
+            counts = {status: count for status, count in rows}
+        return {
+            "pending": counts.get("pending", 0),
+            "sending": counts.get("sending", 0),
+            "sent": counts.get("sent", 0),
+            "dead_letter": counts.get("dead_letter", 0),
+        }
+
     def enqueue_parts(self, idempotency_key: str, bodies: Sequence[str],
                       sensitive: bool = False, payload: Any | None = None,
                       retention_kind: str | None = None, priority: int = 10,
@@ -577,6 +591,17 @@ class NotificationStore:
                         _from_db_time(outbox.occurred_at),
                         _from_db_time(outbox.created_at)))
         return claimed
+
+    def release_owner_deliveries(self, owner: str) -> int:
+        """Return this sender's live leases and fence any late completion."""
+        owner = safe_identifier(owner, "owner")
+        with self._sessions.begin() as session:
+            result = session.execute(update(NotificationDeliveryRow).where(
+                NotificationDeliveryRow.status == "sending",
+                NotificationDeliveryRow.owner == owner).values(
+                status="pending", owner=None, lease_until=None,
+                version=NotificationDeliveryRow.version + 1))
+            return result.rowcount
 
     def finish_delivery(self, delivery_id: int, owner: str, version: int, *,
                         telegram_message_id: int, sent_at: datetime | None = None) -> bool:

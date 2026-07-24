@@ -12,6 +12,7 @@ from app.adapters.kiwoom.broker import KiwoomBroker
 from app.adapters.kiwoom.client import KiwoomHttpClient
 from app.adapters.naver.client import NaverNewsClient
 from app.adapters.ollama.client import OllamaClient
+from app.adapters.telegram import TelegramClient
 from app.api.analyze import router as analyze_router
 from app.api.collect import router as collect_router
 from app.api.health import router as health_router
@@ -24,6 +25,21 @@ from app.core.config import Settings, get_settings
 from app.core.operations_control import OperationsControl
 from app.core.replay_clock import make_replay_clock
 from app.core.sensitive_logging import configure_sensitive_http_logging
+from app.core.telegram_service import (
+    AsyncProjector,
+    CommandDispatcher,
+    CommandResponsePublisher,
+    CompositeSender,
+    DigestService,
+    EphemeralResponseSender,
+    InboxPoller,
+    Maintenance,
+    OutboxSender,
+    TelegramCircuit,
+    TelegramMaintenance,
+    TelegramService,
+    external_id_hash,
+)
 from app.domain.analysis.config import AnalysisConfig
 from app.domain.analysis.service import AnalysisService
 from app.domain.collection import CollectionService
@@ -31,6 +47,13 @@ from app.domain.orchestration.config import ScheduleConfig
 from app.domain.orchestration.service import SchedulerService
 from app.domain.orchestration.timeline import Job
 from app.domain.scoring.service import ScoringService
+from app.domain.notifications.commands import CommandProcessor
+from app.domain.notifications.digest import (
+    DigestBuilder,
+    DigestPlanner,
+)
+from app.domain.notifications.models import OperatorIdentity
+from app.domain.notifications.projector import NotificationProjector
 from app.domain.trading.config import TradingConfig
 from app.domain.trading.service import TradingService
 from app.store.analysis_store import AnalysisStore
@@ -38,6 +61,12 @@ from app.store.collection_store import CollectionStore
 from app.store.db import create_db_engine
 from app.store.scheduler_store import SchedulerStore
 from app.store.scoring_store import ScoringStore
+from app.store.notification_store import (
+    DigestRunStore,
+    NotificationStore,
+)
+from app.store.telegram_command_store import TelegramCommandStore
+from app.store.telegram_inbox_store import TelegramInboxStore
 from app.store.trading_store import TradingStore
 
 logging.basicConfig(
@@ -47,6 +76,34 @@ logging.basicConfig(
 configure_sensitive_http_logging()
 
 logger = logging.getLogger(__name__)
+
+
+async def _cancel_background_service(service) -> None:
+    if service is None:
+        return
+    task = service.current_task()
+    if task is not None and not task.done():
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
+async def _shutdown_runtime(app) -> None:
+    """The sole owner of cross-service shutdown ordering."""
+    telegram = app.state.telegram_service
+    if telegram is not None:
+        await telegram.begin_shutdown()
+    scheduler = app.state.scheduler
+    if scheduler is not None:
+        await scheduler.shutdown()
+    # Trading gets its existing unbounded atomic-cycle cleanup policy.  The
+    # Telegram 10-second bound starts only after this point.
+    await _cancel_background_service(app.state.trading)
+    for service in (
+            app.state.scoring, app.state.collection, app.state.analysis):
+        await _cancel_background_service(service)
+    if telegram is not None:
+        await telegram.finish_shutdown(deadline_s=10)
 
 
 async def _verify_replay_server(base_url: str) -> datetime:
@@ -282,29 +339,103 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 app.state.scheduler, app.state.trading,
                 app.state.trading_store, app.state.broker, market_calendar,
                 settings.run_environment, now=trading_now)
+
+            # Telegram is opt-in and replay is always disabled by Settings.
+            # One client and one circuit are shared by polling and sending.
+            app.state.telegram_service = None
+            app.state.telegram_client = None
+            if settings.telegram_enabled:
+                assert settings.telegram_bot_token is not None
+                assert settings.telegram_allowed_user_id is not None
+                assert settings.telegram_allowed_chat_id is not None
+                token = settings.telegram_bot_token
+                circuit = TelegramCircuit()
+                telegram_client = TelegramClient(token)
+                inbox_store = TelegramInboxStore(app.state.engine)
+                command_store = TelegramCommandStore(app.state.engine)
+                notification_store = NotificationStore(app.state.engine)
+                worker_suffix = __import__("secrets").token_hex(8)
+                command_worker = f"telegram-command-{worker_suffix}"
+                command_processor = CommandProcessor(
+                    inbox_store, command_store, app.state.operations_control,
+                    command_worker,
+                    chat_hash=external_id_hash(
+                        token, "chat", settings.telegram_allowed_chat_id))
+                poller = InboxPoller(
+                    telegram=telegram_client, inbox=inbox_store,
+                    operators=(OperatorIdentity(
+                        settings.telegram_allowed_user_id,
+                        settings.telegram_allowed_chat_id),),
+                    bot_token=token,
+                    worker_id=f"telegram-poller-{worker_suffix}",
+                    circuit=circuit)
+                durable_sender = OutboxSender(
+                    notification_store, telegram_client,
+                    chat_id=settings.telegram_allowed_chat_id,
+                    worker_id=f"telegram-sender-{worker_suffix}",
+                    authentication_circuit=circuit)
+                ephemeral_sender = EphemeralResponseSender(
+                    telegram_client,
+                    chat_id=settings.telegram_allowed_chat_id,
+                    circuit=circuit)
+                dispatcher = CommandDispatcher(
+                    inbox_store, command_processor,
+                    worker_id=command_worker,
+                    response_publisher=CommandResponsePublisher(
+                        notification_store, ephemeral_sender))
+                sender = CompositeSender(ephemeral_sender, durable_sender)
+                projector = AsyncProjector(
+                    NotificationProjector(notification_store))
+                digest_runs = DigestRunStore(
+                    app.state.engine, settings.run_environment)
+                digest = DigestService(
+                    DigestPlanner(
+                        market_calendar, notification_store,
+                        settings.run_environment),
+                    DigestBuilder(
+                        app.state.operations_control, digest_runs,
+                        settings.run_environment,
+                        now=lambda: datetime.now().astimezone()),
+                    notification_store)
+                maintenance = TelegramMaintenance(
+                    digest, Maintenance(notification_store),
+                    scheduler_snapshot=lambda: (
+                        app.state.scheduler.snapshot()
+                        if app.state.scheduler is not None else None))
+                telegram_service = TelegramService(
+                    poller=poller, dispatcher=dispatcher,
+                    projector=projector, sender=sender,
+                    maintenance=maintenance, circuit=circuit)
+                app.state.telegram_client = telegram_client
+                app.state.telegram_inbox_store = inbox_store
+                app.state.telegram_command_store = command_store
+                app.state.notification_store = notification_store
+                app.state.telegram_service = telegram_service
+                app.state.operations_control.set_telegram_snapshot_provider(
+                    telegram_service.snapshot)
+                telegram_service.start()
+                logger.info("telegram service enabled")
             try:
                 yield
             finally:
-                # 셧다운 순서(스펙 §8): **스케줄러 최우선 취소·await 완료**
-                # — 정리 중인 서비스에 start()를 재호출하거나 dispose된
-                # 엔진에 질의하는 경합 차단. 그 후 4-서비스 정리.
-                scheduler = app.state.scheduler
-                if scheduler is not None:
-                    await scheduler.shutdown()
-                services = [app.state.scoring, app.state.collection,
-                            app.state.analysis]
-                if app.state.trading is not None:
-                    services.append(app.state.trading)
-                for service in services:
-                    task = service.current_task()
-                    if task is not None and not task.done():
-                        task.cancel()
-                        with contextlib.suppress(asyncio.CancelledError):
-                            await task
-                await app.state.broker.aclose()
-                await app.state.llm.aclose()
-                if app.state.news is not None:
-                    await app.state.news.aclose()
+                try:
+                    await _shutdown_runtime(app)
+                finally:
+                    clients = (
+                        app.state.telegram_client,
+                        app.state.broker,
+                        app.state.llm,
+                        app.state.news,
+                    )
+                    for client in clients:
+                        if client is None:
+                            continue
+                        try:
+                            await client.aclose()
+                        except Exception:
+                            logger.exception(
+                                "runtime client close failed client=%s",
+                                type(client).__name__)
         finally:
             app.state.engine.dispose()
 

@@ -249,6 +249,34 @@ def test_기동_게이트_정상_조건이면_기동_성공(tmp_path):
             assert app.state.settings.run_environment == "replay"
 
 
+def test_replay는_telegram설정이_있어도_강제비활성(tmp_path, monkeypatch):
+    import respx
+    from fastapi.testclient import TestClient
+    from app import main
+
+    settings = _replay_settings(
+        tmp_path,
+        telegram_bot_token="BOT-TOKEN",
+        telegram_allowed_user_id=11,
+        telegram_allowed_chat_id=22,
+    )
+    engine = create_engine(settings.database_url.get_secret_value())
+    Base.metadata.create_all(engine)
+    engine.dispose()
+
+    class MustNotConstruct:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("replay must not construct Telegram client")
+
+    monkeypatch.setattr(main, "TelegramClient", MustNotConstruct)
+    app = main.create_app(settings)
+    with respx.mock:
+        respx.get("http://127.0.0.1:9095/_replay/status").respond(
+            json={"replay_now": "2026-07-10T09:00:00+09:00", "speed": 1.0})
+        with TestClient(app):
+            assert app.state.telegram_service is None
+
+
 # ── 교차 오염 방어(트레이더 R6 Critical) ───────────────────────────────
 
 

@@ -15,7 +15,8 @@ from app.store.telegram_command_store import TelegramCommandStore
 from app.store.telegram_inbox_store import TelegramInboxStore
 
 NOW = datetime(2026, 7, 24, tzinfo=timezone.utc)
-OP, CHAT = hashlib.sha256(b"op").hexdigest(), hashlib.sha256(b"chat").hexdigest()
+OP = "v1:" + hashlib.sha256(b"op").hexdigest()
+CHAT = "v1:" + hashlib.sha256(b"chat").hexdigest()
 
 
 class Clock:
@@ -92,7 +93,10 @@ def test_expired_claim만_회수하고_terminal은_claim하지_않는다(stores)
 
 def test_미허용폭주집계와_허용queue상한은_유계다(stores):
     inbox, *_ = stores
-    subjects = [hashlib.sha256(str(i).encode()).hexdigest() for i in range(500)]
+    subjects = [
+        "v1:" + hashlib.sha256(str(i).encode()).hexdigest()
+        for i in range(500)
+    ]
     for start in range(0, 500, 100):
         inbox.persist_rejected_batch(NOW, subjects[start:start + 100], 300)
     assert inbox.rejected_counter_rows(NOW) == 300  # 298 subjects + total + overflow
@@ -152,8 +156,8 @@ def test_confirmation_CSPRNG_2분귀속과_이전토큰무효화(stores):
             digest, operator, chat, command, fingerprint, now, update_id=uid)
 
     assert consume(first.raw_token) is None
-    assert consume(second.raw_token, "f" * 64) is None
-    assert consume(second.raw_token, OP, "e" * 64) is None
+    assert consume(second.raw_token, "v1:" + "f" * 64) is None
+    assert consume(second.raw_token, OP, "v1:" + "e" * 64) is None
     assert consume(second.raw_token, OP, CHAT, "stop") is None
     assert consume(second.raw_token, OP, CHAT, "resume", "changed") is None
     assert consume(second.raw_token, now=NOW + timedelta(seconds=121)) is None

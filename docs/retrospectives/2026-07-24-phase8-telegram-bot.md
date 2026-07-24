@@ -723,3 +723,63 @@ sensitive query/digest TTL과 sender의 전송 후 scrub은 있었지만, 다이
   주문 경로를 바꾸지 않아 broker-api-expert는 적용하지 않았다.
 - 실제 Telegram·키움 API와 운영 DB는 호출하지 않았다. 브로커 adapter/TR/주문
   경로를 바꾸지 않아 broker-api-expert는 적용하지 않는다.
+
+## Task 9 — 전체 Telegram 루프와 FastAPI lifespan 조립
+
+### 요청과 기존 상태
+
+Task 2~8의 설정/client/store/control/command/projector/sender/digest는 각각
+검증됐지만, Bot API polling부터 명령 lane·outbox 전달까지 한 프로세스
+수명으로 묶는 서비스가 없었다. 특히 poller DB lease, update offset과 감사의
+원자 커밋, accepted command monitor와 sender lease의 종료 회수가 비어 있었다.
+
+### 설계 판단과 변경 위치
+
+- `core/telegram_service.py`에 `InboxPoller`, `CommandDispatcher`,
+  `AsyncProjector`, `TelegramMaintenance`, `TelegramService`를 추가했다.
+  poller는 40초 DB lease의 단일 승자만 long polling하며 허용 inbox,
+  미허용 분 단위 bounded 집계, 다음 offset을 한 transaction으로 커밋한다.
+- 외부 user/chat/subject 식별자는 bot token을 키로
+  `HMAC-SHA-256(token, "v1:{kind}:{id}")`한 `v1:` 값만 저장한다. 이를 위해
+  `telegram_common.py`, ORM의 관련 길이를 67자로 맞추고 기존 0013은
+  보존한 채 새 0014 widening migration을 추가했다.
+- query lane은 동시성 1이며 poll 입장 시 실제 backlog 20 상한을 적용한다.
+  초과 query는 offset과 bounded 거부 집계를 함께 커밋하되 control은 계속
+  입장한다. worker 준비
+  전 행을 미리 claim하지 않아 느린 `/account`가 뒤 query lease를 만료시키지
+  않는다. control lane은 query와 별도로 허용 control의 `update_id` 순서를
+  지키며 받은 뒤 5초 초과를 snapshot 경고로 남긴다.
+- 각 loop는 연속 실패 예산 3회를 독립 소비한다. 예산 소진은 해당 child만
+  dead로 만들며 예외 문자열 대신 고정 오류 분류만 로그/snapshot에 남긴다.
+  poller와 sender는 하나의 인증 circuit를 공유한다. 429/일시 오류는
+  failure budget을 소비하지 않고 `retry_after`/지수 backoff한다.
+- 일반 명령 응답은 durable outbox로 보내며, confirmation 원문만 최대 20개
+  메모리 queue로 보내 DB·로그에 토큰을 남기지 않는다. 종료 전에 전송되지
+  않으면 운영자가 위험 명령을 다시 요청해 새 토큰을 발급받는다.
+- `main.py`만 전체 종료 순서를 소유한다. Telegram begin에서 poller와 신규
+  command claim을 막은 뒤 scheduler, trading 순으로 기존 정책에 따라
+  종료하고, 그 뒤 Telegram finish를 10초로 제한한다. finish는 accepted
+  monitor를 중단해 running intent를 `unknown`으로 이관하고 projector
+  checkpoint, sender drain, 남은 sender lease 반환을 수행한다.
+- 정상 설정에서만 client/store/processor/projector/sender/digest/maintenance를
+  조립한다. 설정 없음과 replay는 `app.state.telegram_service = None`이다.
+
+### 검증
+
+- RED는 신규 service import 부재와 lifespan 조립 표면 4건 부재로 확인했다.
+- lifespan 16건, command/control 27건, migration 17건,
+  전체 1,049건이 통과했고 11건은
+  live test라 제외됐다. 기존 Starlette deprecation warning 1건만 남았다.
+- compileall과 `git diff --check`도 통과했다.
+- 실제 Telegram·키움 API와 운영 DB는 호출하지 않았다.
+- 1차 패널은 응답 미전달·기존 0013 수정(Critical), 실제로 강제되지 않은
+  query 상한, stale poller commit, deferred hot loop, 일시 장애 budget,
+  종료 deadline, 상태 관측(Important)을 찾았다. 모두 회귀 테스트와 함께
+  수정했다. 재검토에서 찾은 confirmation 소비 직후 pending crash, 응답
+  materialization 복구, 정확한 토큰 TTL, commit lease 반환, 느린
+  reconciliation의 control 차단, snapshot DB I/O, `/stop` 범위 안내도
+  추가 수정했다.
+- 최종 동일 diff는 senior-developer, senior-trader, architecture-expert,
+  security-expert가 독립 재검토해 Critical 0건, Important 0건으로 승인했다.
+  broker adapter/TR/주문 경로를 바꾸지 않아 broker-api-expert는 적용하지
+  않았다.

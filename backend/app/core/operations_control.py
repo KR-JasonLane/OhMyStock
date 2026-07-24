@@ -55,6 +55,10 @@ class OperationsControl:
         self._account_task = None
         self._cache = None
         self._cache_at = None
+        self._telegram_snapshot_provider = None
+
+    def set_telegram_snapshot_provider(self, provider) -> None:
+        self._telegram_snapshot_provider = provider
 
     def scheduler_fingerprint(self) -> str:
         if self.scheduler is None:
@@ -66,19 +70,35 @@ class OperationsControl:
             json.dumps(facts, sort_keys=True).encode()).hexdigest()
 
     async def pause_scheduler(self):
+        if self.scheduler is None:
+            return {
+                "enabled": False, "paused": False, "dead": False,
+                "applied": False, "reason": "disabled",
+            }
         self.scheduler.pause()
-        return self.scheduler.snapshot()
+        return {**self.scheduler.snapshot(), "applied": True}
 
     async def resume_scheduler(self, expected: str | None = None):
         if expected is not None and expected != self.scheduler_fingerprint():
             raise StateChangedError("scheduler state changed")
+        if self.scheduler is None:
+            return {
+                "enabled": False, "paused": False, "dead": False,
+                "applied": False, "reason": "disabled",
+            }
         self.scheduler.resume()
-        return self.scheduler.snapshot()
+        return {**self.scheduler.snapshot(), "applied": True}
 
     async def system_status(self):
         scheduler = None if self.scheduler is None else self.scheduler.snapshot()
         trading = None if self.trading is None else self.trading.progress()
-        return {"scheduler": scheduler, "trading": trading}
+        telegram = (
+            self._telegram_snapshot_provider()
+            if self._telegram_snapshot_provider is not None else None)
+        return {
+            "scheduler": scheduler, "trading": trading,
+            "telegram": telegram,
+        }
 
     async def account_summary(self, priority: str = "interactive"):
         if priority not in {"interactive", "digest"}:
