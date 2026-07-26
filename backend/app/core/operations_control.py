@@ -11,7 +11,11 @@ from datetime import date, datetime, timedelta, timezone
 
 from app.core.background_service import StopMode
 from app.domain.notifications.ports import AccountSnapshotDeferred
-from app.domain.trading.models import LiquidationResult, LiquidationTarget
+from app.domain.trading.models import (
+    LiquidationReason,
+    LiquidationResult,
+    LiquidationTarget,
+)
 
 
 @dataclass(frozen=True)
@@ -197,19 +201,43 @@ class OperationsControl:
         targets = tuple(targets)
         if not targets:
             return LiquidationResult(
-                "succeeded", False, "no managed liquidation targets; no-op")
+                "succeeded",
+                False,
+                "no managed liquidation targets; no-op",
+                reason=LiquidationReason.NO_TARGETS,
+            )
         if self.trading is None:
             return LiquidationResult(
-                "needs_attention", False, "trading service is not running")
+                "needs_attention",
+                False,
+                "trading service is not running",
+                reason=LiquidationReason.TRADING_INACTIVE,
+            )
         result = await self.trading.request_managed_liquidation(
             intent_id, targets, expected_run_id=expected_run_id)
+        return await self._with_unmanaged_balance(result)
+
+    async def _with_unmanaged_balance(
+            self, result: LiquidationResult) -> LiquidationResult:
+        """Add account-scope context without repairing a damaged result."""
         preview = await self.liquidation_preview()
-        if preview.unmanaged_symbols:
-            warning = result.warning or ""
-            suffix = "계좌 전체 잔고 0 아님: 미관리 잔고 존재"
-            return LiquidationResult(
-                result.status, False, f"{warning}; {suffix}".strip("; "))
-        return result
+        if not preview.unmanaged_symbols:
+            return result
+        warning = result.warning or ""
+        suffix = "계좌 전체 잔고 0 아님: 미관리 잔고 존재"
+        return LiquidationResult(
+            result.status,
+            False,
+            f"{warning}; {suffix}".strip("; "),
+            reason=(
+                LiquidationReason.UNMANAGED_BALANCE
+                if (
+                    result.status == "succeeded"
+                    and result.reason is LiquidationReason.COMPLETED
+                )
+                else result.reason
+            ),
+        )
 
     async def reconcile_control_intent(self, intent_id: str, targets=()) -> LiquidationResult:
         """Delegate durable Telegram liquidation recovery to TradingService.
@@ -221,5 +249,11 @@ class OperationsControl:
         """
         if self.trading is None:
             return LiquidationResult(
-                "needs_attention", False, "trading service is not running")
-        return await self.trading.reconcile_control_intent(intent_id, tuple(targets))
+                "needs_attention",
+                False,
+                "trading service is not running",
+                reason=LiquidationReason.TRADING_INACTIVE,
+            )
+        result = await self.trading.reconcile_control_intent(
+            intent_id, tuple(targets))
+        return await self._with_unmanaged_balance(result)

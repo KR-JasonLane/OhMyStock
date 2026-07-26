@@ -9,7 +9,7 @@ import logging
 from collections import deque
 from collections.abc import Awaitable, Callable, Collection
 from datetime import datetime, timedelta, timezone
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
 from pydantic import SecretStr
 
@@ -350,6 +350,7 @@ class EphemeralResponseSender:
         self._queue: deque[tuple[str, datetime]] = deque()
         self._retry_at: datetime | None = None
         self._failures = 0
+        self._backoff_reason: str | None = None
 
     async def enqueue(
             self, text: str, *,
@@ -369,10 +370,11 @@ class EphemeralResponseSender:
         now = self._now()
         while self._queue and self._queue[0][1] <= now:
             self._queue.popleft()
-        if self._circuit.is_dead or not self._queue:
-            return 0
         if not self._queue:
-            self._retry_at = None
+            self._clear_backoff_state()
+            return 0
+        if self._circuit.is_dead:
+            self._clear_backoff_state()
             return 0
         if self._retry_at is not None and now < self._retry_at:
             return 0
@@ -383,33 +385,40 @@ class EphemeralResponseSender:
                 self._telegram.send_message(self._chat_id, text),
                 timeout=min(self._SEND_DEADLINE_S, remaining_s))
         except TelegramRateLimited as exc:
+            self._backoff_reason = "rate_limited"
             self._retry_at = now + timedelta(seconds=exc.retry_after)
         except TelegramAuthenticationError:
+            self._clear_backoff_state()
             self._circuit.mark_dead("authentication_failed")
         except TelegramTemporaryError:
             self._failures += 1
+            self._backoff_reason = "temporary_error"
             self._retry_at = now + timedelta(
                 seconds=min(60, 2 ** min(self._failures, 6)))
         except (TelegramPermanentError, TimeoutError):
             # A raw token cannot be placed in a durable retry store. Permanent
             # failure is terminal; the operator can safely request a new token.
             self._queue.popleft()
-            self._retry_at = None
-            self._failures = 0
+            self._clear_backoff_state()
         else:
             self._queue.popleft()
-            self._retry_at = None
-            self._failures = 0
+            self._clear_backoff_state()
         return 1
 
     def clear(self) -> None:
         self._queue.clear()
+        self._clear_backoff_state()
+
+    def _clear_backoff_state(self) -> None:
         self._retry_at = None
+        self._failures = 0
+        self._backoff_reason = None
 
     def snapshot(self) -> dict[str, object]:
         return {
             "state": "dead" if self._circuit.is_dead else "running",
             "pending": len(self._queue),
+            "backoff_reason": self._backoff_reason,
         }
 
 
@@ -445,16 +454,36 @@ class CommandResponsePublisher:
         )
 
 
+@runtime_checkable
+class DurableSenderPort(Protocol):
+    async def run_once(self) -> int: ...
+
+    async def refresh_snapshot(self) -> None: ...
+
+    async def release_leases(self) -> int: ...
+
+    def snapshot(self) -> dict[str, object]: ...
+
+
 class CompositeSender:
     """Prioritize volatile confirmations, then drain the durable outbox."""
 
-    def __init__(self, ephemeral: EphemeralResponseSender, outbox) -> None:
+    def __init__(
+        self,
+        ephemeral: EphemeralResponseSender,
+        outbox: DurableSenderPort,
+    ) -> None:
+        if not isinstance(outbox, DurableSenderPort):
+            raise TypeError("durable sender contract is incomplete")
         self._ephemeral = ephemeral
         self._outbox = outbox
 
     async def run_once(self) -> int:
         sent = await self._ephemeral.run_once()
-        return sent if sent else await self._outbox.run_once()
+        if not sent:
+            return await self._outbox.run_once()
+        await self._outbox.refresh_snapshot()
+        return sent
 
     async def release_leases(self) -> int:
         self._ephemeral.clear()
@@ -624,6 +653,7 @@ class TelegramService:
                 consecutive = 0
                 self._states[name]["failures"] = 0
                 self._states[name]["transient_failures"] = 0
+                self._states[name]["last_error_kind"] = None
             await asyncio.sleep(self._loop_idle_s.get(name, self._idle_s))
 
     async def begin_shutdown(self) -> None:
@@ -751,6 +781,68 @@ class TelegramService:
                 result[name].update(component.snapshot())
                 if supervisor_dead:
                     result[name]["dead"] = True
+        backoff_components: list[str] = []
+        for name in (
+            "poller",
+            "commands",
+            "queries",
+            "reconciliation",
+            "projector",
+            "sender",
+            "maintenance",
+        ):
+            state = result.get(name)
+            if not isinstance(state, dict):
+                continue
+            if (
+                state.get("last_error_kind")
+                in {"rate_limited", "temporary_error", "internal_error"}
+                or (
+                    type(state.get("failures")) is int
+                    and state["failures"] > 0
+                )
+                or (
+                    type(state.get("transient_failures")) is int
+                    and state["transient_failures"] > 0
+                )
+            ):
+                backoff_components.append(name)
+        poller = result.get("poller")
+        if (
+            isinstance(poller, dict)
+            and poller.get("backoff_reason")
+            and "poller" not in backoff_components
+        ):
+            backoff_components.append("poller")
+        sender = result.get("sender")
+        outbox = sender.get("outbox") if isinstance(sender, dict) else None
+        if (
+            isinstance(outbox, dict)
+            and (
+                outbox.get("initialized") is not True
+                or outbox.get("backoff_reason")
+            )
+            and "sender" not in backoff_components
+        ):
+            backoff_components.append("sender")
+        ephemeral = (
+            sender.get("ephemeral") if isinstance(sender, dict) else None
+        )
+        if (
+            isinstance(ephemeral, dict)
+            and ephemeral.get("backoff_reason")
+            in {"rate_limited", "temporary_error"}
+        ):
+            backoff_components.append("ephemeral")
+        dispatcher = result.get("dispatcher")
+        if (
+            isinstance(dispatcher, dict)
+            and dispatcher.get("control_delay_warning") is True
+        ):
+            backoff_components.append("control_delay")
+        backoff_components = list(dict.fromkeys(backoff_components))
+        result["backoff_components"] = tuple(backoff_components)
+        result["degraded"] = bool(backoff_components)
         return result
 
 
@@ -856,8 +948,15 @@ class OutboxSender:
             raise ValueError("sensitive delivery TTL guard must exceed send deadline")
         self._state = "running"
         self._last_run_claimed = 0
-        self._delivery_counts = {
-            "pending": 0, "sending": 0, "sent": 0, "dead_letter": 0}
+        self._delivery_state: dict[str, int | str | None] = {
+            "pending": 0,
+            "sending": 0,
+            "sent": 0,
+            "dead_letter": 0,
+            "retry_pending": 0,
+            "backoff_reason": None,
+        }
+        self._initialized = False
 
     async def run_once(self) -> int:
         if self._state == "dead" or self._authentication_circuit.is_dead:
@@ -865,8 +964,7 @@ class OutboxSender:
             # Task 8 maintenance가 맡고, delivery 우선순위와 경합하지 않는다.
             await asyncio.to_thread(
                 self._store.purge_expired_sensitive, self._now(), self._TTL_SCRUB_BATCH)
-            self._delivery_counts = await asyncio.to_thread(
-                self._store.delivery_counts)
+            await self.refresh_snapshot()
             return 0
         deliveries = await asyncio.to_thread(
             self._store.claim_deliveries, self._worker_id, self._BATCH_SIZE, self._LEASE_S)
@@ -930,17 +1028,25 @@ class OutboxSender:
         # 본문을 작은 후순위 chunk로 scrub해 daily maintenance 사이 노출도 줄인다.
         await asyncio.to_thread(
             self._store.purge_expired_sensitive, self._now(), self._TTL_SCRUB_BATCH)
-        self._delivery_counts = await asyncio.to_thread(
-            self._store.delivery_counts)
+        await self.refresh_snapshot()
         return len(deliveries)
 
-    def snapshot(self) -> dict[str, int | str]:
+    async def refresh_snapshot(self) -> None:
+        """Refresh durable counts without claiming or sending a delivery."""
+        state = await asyncio.to_thread(
+            self._store.delivery_state_snapshot
+        )
+        self._delivery_state = state
+        self._initialized = True
+
+    def snapshot(self) -> dict[str, int | str | bool | None]:
         """Safe operational state; no body, chat ID, token, or error text."""
         state = "dead" if self._state == "dead" or self._authentication_circuit.is_dead else "running"
         return {
             "state": state,
+            "initialized": self._initialized,
             "last_run_claimed": self._last_run_claimed,
-            **self._delivery_counts,
+            **self._delivery_state,
         }
 
     async def release_leases(self) -> int:
@@ -965,7 +1071,6 @@ class OutboxSender:
         base = min(60.0, float(2 ** min(delivery.attempt_count, 6)))
         jitter = base * 0.25 * self._random_float()
         return base + jitter
-
 
 def _http_status(kind: str) -> int | None:
     if kind.startswith("http_"):

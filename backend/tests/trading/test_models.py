@@ -5,7 +5,8 @@ from datetime import datetime, timezone
 import pytest
 
 from app.domain.trading.models import (EntryPhase, ExitEvaluation, ExitPhase,
-                                       ExitReason, Fill, Order, OrderSide,
+                                       ExitReason, Fill, LiquidationReason,
+                                       LiquidationResult, Order, OrderSide,
                                        OrderStyle, PositionState, TradePosition)
 
 
@@ -25,6 +26,40 @@ def test_청산_사유가_우선순위_전체를_커버한다():
     # §6-2 우선순위 0~3 + 킬스위치(§8-1-b)
     assert {r.value for r in ExitReason} == {
         "max_holding", "stop_loss", "trailing_stop", "take_profit", "kill_switch"}
+
+
+def test_관리청산결과는_구조화사유를쓰되_기존생성자를유지한다():
+    assert {reason.value for reason in LiquidationReason} == {
+        "no_targets",
+        "run_changed",
+        "already_accepted",
+        "another_intent_active",
+        "trading_inactive",
+        "persistence_failed",
+        "accepted",
+        "market_closed",
+        "preflight_reconciliation_failed",
+        "post_accept_reconciliation_failed",
+        "target_state_changed",
+        "quantity_mismatch",
+        "open_sell_orders",
+        "trading_halt",
+        "unknown_intent",
+        "position_remains",
+        "completed",
+        "market_close_incomplete",
+        "unmanaged_balance",
+    }
+    legacy = LiquidationResult("needs_attention", False, "legacy diagnostic")
+    structured = LiquidationResult(
+        "needs_attention",
+        False,
+        "diagnostic",
+        reason=LiquidationReason.QUANTITY_MISMATCH,
+    )
+
+    assert legacy.reason is None
+    assert structured.reason is LiquidationReason.QUANTITY_MISMATCH
 
 
 def test_주문_유형은_도메인_중립_enum():

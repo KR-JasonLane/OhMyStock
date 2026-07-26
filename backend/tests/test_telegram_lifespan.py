@@ -16,13 +16,21 @@ from app.core.telegram_service import (
     CompositeSender,
     EphemeralResponseSender,
     InboxPoller,
+    OutboxSender,
     TelegramCircuit,
     TelegramService,
     external_id_hash,
 )
-from app.adapters.telegram.client import TelegramClient, TelegramPermanentError
+from app.adapters.telegram.client import (
+    TelegramAuthenticationError,
+    TelegramClient,
+    TelegramPermanentError,
+    TelegramRateLimited,
+    TelegramTemporaryError,
+)
 from app.domain.notifications.commands import CommandProcessor, CommandResult
 from app.domain.notifications.models import InboundMessage, OperatorIdentity
+from app.domain.notifications.presentation import TelegramCommandPresenter
 from app.store.models import Base
 from app.store.telegram_inbox_store import TelegramInboxStore
 from app.store.telegram_command_store import TelegramCommandStore
@@ -282,6 +290,97 @@ async def test_command응답은_outbox이고_confirmation원문은_DB에없다(t
     assert telegram.messages == ["/confirm CONFIRM_SECRET"]
 
 
+def test_composite는_refresh없는_durable_sender를_거부한다():
+    class IncompleteDurableSender:
+        async def run_once(self):
+            return 0
+
+        async def release_leases(self):
+            return 0
+
+        def snapshot(self):
+            return {}
+
+    with pytest.raises(TypeError, match="durable sender"):
+        CompositeSender(SimpleNamespace(), IncompleteDurableSender())
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "durable_state", ["pending", "retry", "dead_letter"]
+)
+async def test_composite는_ephemeral우선중에도_durable상태를갱신한다(
+        tmp_path, durable_state
+):
+    clock = Clock()
+    engine = create_engine(
+        f"sqlite+pysqlite:///{tmp_path / f'composite-{durable_state}.db'}"
+    )
+    Base.metadata.create_all(engine)
+    store = NotificationStore(engine, now=clock)
+
+    class BusyEphemeral:
+        async def run_once(self):
+            return 1
+
+        def snapshot(self):
+            return {"state": "running", "pending": 1}
+
+        def clear(self):
+            return None
+
+    class NeverTelegram:
+        async def send_message(self, _chat_id, _text):
+            raise AssertionError("ephemeral priority must skip durable send")
+
+    outbox = OutboxSender(
+        store,
+        NeverTelegram(),
+        chat_id=22,
+        worker_id=f"composite-{durable_state}",
+        now=clock,
+    )
+    assert await outbox.run_once() == 0
+    assert outbox.snapshot()["initialized"] is True
+    assert outbox.snapshot()["pending"] == 0
+
+    store.enqueue_parts(f"new-{durable_state}", ["one"])
+    if durable_state != "pending":
+        delivery = store.claim_deliveries("state-builder")[0]
+        if durable_state == "retry":
+            assert store.retry_delivery(
+                delivery.id,
+                "state-builder",
+                delivery.version,
+                "server",
+                503,
+                next_attempt_at=clock() + timedelta(minutes=1),
+            )
+        else:
+            assert store.dead_letter_delivery(
+                delivery.id,
+                "state-builder",
+                delivery.version,
+                "http_400",
+                400,
+            )
+    sender = CompositeSender(BusyEphemeral(), outbox)
+
+    assert await sender.run_once() == 1
+
+    snapshot = sender.snapshot()["outbox"]
+    assert snapshot["initialized"] is True
+    assert snapshot["pending"] == (
+        1 if durable_state in {"pending", "retry"} else 0
+    )
+    assert snapshot["retry_pending"] == (
+        1 if durable_state == "retry" else 0
+    )
+    assert snapshot["dead_letter"] == (
+        1 if durable_state == "dead_letter" else 0
+    )
+
+
 @pytest.mark.anyio
 async def test_명령응답_경로는_token_confirmation_계좌금액을_로그하지않는다(
         tmp_path, caplog):
@@ -306,6 +405,13 @@ async def test_명령응답_경로는_token_confirmation_계좌금액을_로그�
     ephemeral = EphemeralResponseSender(
         telegram, chat_id=22, circuit=circuit, now=clock)
     publisher = CommandResponsePublisher(notifications, ephemeral)
+    account_amounts = {
+        "deposit": 87_654_321,
+        "available_deposit": 76_543_210,
+        "total_eval": 65_432_109,
+        "total_profit": -1_234_567,
+        "realized_pnl": -2_345_678,
+    }
 
     class SensitiveControl:
         def scheduler_fingerprint(self):
@@ -313,10 +419,7 @@ async def test_명령응답_경로는_token_confirmation_계좌금액을_로그�
 
         async def account_summary(self):
             return {
-                "available_deposit": "ACCOUNT_AMOUNT_SHOULD_NEVER_LOG",
-                "total_eval": "ACCOUNT_AMOUNT_SHOULD_NEVER_LOG",
-                "total_profit": "ACCOUNT_AMOUNT_SHOULD_NEVER_LOG",
-                "realized_pnl": "ACCOUNT_AMOUNT_SHOULD_NEVER_LOG",
+                **account_amounts,
                 "realized_pnl_confidence": "estimated",
                 "as_of": "2026-07-24T10:00:00+09:00",
                 "source": "fake",
@@ -367,10 +470,15 @@ async def test_명령응답_경로는_token_confirmation_계좌금액을_로그�
         response_publisher=publisher)
     assert await dispatcher.tick_control() == 1
     assert await dispatcher.tick_query() == 1
+    [account_body] = notifications.load_delivery_bodies(1)
+    formatted_amounts = tuple(f"{value:,}원" for value in account_amounts.values())
+    assert all(value in account_body for value in formatted_amounts)
     assert await CompositeSender(ephemeral, LoopStep()).run_once() == 1
 
-    confirmation = telegram.messages[0][1].removeprefix("/confirm ")
-    assert confirmation and confirmation != telegram.messages[0][1]
+    confirmation_command = telegram.messages[0][1].rsplit("\n", 1)[-1]
+    confirmation = confirmation_command.removeprefix("/confirm ")
+    assert confirmation_command.startswith("/confirm ")
+    assert confirmation and confirmation != confirmation_command
 
     async def redirect_handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(302, headers={"Location": "https://evil.example"})
@@ -383,7 +491,8 @@ async def test_명령응답_경로는_token_confirmation_계좌금액을_로그�
     for sensitive_value in (
         bot_token,
         confirmation,
-        "ACCOUNT_AMOUNT_SHOULD_NEVER_LOG",
+        *formatted_amounts,
+        *(str(value) for value in account_amounts.values()),
     ):
         assert sensitive_value not in caplog.text
 
@@ -478,6 +587,9 @@ class LoopStep:
     async def release_leases(self) -> None:
         self.released += 1
 
+    async def refresh_snapshot(self) -> None:
+        return None
+
     def snapshot(self):
         return {"state": "running"}
 
@@ -504,6 +616,8 @@ async def test_독립loop_failure_budget과_telegram전용종료():
     snapshot = service.snapshot()
     assert snapshot["poller"]["dead"] is True
     assert snapshot["sender"]["dead"] is False
+    assert snapshot["projector"]["dead"] is False
+    assert snapshot["maintenance"]["dead"] is False
     assert sender.calls > 0
 
     await service.begin_shutdown()
@@ -512,6 +626,42 @@ async def test_독립loop_failure_budget과_telegram전용종료():
         "poller", "inbox_commit", "command_claims", "projector", "sender"
     ]
     assert sender.released == 1
+
+
+@pytest.mark.anyio
+async def test_실제projector_dead스냅샷은_status에서_시스템장애로보인다():
+    projector = LoopStep(failures=3)
+    service = TelegramService(
+        poller=LoopStep(),
+        dispatcher=LoopStep(),
+        projector=projector,
+        sender=LoopStep(),
+        maintenance=LoopStep(),
+        failure_budget=3,
+        idle_s=0.001,
+    )
+    service.start()
+    await asyncio.sleep(0.03)
+    telegram = service.snapshot()
+
+    text = TelegramCommandPresenter().status(
+        {
+            "scheduler": {"paused": False, "dead": False},
+            "trading": {
+                "run_id": None,
+                "status": "idle",
+                "positions_count": 0,
+                "kill_switch": None,
+            },
+            "telegram": telegram,
+        }
+    )
+
+    assert telegram["projector"]["dead"] is True
+    assert text.startswith("🚨 시스템 장애")
+    assert "운영 알림 생성 중단" in text
+    await service.begin_shutdown()
+    await service.finish_shutdown(deadline_s=0.1)
 
 
 @pytest.mark.anyio
@@ -530,7 +680,400 @@ async def test_429는_failure_budget을_즉시소진하지않고_retry_after를_
     service.start()
     await asyncio.sleep(0.03)
     assert poller.calls == 1
-    assert service.snapshot()["poller"]["dead"] is False
+    snapshot = service.snapshot()
+    assert snapshot["poller"]["dead"] is False
+    assert snapshot["degraded"] is True
+    assert "poller" in snapshot["backoff_components"]
+    await service.begin_shutdown()
+    await service.finish_shutdown(deadline_s=0.1)
+
+
+@pytest.mark.anyio
+async def test_dispatcher제어지연은_canonical_degraded와_status주의로보인다():
+    class DelayedDispatcher(LoopStep):
+        async def tick_control(self):
+            return 0
+
+        async def tick_query(self):
+            return 0
+
+        async def reconcile_unknown(self):
+            return 0
+
+        def snapshot(self):
+            return {"control_delay_warning": True}
+
+    service = TelegramService(
+        poller=LoopStep(),
+        dispatcher=DelayedDispatcher(),
+        projector=LoopStep(),
+        sender=LoopStep(),
+        maintenance=LoopStep(),
+        idle_s=0.001,
+    )
+    service.start()
+    await asyncio.sleep(0.01)
+    snapshot = service.snapshot()
+    text = TelegramCommandPresenter().status(
+        {
+            "scheduler": {"paused": False, "dead": False},
+            "trading": {
+                "run_id": None,
+                "status": "idle",
+                "positions_count": 0,
+                "kill_switch": None,
+            },
+            "telegram": snapshot,
+        }
+    )
+
+    assert snapshot["degraded"] is True
+    assert "control_delay" in snapshot["backoff_components"]
+    assert "Telegram 제어 명령 처리 지연" in text
+    await service.begin_shutdown()
+    await service.finish_shutdown(deadline_s=0.1)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("failure", "error_kind"),
+    [
+        (RuntimeError("sensitive diagnostic"), "internal_error"),
+        (
+            TelegramPermanentError("sendMessage", "sensitive diagnostic"),
+            "permanent_error",
+        ),
+    ],
+)
+async def test_supervisor단일failure도_canonical_degraded로보인다(
+    failure, error_kind
+):
+    entered = asyncio.Event()
+
+    class FailThenBlock(LoopStep):
+        async def run_once(self):
+            self.calls += 1
+            if self.calls == 1:
+                raise failure
+            if self.calls == 2:
+                entered.set()
+                await asyncio.Event().wait()
+            return 0
+
+    projector = FailThenBlock()
+    service = TelegramService(
+        poller=LoopStep(),
+        dispatcher=LoopStep(),
+        projector=projector,
+        sender=LoopStep(),
+        maintenance=LoopStep(),
+        failure_budget=3,
+        idle_s=0.001,
+    )
+    service.start()
+    await entered.wait()
+    snapshot = service.snapshot()
+
+    assert snapshot["projector"]["failures"] == 1
+    assert snapshot["projector"]["last_error_kind"] == error_kind
+    assert snapshot["degraded"] is True
+    assert "projector" in snapshot["backoff_components"]
+    await service.begin_shutdown()
+    await service.finish_shutdown(deadline_s=0.1)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("failure", "expected"),
+    [
+        (TelegramRateLimited("sendMessage", 10), "rate_limited"),
+        (TelegramTemporaryError("sendMessage", "temporary"), "temporary_error"),
+    ],
+)
+async def test_ephemeral확인응답backoff도_canonical_degraded에포함한다(
+    failure, expected
+):
+    clock = Clock()
+
+    class FailingTelegram:
+        async def send_message(self, _chat_id, _text):
+            raise failure
+
+    ephemeral = EphemeralResponseSender(
+        FailingTelegram(),
+        chat_id=22,
+        circuit=TelegramCircuit(),
+        now=clock,
+    )
+    await ephemeral.enqueue("/confirm SENSITIVE", expires_at=clock() + timedelta(seconds=60))
+    assert await ephemeral.run_once() == 1
+    sender = CompositeSender(ephemeral, LoopStep())
+    service = TelegramService(
+        poller=LoopStep(),
+        dispatcher=LoopStep(),
+        projector=LoopStep(),
+        sender=sender,
+        maintenance=LoopStep(),
+        idle_s=0.001,
+    )
+    service.start()
+    await asyncio.sleep(0.01)
+    snapshot = service.snapshot()
+
+    assert snapshot["sender"]["ephemeral"]["backoff_reason"] == expected
+    assert snapshot["degraded"] is True
+    assert "ephemeral" in snapshot["backoff_components"]
+    await service.begin_shutdown()
+    await service.finish_shutdown(deadline_s=0.1)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("first_failure", "retry_after"),
+    [
+        (TelegramRateLimited("sendMessage", 10), 10),
+        (TelegramTemporaryError("sendMessage", "temporary"), 2),
+    ],
+)
+async def test_ephemeral인증실패는_이전backoff상태를_완전히_초기화한다(
+    first_failure,
+    retry_after,
+):
+    clock = Clock()
+
+    class FailingTelegram:
+        def __init__(self):
+            self.failures = [
+                first_failure,
+                TelegramAuthenticationError("sendMessage"),
+            ]
+
+        async def send_message(self, _chat_id, _text):
+            raise self.failures.pop(0)
+
+    circuit = TelegramCircuit()
+    ephemeral = EphemeralResponseSender(
+        FailingTelegram(),
+        chat_id=22,
+        circuit=circuit,
+        now=clock,
+    )
+    await ephemeral.enqueue(
+        "/confirm SENSITIVE",
+        expires_at=clock() + timedelta(seconds=60),
+    )
+
+    assert await ephemeral.run_once() == 1
+    assert ephemeral.snapshot()["backoff_reason"] is not None
+    clock.advance(retry_after)
+
+    assert await ephemeral.run_once() == 1
+    assert circuit.is_dead is True
+    assert ephemeral.snapshot()["backoff_reason"] is None
+    assert ephemeral._retry_at is None
+    assert ephemeral._failures == 0
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "first_failure",
+    [
+        TelegramRateLimited("sendMessage", 10),
+        TelegramTemporaryError("sendMessage", "temporary"),
+    ],
+)
+async def test_ephemeral공유인증circuit_dead는_이전backoff를_초기화한다(
+    first_failure,
+):
+    clock = Clock()
+
+    class FailingTelegram:
+        async def send_message(self, _chat_id, _text):
+            raise first_failure
+
+    circuit = TelegramCircuit()
+    ephemeral = EphemeralResponseSender(
+        FailingTelegram(),
+        chat_id=22,
+        circuit=circuit,
+        now=clock,
+    )
+    await ephemeral.enqueue(
+        "/confirm SENSITIVE",
+        expires_at=clock() + timedelta(seconds=60),
+    )
+
+    assert await ephemeral.run_once() == 1
+    assert ephemeral.snapshot()["backoff_reason"] is not None
+    circuit.mark_dead("authentication_failed")
+
+    assert await ephemeral.run_once() == 0
+    assert ephemeral.snapshot()["backoff_reason"] is None
+    assert ephemeral._retry_at is None
+    assert ephemeral._failures == 0
+
+
+@pytest.mark.anyio
+async def test_ephemeral우선처리중_outbox미초기화는_canonical주의로유지된다(
+        tmp_path
+):
+    clock = Clock()
+    engine = create_engine(
+        f"sqlite+pysqlite:///{tmp_path / 'sender-uninitialized.db'}"
+    )
+    Base.metadata.create_all(engine)
+    store = NotificationStore(engine, now=clock)
+    store.enqueue_parts("persisted-before-restart", ["one"])
+    original_refresh = store.delivery_state_snapshot
+
+    def fail_refresh():
+        raise RuntimeError("aggregate unavailable")
+
+    store.delivery_state_snapshot = fail_refresh
+
+    class BusyEphemeral:
+        async def run_once(self):
+            return 1
+
+        def snapshot(self):
+            return {
+                "state": "running",
+                "pending": 1,
+                "backoff_reason": None,
+            }
+
+        def clear(self):
+            return None
+
+    class NeverTelegram:
+        async def send_message(self, _chat_id, _text):
+            raise AssertionError("durable sender must be skipped")
+
+    outbox = OutboxSender(
+        store,
+        NeverTelegram(),
+        chat_id=22,
+        worker_id="uninitialized",
+        now=clock,
+    )
+    sender = CompositeSender(BusyEphemeral(), outbox)
+    service = TelegramService(
+        poller=LoopStep(),
+        dispatcher=LoopStep(),
+        projector=LoopStep(),
+        sender=sender,
+        maintenance=LoopStep(),
+        failure_budget=100,
+        idle_s=0.001,
+    )
+    service.start()
+    await asyncio.sleep(0.01)
+
+    snapshot = service.snapshot()
+    text = TelegramCommandPresenter().status(
+        {
+            "scheduler": {"paused": False, "dead": False},
+            "trading": {
+                "run_id": None,
+                "status": "idle",
+                "positions_count": 0,
+                "kill_switch": None,
+            },
+            "telegram": snapshot,
+        }
+    )
+
+    assert snapshot["sender"]["outbox"]["initialized"] is False
+    assert snapshot["degraded"] is True
+    assert "sender" in snapshot["backoff_components"]
+    assert text.startswith("⚠️ 시스템 주의")
+    assert "Telegram 전송 지연" in text
+    assert "📨 대기 메시지  확인 불가" in text
+
+    store.delivery_state_snapshot = original_refresh
+    await service.begin_shutdown()
+    await service.finish_shutdown(deadline_s=0.1)
+
+
+@pytest.mark.anyio
+async def test_초기화후_ephemeral우선중_새retry도_canonical주의로갱신된다(
+        tmp_path
+):
+    clock = Clock()
+    engine = create_engine(
+        f"sqlite+pysqlite:///{tmp_path / 'sender-stale-retry.db'}"
+    )
+    Base.metadata.create_all(engine)
+    store = NotificationStore(engine, now=clock)
+
+    class BusyEphemeral:
+        async def run_once(self):
+            return 1
+
+        def snapshot(self):
+            return {
+                "state": "running",
+                "pending": 1,
+                "backoff_reason": None,
+            }
+
+        def clear(self):
+            return None
+
+    class NeverTelegram:
+        async def send_message(self, _chat_id, _text):
+            raise AssertionError("ephemeral priority must skip durable send")
+
+    outbox = OutboxSender(
+        store,
+        NeverTelegram(),
+        chat_id=22,
+        worker_id="stale-retry",
+        now=clock,
+    )
+    assert await outbox.run_once() == 0
+    store.enqueue_parts("retry-after-initialized", ["one"])
+    delivery = store.claim_deliveries("state-builder")[0]
+    assert store.retry_delivery(
+        delivery.id,
+        "state-builder",
+        delivery.version,
+        "server",
+        503,
+        next_attempt_at=clock() + timedelta(minutes=1),
+    )
+    sender = CompositeSender(BusyEphemeral(), outbox)
+    service = TelegramService(
+        poller=LoopStep(),
+        dispatcher=LoopStep(),
+        projector=LoopStep(),
+        sender=sender,
+        maintenance=LoopStep(),
+        idle_s=0.001,
+    )
+    service.start()
+    await asyncio.sleep(0.01)
+
+    snapshot = service.snapshot()
+    text = TelegramCommandPresenter().status(
+        {
+            "scheduler": {"paused": False, "dead": False},
+            "trading": {
+                "run_id": None,
+                "status": "idle",
+                "positions_count": 0,
+                "kill_switch": None,
+            },
+            "telegram": snapshot,
+        }
+    )
+
+    assert snapshot["sender"]["outbox"]["initialized"] is True
+    assert snapshot["sender"]["outbox"]["retry_pending"] == 1
+    assert snapshot["degraded"] is True
+    assert "sender" in snapshot["backoff_components"]
+    assert "Telegram 전송 지연" in text
+
     await service.begin_shutdown()
     await service.finish_shutdown(deadline_s=0.1)
 

@@ -7,8 +7,13 @@ from app.core.background_service import StopMode
 from app.core.operations_control import (AccountSnapshotDeferred,
                                          OperationsControl)
 from app.domain.broker import Balance, Deposit, Position
-from app.domain.trading.models import LiquidationTarget, PositionState, TradePosition
-from app.domain.trading.models import LiquidationResult
+from app.domain.trading.models import (
+    LiquidationReason,
+    LiquidationResult,
+    LiquidationTarget,
+    PositionState,
+    TradePosition,
+)
 
 KST = timezone(timedelta(hours=9))
 NOW = datetime(2026, 7, 24, 10, 0, tzinfo=KST)
@@ -48,11 +53,23 @@ class Trading:
         if not hasattr(self, "managed_results"):
             self.managed_results = {}
         return self.managed_results.get(
-            intent_id, LiquidationResult("accepted", False, None))
+            intent_id,
+            LiquidationResult(
+                "accepted",
+                False,
+                None,
+                reason=LiquidationReason.ACCEPTED,
+            ),
+        )
 
     async def reconcile_control_intent(self, intent_id, targets=()):
         self.last_reconcile = (intent_id, tuple(targets))
-        return LiquidationResult("needs_attention", False, f"reconciled:{intent_id}")
+        return LiquidationResult(
+            "needs_attention",
+            False,
+            f"reconciled:{intent_id}",
+            reason=LiquidationReason.POSITION_REMAINS,
+        )
 
 
 class Broker:
@@ -162,17 +179,24 @@ async def test_digest는_interactive_singleflight를_공유한다(control):
 async def test_빈청산대상은_broad_stop으로_승격되지않는다(control):
     result = await control.liquidate_managed("intent-empty", ())
     assert result.status == "succeeded"
+    assert result.reason is LiquidationReason.NO_TARGETS
     assert control.trading.stop_requested() is None
 
 
 @pytest.mark.anyio
 async def test_control은_동일intent재조회에서_cached_terminal을_반환한다(control):
     preview = await control.liquidation_preview()
-    terminal = LiquidationResult("succeeded", False, "terminal cached")
+    terminal = LiquidationResult(
+        "succeeded",
+        False,
+        "terminal cached",
+        reason=LiquidationReason.COMPLETED,
+    )
     control.trading.managed_results = {"same_intent": terminal}
     first = await control.liquidate_managed("same_intent", preview.targets)
     second = await control.liquidate_managed("same_intent", preview.targets)
     assert first.status == second.status == "succeeded"
+    assert second.reason is LiquidationReason.UNMANAGED_BALANCE
     assert "terminal cached" in second.warning
 
 
@@ -181,5 +205,30 @@ async def test_청산대사는_공용control을거쳐_trading에위임한다(con
     target = LiquidationTarget(7, "005930", 3)
     result = await control.reconcile_control_intent("intent_7", (target,))
     assert result.status == "needs_attention"
-    assert result.warning == "reconciled:intent_7"
+    assert result.warning.startswith("reconciled:intent_7")
+    assert "미관리 잔고 존재" in result.warning
+    assert result.reason is LiquidationReason.POSITION_REMAINS
     assert control.trading.last_reconcile == ("intent_7", (target,))
+
+
+@pytest.mark.anyio
+async def test_청산대사의_balance실패는_terminal로축소하지않는다(control):
+    control.broker.balance_error = RuntimeError("down")
+    target = LiquidationTarget(7, "005930", 3)
+
+    with pytest.raises(RuntimeError, match="down"):
+        await control.reconcile_control_intent("intent_7", (target,))
+
+    assert control.trading.last_reconcile == ("intent_7", (target,))
+
+
+@pytest.mark.anyio
+async def test_trading서비스부재는_구조화된비활성사유를반환한다(control):
+    control.trading = None
+    target = LiquidationTarget(7, "005930", 3)
+
+    requested = await control.liquidate_managed("intent_8", (target,))
+    reconciled = await control.reconcile_control_intent("intent_8", (target,))
+
+    assert requested.reason is LiquidationReason.TRADING_INACTIVE
+    assert reconciled.reason is LiquidationReason.TRADING_INACTIVE

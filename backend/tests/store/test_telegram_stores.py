@@ -196,6 +196,28 @@ def test_reconciliation_crash는_lease후_다른worker가_회수한다(stores):
         second.id, "r2", second.version, "needs_attention")
 
 
+def test_terminal사유는_임의문자열을_영속하지않는다(stores):
+    inbox, commands, *_ = stores
+    issued = commands.issue_confirmation(
+        OP, CHAT, "liquidate_all", "fp")
+    digest = hashlib.sha256(issued.raw_token.encode()).hexdigest()
+    inbox.persist_batch_and_offset(
+        [update(10, "confirm", digest)], 11)
+    intent = commands.consume_and_create_intent(
+        digest, OP, CHAT, "liquidate_all", "fp", NOW, update_id=10)
+    claimed = commands.claim_intent("runner")
+    assert commands.mark_running(intent.id, "runner", claimed.version)
+
+    with pytest.raises(ValueError, match="LiquidationReason"):
+        commands.mark_terminal(
+            intent.id,
+            "runner",
+            claimed.version + 1,
+            "succeeded",
+            "broker raw diagnostic",
+        )
+
+
 def test_부분성공_뒤_미전송_chunk만_claim하고_완료시_purge(stores):
     _, _, notifications, _ = stores
     oid = notifications.enqueue_parts("k", ["1", "2", "3"], sensitive=True)
@@ -226,6 +248,26 @@ def test_delivery_stale_worker와_조각별_retry예산(stores):
         first.id, "w", first.version, telegram_message_id=9)
     rows = notifications.load_deliveries(oid)
     assert rows[0].attempt_count == 1 and rows[1].attempt_count == 0
+
+
+def test_delivery상태집계는_retry원문없이_안전한대표원인만반환한다(stores):
+    _, _, notifications, clock = stores
+    notifications.enqueue_parts("retry-aggregate", ["one"])
+    delivery = notifications.claim_deliveries("w")[0]
+    assert notifications.retry_delivery(
+        delivery.id,
+        "w",
+        delivery.version,
+        "INTERNAL_SECRET_DIAGNOSTIC",
+        503,
+        next_attempt_at=clock.value + timedelta(minutes=1),
+    )
+
+    snapshot = notifications.delivery_state_snapshot()
+
+    assert snapshot["retry_pending"] == 1
+    assert snapshot["backoff_reason"] == "temporary_error"
+    assert "INTERNAL_SECRET_DIAGNOSTIC" not in repr(snapshot)
 
 
 def test_delivery_dead_letter는_lease_fence와_부모종결을_원자보장한다(stores):

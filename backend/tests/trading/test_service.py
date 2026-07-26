@@ -16,8 +16,13 @@ from app.core.background_service import StopMode
 from app.domain.broker import (Balance, Deposit, MarketData, OpenOrder,
                                OrderAck, OrderSide, Position, Quote)
 from app.domain.trading.config import TradingConfig
-from app.domain.trading.models import (ExitReason, PositionState,
-                                       StopRequestResult, TradePosition)
+from app.domain.trading.models import (
+    ExitReason,
+    LiquidationReason,
+    PositionState,
+    StopRequestResult,
+    TradePosition,
+)
 from app.domain.trading.monitor import ExitAction
 from app.domain.trading.service import OrderCaps, TradingService
 from app.store.models import Base, TradeRunRow
@@ -162,8 +167,9 @@ async def test_stop_once는_예외후재시도와_mode충돌을_구분한다(sto
 async def test_managed_empty는_noop이고_동시intent는_overwrite하지않는다(store):
     broker = FakeBroker(balances=[Balance((_bpos(qty=9),), 900_000, 0)])
     service = _service(broker, store, Cal([True]))
-    assert (await service.request_managed_liquidation(
-        "empty", ())).status == "succeeded"
+    empty = await service.request_managed_liquidation("empty", ())
+    assert empty.status == "succeeded"
+    assert empty.reason is LiquidationReason.NO_TARGETS
     run_id = store.create_run(CFG.to_json(), "mock")
     pos = TradePosition("005930", "삼성전자", "kospi",
                         PositionState.ENTERED, 100_050, 9, 100_050, False,
@@ -176,7 +182,9 @@ async def test_managed_empty는_noop이고_동시intent는_overwrite하지않는
     first = await service.request_managed_liquidation("intent_a", (target,))
     second = await service.request_managed_liquidation("intent_b", (target,))
     assert first.status == "accepted"
+    assert first.reason is LiquidationReason.ACCEPTED
     assert second.status == "needs_attention"
+    assert second.reason is LiquidationReason.ANOTHER_INTENT_ACTIVE
     assert service._managed_liquidation_intent == "intent_a"
 
 
@@ -195,6 +203,7 @@ async def test_managed는_broker수량불일치와_장외를_발주없이거부�
     service.is_running = lambda: True
     mismatch = await service.request_managed_liquidation("mismatch", (target,))
     assert mismatch.status == "needs_attention"
+    assert mismatch.reason is LiquidationReason.QUANTITY_MISMATCH
     assert broker.placed == []
 
     closed = _service(FakeBroker(), store, Cal([False]))
@@ -202,7 +211,79 @@ async def test_managed는_broker수량불일치와_장외를_발주없이거부�
     closed.is_running = lambda: True
     result = await closed.request_managed_liquidation("closed", (target,))
     assert result.status == "needs_attention"
+    assert result.reason is LiquidationReason.MARKET_CLOSED
     assert "market is closed" in result.warning
+
+
+@pytest.mark.anyio
+async def test_managed의_실행전거부와복구실패는_구조화사유를반환한다(store):
+    run_id = store.create_run(CFG.to_json(), "mock")
+    pos = TradePosition(
+        "005930",
+        "삼성전자",
+        "kospi",
+        PositionState.ENTERED,
+        100_050,
+        9,
+        100_050,
+        False,
+        entered_at=T0,
+    )
+    pos_id = store.create_position(run_id, pos)
+    from app.domain.trading.models import LiquidationTarget
+
+    target = LiquidationTarget(pos_id, "005930", 9)
+    broker = FakeBroker(balances=[Balance((_bpos(qty=9),), 900_000, 0)])
+
+    inactive = _service(broker, store, Cal([True]))
+    inactive._run_id = run_id
+    inactive.is_running = lambda: False
+    inactive_result = await inactive.request_managed_liquidation(
+        "inactive", (target,)
+    )
+    assert inactive_result.reason is LiquidationReason.TRADING_INACTIVE
+
+    accepted = _service(broker, store, Cal([True]))
+    accepted._run_id = run_id
+    accepted.is_running = lambda: True
+    accepted._managed_liquidation_intent = "same"
+    accepted._managed_liquidation_targets = {pos_id: target}
+    accepted_result = await accepted.request_managed_liquidation(
+        "same", (target,)
+    )
+    assert accepted_result.reason is LiquidationReason.ALREADY_ACCEPTED
+
+    changed = _service(broker, store, Cal([True]))
+    changed._run_id = run_id
+    changed.is_running = lambda: True
+    changed_result = await changed.request_managed_liquidation(
+        "changed",
+        (LiquidationTarget(pos_id, "005930", 8),),
+    )
+    assert changed_result.reason is LiquidationReason.TARGET_STATE_CHANGED
+
+    unknown = await changed.reconcile_control_intent("unknown", ())
+    assert unknown.reason is LiquidationReason.UNKNOWN_INTENT
+
+    class BrokenBroker(FakeBroker):
+        async def get_balance(self):
+            raise RuntimeError("sensitive diagnostic")
+
+    broken = _service(BrokenBroker(), store, Cal([True]))
+    broken._run_id = run_id
+    broken.is_running = lambda: True
+    preflight = await broken.request_managed_liquidation(
+        "preflight_failure", (target,)
+    )
+    reconciled = await broken.reconcile_control_intent("recover", (target,))
+    assert (
+        preflight.reason
+        is LiquidationReason.PREFLIGHT_RECONCILIATION_FAILED
+    )
+    assert (
+        reconciled.reason
+        is LiquidationReason.POST_ACCEPT_RECONCILIATION_FAILED
+    )
 
 
 @pytest.mark.anyio
@@ -229,6 +310,7 @@ async def test_managed는_기존SELL미체결을_합산하고_중복매도하지
     result = await service.request_managed_liquidation(
         "existing_sell", (LiquidationTarget(pos_id, "005930", 9),))
     assert result.status == "needs_attention"
+    assert result.reason is LiquidationReason.OPEN_SELL_ORDERS
     assert "잔량=5" in result.warning
     assert "S1,S2" in result.warning
     assert broker.placed == []
@@ -275,6 +357,7 @@ async def test_managed_stop영속실패는_scope를남기거나_broad청산하�
     result = await service.request_managed_liquidation(
         "persist_fail", (LiquidationTarget(pos_id, "005930", 9),))
     assert result.status == "needs_attention"
+    assert result.reason is LiquidationReason.PERSISTENCE_FAILED
     assert service._managed_liquidation_intent is None
     assert service.stop_requested() is None
     assert broker.placed == []
@@ -451,6 +534,7 @@ async def test_managed_ABA는_A에만영속하고_B에scope_flag를게시하지�
     release.set()
     result = await task
     assert result.status == "needs_attention"
+    assert result.reason is LiquidationReason.RUN_CHANGED
     assert "changed/ended" in result.warning
     assert service._managed_liquidation_intent is None
     assert service.stop_requested() is None
@@ -493,6 +577,7 @@ async def test_managed_DB대기중_run종료면_terminal만기억한다(store):
     release.set()
     result = await task
     assert result.status == "needs_attention"
+    assert result.reason is LiquidationReason.RUN_CHANGED
     assert "changed/ended" in result.warning
     assert service._managed_liquidation_intent is None
     assert service.stop_requested() is None
@@ -558,6 +643,7 @@ async def test_managed는_거래정지와_TOCTOU수량변화를_주문전차단�
     target = LiquidationTarget(pos_id, "005930", 9)
     result = await halted.request_managed_liquidation("halted", (target,))
     assert result.status == "needs_attention"
+    assert result.reason is LiquidationReason.TRADING_HALT
     assert broker.placed == []
 
     store.instrument_state = lambda _symbol: None
@@ -815,6 +901,7 @@ async def test_managed청산은_첫SELL후_preflight재호출없이_pending을_t
     assert len(sells) == 1
     result = await service.reconcile_control_intent("managed_terminal")
     assert result.status == "succeeded"
+    assert result.reason is LiquidationReason.COMPLETED
     cached = await service.request_managed_liquidation(
         "managed_terminal",
         tuple(service._managed_liquidation_targets.values()))
@@ -842,6 +929,7 @@ async def test_managed청산은_장마감잔량을_EXIT_FAILED와_terminal결과
     await service._liquidate_all(T0)
     result = await service.reconcile_control_intent("managed_close")
     assert result.status == "needs_attention"
+    assert result.reason is LiquidationReason.POSITION_REMAINS
     persisted = store.get_position(pos_id)
     assert persisted.state is PositionState.EXIT_FAILED
 
@@ -995,6 +1083,7 @@ async def test_확인한_run과_달라지면_managed청산을_시작하지않는
         (LiquidationTarget(pos_id, "005930", 3),), expected_run_id=prior_run)
 
     assert result.status == "needs_attention"
+    assert result.reason is LiquidationReason.RUN_CHANGED
     assert broker.placed == []
 
 
@@ -1023,7 +1112,9 @@ async def test_진행중청산대사는_캐시하지않고_후속_terminal을_�
         "telegram_command_confirmation_9")
 
     assert first.status == "in_progress"
+    assert first.reason is LiquidationReason.POSITION_REMAINS
     assert second.status == "succeeded"
+    assert second.reason is LiquidationReason.COMPLETED
 
 
 def test_새run은_managed_scope만_clear하고_REST_broad는_전체를읽는다(store):

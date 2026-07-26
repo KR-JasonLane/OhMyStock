@@ -4,19 +4,55 @@
 > 새 세션에서 재개할 때 이 문서를 가장 먼저 읽으세요. 매 작업 세션이 끝날 때마다
 > 이 문서를 갱신합니다(핸드오프 문서).
 
-- **최종 수정:** 2026-07-24
+- **최종 수정:** 2026-07-26
 - **프로젝트:** OhMyStock — 한국 주식 자동매매 시스템
 
 ---
 
 ## ▶ 여기서 재개 (다음 액션)
 
-**Phase 8(텔레그램 봇) Task 1~10 비라이브 수용 준비 완료. 최신 전체 회귀는
-1051 passed, 11 live tests deselected, 기존 warning 1건이며, 4인 최종 패널의
-Critical/Important는 0이다. 실제 Telegram·키움·운영 PostgreSQL·별도 토큰
-발급은 실행하지 않았다.**
+**Phase 8 실제 모의 Telegram 수용에서 조회 명령의 송수신과 단일 운영자
+인증은 성공했다. 이어진 가독성 개선 Task 0과 Task 1은 각각 기준선 시계
+정합과 `AccountSummary.deposit` 예수금 보존을 완료해 커밋했으며, Task 2는
+전용 `TelegramCommandPresenter`와 모든 조회·제어·확인 응답 연결을 구현해
+구조화 청산 사유와 필수 Telegram loop 관측까지 보강하고 관련 비라이브
+회귀 241건을 통과했다. 독립 gate의 Important 4건과 Minor 2건을 수정한
+뒤 관련 회귀 `270 passed`를 확인했다. 후속 재검토의 청산 durable 상태
+전이와 sender 영속 retry 관측 발견까지 수정해 관련 회귀
+`304 passed`를 확인했다. 독립 gate의 마지막 sender 최초 적재 전
+zero-green Important도 명시적 `initialized=False` 계약으로 수정해 관련
+회귀 `309 passed`를 확인했다. 이어진 재검토의 초기화 후 stale cache와
+미초기화 대기 0건 표시도 매 composite tick의 비동기 aggregate refresh,
+`확인 불가` 표시와 명시적 `DurableSenderPort`로 해소했다. 최종 관련 회귀
+뒤 broad review가 찾은 손상된 청산 성공 사유의 미관리 잔고 승격과
+ephemeral 인증 실패의 stale backoff도 fail-closed로 보완했다. 최신 관련
+회귀 뒤 공유 인증 circuit의 stale backoff와 accepted/복구 청산 대사의
+미관리 잔고 재물질화도 보완했다. 후속 재검토의 손상 terminal reason
+영속과 기존 reason 없는 성공 재표시도 같은 allowlist로 fail-closed했다.
+최신 관련 회귀 `328 passed`, 전체 비라이브 `1240 passed`, live 11건 제외,
+기존 warning 1건을 확인했다. production `LiquidationResult` 생성 지점은
+trading service 20개와 operations control 4개, 합계 24개로 재계수했다.
+실제 Telegram·키움·주문·운영 DB는 이번 구현 검증에서 호출하지 않았다.**
 
-**▶ 다음 작업(우선순위 순)**
+**실제 수용에서 `/account` 의미 차이를 확인했다. `Deposit.total`은 예수금,
+`Deposit.available`은 주문가능금액, `Balance.total_eval`은 보유주식
+평가액이다. 검증된 계좌 전체 총자산 필드나 산식은 아직 없으므로 새 응답은
+총자산을 임의 합산하지 않고 `확인 불가`로 표시한다.**
+
+**▶ 현재 다음 작업 — 하나의 승인 연쇄**
+1. Task 2 예정 커밋 메시지와 정확한 포함 파일을 제시해 명시적 커밋 승인을
+   기다린다. 커밋 후에는 별도 배포 승인을 받아 backend 이미지를
+   재빌드·재기동하고, 실제 Telegram에서 조회 전용 `/status`, `/account`,
+   `/positions`, `/help`만 재수용한다. 상태 변경 명령은 실행하지 않는다.
+
+## 역사 기록 — 이전 로드맵 (현재 다음 작업 아님)
+
+Phase 8 Task 1~10은 당시 비라이브 회귀 `1051 passed`, live 11건 제외,
+기존 warning 1건과 패널 Critical/Important 0으로 완료됐다. 이후 실제
+Telegram 조회 수용까지 수행했으며, 현재 재개점은 위 Task 2 가독성
+커밋·별도 배포·조회 재수용 연쇄다.
+
+**▶ 당시 다음 작업 기록(보존용)**
 1. **Task 10 문서·검증 변경 커밋 후 승인 대기: Phase 8 모의 수용 실행** — 스펙
    `docs/specs/2026-07-24-phase8-telegram-bot-design.md`와 계획서
    `docs/plans/2026-07-24-phase8-telegram-bot-plan.md` 모두 작성 및

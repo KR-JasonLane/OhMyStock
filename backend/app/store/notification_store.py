@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import Engine, case, func, or_, select, update
+from sqlalchemy import Engine, and_, case, func, or_, select, update
 from sqlalchemy.orm import aliased
 from sqlalchemy.orm import sessionmaker
 
@@ -456,16 +456,87 @@ class NotificationStore:
 
     def delivery_counts(self) -> dict[str, int]:
         """Aggregate delivery states without loading message bodies."""
-        with self._sessions() as session:
-            rows = session.execute(select(
-                NotificationDeliveryRow.status, func.count()).group_by(
-                    NotificationDeliveryRow.status))
-            counts = {status: count for status, count in rows}
+        snapshot = self.delivery_state_snapshot()
         return {
-            "pending": counts.get("pending", 0),
-            "sending": counts.get("sending", 0),
-            "sent": counts.get("sent", 0),
-            "dead_letter": counts.get("dead_letter", 0),
+            key: int(snapshot[key])
+            for key in ("pending", "sending", "sent", "dead_letter")
+        }
+
+    def delivery_state_snapshot(self) -> dict[str, int | str | None]:
+        """Aggregate durable retry state without exposing error text or IDs."""
+        with self._sessions() as session:
+            retry = and_(
+                NotificationDeliveryRow.status == "pending",
+                NotificationDeliveryRow.attempt_count > 0,
+            )
+            (
+                pending,
+                sending,
+                sent,
+                dead_letter,
+                retry_pending,
+                rate_limited,
+                send_deadline,
+            ) = session.execute(
+                select(
+                    *(
+                        func.coalesce(func.sum(case(
+                            (
+                                NotificationDeliveryRow.status == status,
+                                1,
+                            ),
+                            else_=0,
+                        )), 0)
+                        for status in (
+                            "pending", "sending", "sent", "dead_letter"
+                        )
+                    ),
+                    func.coalesce(func.sum(case(
+                        (retry, 1), else_=0
+                    )), 0),
+                    func.coalesce(func.sum(case(
+                        (
+                            and_(
+                                retry,
+                                or_(
+                                    NotificationDeliveryRow.last_http_status
+                                    == 429,
+                                    NotificationDeliveryRow.last_error_kind
+                                    == "rate_limited",
+                                ),
+                            ),
+                            1,
+                        ),
+                        else_=0,
+                    )), 0),
+                    func.coalesce(func.sum(case(
+                        (
+                            and_(
+                                retry,
+                                NotificationDeliveryRow.last_error_kind
+                                == "send_deadline",
+                            ),
+                            1,
+                        ),
+                        else_=0,
+                    )), 0),
+                )
+            ).one()
+        backoff_reason: str | None = None
+        if retry_pending > 0:
+            if rate_limited > 0:
+                backoff_reason = "rate_limited"
+            elif send_deadline > 0:
+                backoff_reason = "send_deadline"
+            else:
+                backoff_reason = "temporary_error"
+        return {
+            "pending": pending,
+            "sending": sending,
+            "sent": sent,
+            "dead_letter": dead_letter,
+            "retry_pending": retry_pending,
+            "backoff_reason": backoff_reason,
         }
 
     def enqueue_parts(self, idempotency_key: str, bodies: Sequence[str],

@@ -29,12 +29,44 @@ class LiquidationTarget:
     quantity: int
 
 
+class LiquidationReason(str, enum.Enum):
+    """관리 청산 결과의 안정적인 기계 판독 사유.
+
+    ``warning``은 내부 진단용 자유 문구이고 외부 표시 계약으로 사용하지
+    않는다. 이 코드는 발생 지점이 결정해 표현 계층의 문자열 역분류를
+    막는다.
+    """
+
+    NO_TARGETS = "no_targets"
+    RUN_CHANGED = "run_changed"
+    ALREADY_ACCEPTED = "already_accepted"
+    ANOTHER_INTENT_ACTIVE = "another_intent_active"
+    TRADING_INACTIVE = "trading_inactive"
+    PERSISTENCE_FAILED = "persistence_failed"
+    ACCEPTED = "accepted"
+    MARKET_CLOSED = "market_closed"
+    PREFLIGHT_RECONCILIATION_FAILED = "preflight_reconciliation_failed"
+    POST_ACCEPT_RECONCILIATION_FAILED = (
+        "post_accept_reconciliation_failed"
+    )
+    TARGET_STATE_CHANGED = "target_state_changed"
+    QUANTITY_MISMATCH = "quantity_mismatch"
+    OPEN_SELL_ORDERS = "open_sell_orders"
+    TRADING_HALT = "trading_halt"
+    UNKNOWN_INTENT = "unknown_intent"
+    POSITION_REMAINS = "position_remains"
+    COMPLETED = "completed"
+    MARKET_CLOSE_INCOMPLETE = "market_close_incomplete"
+    UNMANAGED_BALANCE = "unmanaged_balance"
+
+
 @dataclass(frozen=True)
 class LiquidationResult:
     """청산 command 결과. 불확실성은 succeeded로 축약하지 않는다."""
     status: str
     account_fully_empty: bool
     warning: str | None = None
+    reason: LiquidationReason | None = None
 
 
 @dataclass(frozen=True)

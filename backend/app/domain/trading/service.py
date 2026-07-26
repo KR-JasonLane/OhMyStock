@@ -38,9 +38,14 @@ from app.core.background_service import BackgroundRunService, StopMode
 from app.domain.broker import BrokerPort, OrderPort, OrderSide
 from app.domain.trading.config import TradingConfig
 from app.domain.trading.entry import EntryExecutor, EntryOutcome
-from app.domain.trading.models import (LiquidationResult, LiquidationTarget,
-                                       PositionState, StopRequestResult,
-                                       TradePosition)
+from app.domain.trading.models import (
+    LiquidationReason,
+    LiquidationResult,
+    LiquidationTarget,
+    PositionState,
+    StopRequestResult,
+    TradePosition,
+)
 from app.domain.trading.monitor import ExitAction, PositionMonitor
 from app.domain.trading.reconcile import (DbPosition, ReconcileKind,
                                           apply_reconcile, reconcile_decide)
@@ -334,12 +339,18 @@ class TradingService(BackgroundRunService):
             return completed
         if not targets:
             return LiquidationResult(
-                "succeeded", False, "no managed liquidation targets; no-op")
+                "succeeded",
+                False,
+                "no managed liquidation targets; no-op",
+                reason=LiquidationReason.NO_TARGETS,
+            )
         async with self._control_intent_lock:
             if expected_run_id is not None and self._run_id != expected_run_id:
                 result = LiquidationResult(
                     "needs_attention", False,
-                    "run changed before managed liquidation started")
+                    "run changed before managed liquidation started",
+                    reason=LiquidationReason.RUN_CHANGED,
+                )
                 self._remember_managed_result(intent_id, result)
                 return result
             expected_run_id = self._run_id
@@ -348,15 +359,23 @@ class TradingService(BackgroundRunService):
                 raise ValueError("intent_id already used for another mode")
             if self._managed_liquidation_intent == intent_id:
                 return LiquidationResult(
-                    "in_progress", False, "managed liquidation already accepted")
+                    "in_progress",
+                    False,
+                    "managed liquidation already accepted",
+                    reason=LiquidationReason.ALREADY_ACCEPTED,
+                )
             if self._managed_liquidation_intent is not None:
                 return LiquidationResult(
                     "needs_attention", False,
-                    "another managed liquidation intent is active")
+                    "another managed liquidation intent is active",
+                    reason=LiquidationReason.ANOTHER_INTENT_ACTIVE,
+                )
             if not self.is_running():
                 return LiquidationResult(
                     "needs_attention", False,
-                    "trading is idle; no liquidation side effect started")
+                    "trading is idle; no liquidation side effect started",
+                    reason=LiquidationReason.TRADING_INACTIVE,
+                )
             failure = await self._managed_preflight(targets)
             if failure is not None:
                 return failure
@@ -364,7 +383,9 @@ class TradingService(BackgroundRunService):
                     or self._run_id != expected_run_id):
                 result = LiquidationResult(
                     "needs_attention", False,
-                    "run changed/ended before liquidation persistence")
+                    "run changed/ended before liquidation persistence",
+                    reason=LiquidationReason.RUN_CHANGED,
+                )
                 self._remember_managed_result(intent_id, result)
                 return result
             persist_task = asyncio.create_task(
@@ -374,7 +395,9 @@ class TradingService(BackgroundRunService):
             if not stop.persisted:
                 result = LiquidationResult(
                     "needs_attention", False,
-                    f"{stop.warning}; managed liquidation not started")
+                    f"{stop.warning}; managed liquidation not started",
+                    reason=LiquidationReason.PERSISTENCE_FAILED,
+                )
                 if cancelled:
                     raise asyncio.CancelledError
                 return result
@@ -382,7 +405,9 @@ class TradingService(BackgroundRunService):
                     or self._run_id != expected_run_id):
                 result = LiquidationResult(
                     "needs_attention", False,
-                    "run changed/ended before liquidation started")
+                    "run changed/ended before liquidation started",
+                    reason=LiquidationReason.RUN_CHANGED,
+                )
                 self._remember_managed_result(intent_id, result)
                 if cancelled:
                     raise asyncio.CancelledError
@@ -396,7 +421,11 @@ class TradingService(BackgroundRunService):
             if cancelled:
                 raise asyncio.CancelledError
             return LiquidationResult(
-                "accepted", False, "managed liquidation accepted")
+                "accepted",
+                False,
+                "managed liquidation accepted",
+                reason=LiquidationReason.ACCEPTED,
+            )
 
     async def _managed_preflight(
             self, targets: tuple[LiquidationTarget, ...]
@@ -407,7 +436,9 @@ class TradingService(BackgroundRunService):
                 or not self._calendar.is_market_hours(now)):
             return LiquidationResult(
                 "needs_attention", False,
-                "market is closed; no sell order placed; manual action required")
+                "market is closed; no sell order placed; manual action required",
+                reason=LiquidationReason.MARKET_CLOSED,
+            )
         try:
             current, balance, open_orders = await asyncio.gather(
                 asyncio.to_thread(
@@ -419,7 +450,9 @@ class TradingService(BackgroundRunService):
             return LiquidationResult(
                 "needs_attention", False,
                 f"preflight reconciliation failed ({type(exc).__name__}); "
-                "no sell order placed")
+                "no sell order placed",
+                reason=LiquidationReason.PREFLIGHT_RECONCILIATION_FAILED,
+            )
         current_facts = {(pid, pos.symbol, pos.quantity)
                          for pid, pos in current}
         target_facts = {(target.position_id, target.symbol, target.quantity)
@@ -427,7 +460,9 @@ class TradingService(BackgroundRunService):
         if current_facts != target_facts:
             return LiquidationResult(
                 "needs_attention", False,
-                "confirmed target state changed; no sell order placed")
+                "confirmed target state changed; no sell order placed",
+                reason=LiquidationReason.TARGET_STATE_CHANGED,
+            )
         held: defaultdict[str, int] = defaultdict(int)
         for position in balance.positions:
             if position.quantity > 0:
@@ -440,7 +475,9 @@ class TradingService(BackgroundRunService):
                 return LiquidationResult(
                     "needs_attention", False,
                     f"{symbol}: DB수량={quantity}, broker수량="
-                    f"{held.get(symbol, 0)} 불일치; no sell order placed")
+                    f"{held.get(symbol, 0)} 불일치; no sell order placed",
+                    reason=LiquidationReason.QUANTITY_MISMATCH,
+                )
         target_symbols = set(db_qty)
         pending: defaultdict[str, int] = defaultdict(int)
         pending_orders: defaultdict[str, list[str]] = defaultdict(list)
@@ -457,7 +494,9 @@ class TradingService(BackgroundRunService):
             return LiquidationResult(
                 "needs_attention", False,
                 f"target sell open orders ({facts}); ownership unknown; "
-                "no duplicate sell; inspect manually")
+                "no duplicate sell; inspect manually",
+                reason=LiquidationReason.OPEN_SELL_ORDERS,
+            )
         for target in targets:
             state = await asyncio.to_thread(
                 self._store.instrument_state, target.symbol)
@@ -465,7 +504,9 @@ class TradingService(BackgroundRunService):
                 return LiquidationResult(
                     "needs_attention", False,
                     f"{target.symbol}: 거래정지; no sell order placed; "
-                    "manual action required")
+                    "manual action required",
+                    reason=LiquidationReason.TRADING_HALT,
+                )
         return None
 
     async def reconcile_control_intent(
@@ -489,7 +530,11 @@ class TradingService(BackgroundRunService):
             target_map = {target.position_id: target for target in targets}
         else:
             return LiquidationResult(
-                "needs_attention", False, "unknown liquidation intent")
+                "needs_attention",
+                False,
+                "unknown liquidation intent",
+                reason=LiquidationReason.UNKNOWN_INTENT,
+            )
         try:
             balance, open_orders = await asyncio.gather(
                 self._account.get_balance(), self._orders.get_open_orders())
@@ -497,7 +542,9 @@ class TradingService(BackgroundRunService):
             return LiquidationResult(
                 "needs_attention", False,
                 f"broker reconciliation failed ({type(exc).__name__}); "
-                "inspect balance and open sell orders manually")
+                "inspect balance and open sell orders manually",
+                reason=LiquidationReason.POST_ACCEPT_RECONCILIATION_FAILED,
+            )
         held = {position.symbol: position.quantity
                 for position in balance.positions if position.quantity > 0}
         pending = {order.symbol: order.unfilled_qty for order in open_orders
@@ -519,9 +566,18 @@ class TradingService(BackgroundRunService):
         if details:
             result = LiquidationResult(
                 "in_progress" if active_scope and self.is_running()
-                else "needs_attention", not held, "; ".join(details))
+                else "needs_attention",
+                not held,
+                "; ".join(details),
+                reason=LiquidationReason.POSITION_REMAINS,
+            )
         else:
-            result = LiquidationResult("succeeded", not held, None)
+            result = LiquidationResult(
+                "succeeded",
+                not held,
+                None,
+                reason=LiquidationReason.COMPLETED,
+            )
         # `in_progress` is a live observation, not a terminal idempotency
         # result.  Caching it would freeze the command supervisor forever.
         if result.status != "in_progress":
@@ -1368,7 +1424,13 @@ class TradingService(BackgroundRunService):
                         for target in self._managed_liquidation_targets.values())
                     self._remember_managed_result(
                         self._managed_liquidation_intent,
-                        LiquidationResult("needs_attention", False, details))
+                        LiquidationResult(
+                            "needs_attention",
+                            False,
+                            details,
+                            reason=LiquidationReason.MARKET_CLOSE_INCOMPLETE,
+                        ),
+                    )
                 return
             first = False
             # ENTERED 잔여(최초 전량 + 이후 발주 실패 재시도분)는 재청산 지시

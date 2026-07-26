@@ -188,6 +188,7 @@ async def test_5xx는_지수backoff로_예약하고_401은_sender를_dead로_연
     retry = store.enqueue_parts("retry", ["one"])
     telegram.fail(TelegramTemporaryError("sendMessage", "server"))
     assert await worker.run_once() == 1
+    assert worker.snapshot()["backoff_reason"] == "temporary_error"
     _, delivery = _state(store, retry)
     assert _utc(delivery.next_attempt_at) == clock.value + timedelta(seconds=1)
     with store._sessions.begin() as session:
@@ -202,6 +203,145 @@ async def test_5xx는_지수backoff로_예약하고_401은_sender를_dead로_연
     assert worker.snapshot()["state"] == "dead"
     _, delivery = _state(store, auth)
     assert delivery.status == "sending"
+
+
+@pytest.mark.anyio
+async def test_sender재시도성공은_다른backlog가남아도_backoff를해제한다(sender):
+    worker, store, telegram, clock = sender
+    store.enqueue_parts("retry-recovered", ["retry"])
+    telegram.fail(TelegramTemporaryError("sendMessage", "server"))
+
+    assert await worker.run_once() == 1
+    assert worker.snapshot()["backoff_reason"] == "temporary_error"
+
+    clock.advance(1)
+    store.enqueue_parts("unrelated-backlog", ["backlog"])
+
+    assert await worker.run_once() == 1
+    snapshot = worker.snapshot()
+    assert snapshot["pending"] == 1
+    assert snapshot["backoff_reason"] is None
+
+
+@pytest.mark.anyio
+async def test_sender는_복수retry와재생성후에도_DBbackoff를보존한다(sender):
+    worker, store, telegram, clock = sender
+    store.enqueue_parts("rate-retry", ["rate"])
+    store.enqueue_parts("temporary-retry", ["temporary"])
+    telegram.fail(TelegramRateLimited("sendMessage", 5))
+    telegram.fail(TelegramTemporaryError("sendMessage", "server"))
+
+    assert await worker.run_once() == 1
+    assert await worker.run_once() == 1
+    snapshot = worker.snapshot()
+    assert snapshot["retry_pending"] == 2
+    assert snapshot["backoff_reason"] == "rate_limited"
+
+    clock.advance(1)
+    assert await worker.run_once() == 1
+    snapshot = worker.snapshot()
+    assert snapshot["retry_pending"] == 1
+    assert snapshot["backoff_reason"] == "rate_limited"
+
+    recreated = OutboxSender(
+        store,
+        telegram,
+        chat_id=1234,
+        worker_id="sender-recreated",
+        now=clock,
+        random_float=lambda: 0.0,
+    )
+    assert await recreated.run_once() == 0
+    snapshot = recreated.snapshot()
+    assert snapshot["retry_pending"] == 1
+    assert snapshot["backoff_reason"] == "rate_limited"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("durable_state", ["pending", "retry", "dead_letter"])
+async def test_재생성sender는_DB최초적재전_zero_green이아니다(
+        sender, monkeypatch, durable_state
+):
+    _, store, telegram, clock = sender
+    store.enqueue_parts(f"recreated-{durable_state}", ["one"])
+    if durable_state != "pending":
+        delivery = store.claim_deliveries("state-builder")[0]
+        if durable_state == "retry":
+            assert store.retry_delivery(
+                delivery.id,
+                "state-builder",
+                delivery.version,
+                "server",
+                503,
+                next_attempt_at=clock.value + timedelta(minutes=1),
+            )
+        else:
+            assert store.dead_letter_delivery(
+                delivery.id,
+                "state-builder",
+                delivery.version,
+                "http_400",
+                400,
+            )
+    recreated = OutboxSender(
+        store,
+        telegram,
+        chat_id=1234,
+        worker_id=f"recreated-{durable_state}",
+        now=clock,
+        random_float=lambda: 0.0,
+    )
+    def unexpected_sync_read():
+        raise AssertionError("snapshot must not perform synchronous DB I/O")
+
+    monkeypatch.setattr(
+        store,
+        "delivery_state_snapshot",
+        unexpected_sync_read,
+    )
+
+    snapshot = recreated.snapshot()
+
+    assert snapshot["initialized"] is False
+
+
+@pytest.mark.anyio
+async def test_emptyDB_sender도_첫tick전주의후_적재성공하면정상이다(sender):
+    _, store, telegram, clock = sender
+    recreated = OutboxSender(
+        store,
+        telegram,
+        chat_id=1234,
+        worker_id="recreated-empty",
+        now=clock,
+        random_float=lambda: 0.0,
+    )
+
+    assert recreated.snapshot()["initialized"] is False
+
+    assert await recreated.run_once() == 0
+    snapshot = recreated.snapshot()
+    assert snapshot["initialized"] is True
+    assert snapshot["pending"] == 0
+    assert snapshot["retry_pending"] == 0
+    assert snapshot["dead_letter"] == 0
+    assert snapshot["backoff_reason"] is None
+
+
+@pytest.mark.anyio
+async def test_sender_retry_fence실패는_가짜backoff상태를만들지않는다(
+        sender, monkeypatch
+):
+    worker, store, telegram, _ = sender
+    store.enqueue_parts("stale-retry", ["one"])
+    telegram.fail(TelegramTemporaryError("sendMessage", "server"))
+    monkeypatch.setattr(store, "retry_delivery", lambda *args, **kwargs: False)
+
+    assert await worker.run_once() == 1
+
+    snapshot = worker.snapshot()
+    assert snapshot["retry_pending"] == 0
+    assert snapshot["backoff_reason"] is None
 
 
 @pytest.mark.anyio

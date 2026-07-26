@@ -12,6 +12,7 @@ from sqlalchemy import Engine, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 
+from app.domain.trading.models import LiquidationReason
 from app.store.models import (TelegramCommandAuditRow, TelegramCommandExecutionRow,
                               TelegramConfirmationLockRow, TelegramConfirmationRow,
                               TelegramUpdateRow)
@@ -37,6 +38,7 @@ class ClaimedIntent:
     state_fingerprint: str
     targets: Any
     version: int
+    terminal_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -266,12 +268,24 @@ class TelegramCommandStore:
         return self._transition(intent_id, owner, version, ("claimed",), "running")
 
     def mark_terminal(self, intent_id: str, owner: str, version: int,
-                      status: str, failure_kind: str | None = None) -> bool:
+                      status: str,
+                      terminal_reason: LiquidationReason | None = None) -> bool:
         if status not in {"succeeded", "failed", "needs_attention"}:
             raise ValueError("invalid terminal status")
+        if terminal_reason is not None and not isinstance(
+            terminal_reason, LiquidationReason
+        ):
+            raise ValueError("terminal_reason must be a LiquidationReason")
+        # The existing bounded diagnostic column stores only a structured
+        # terminal reason code, never a free-form broker warning.
         return self._transition(intent_id, owner, version,
                                 ("running", "reconciling"), status,
-                                failure_kind, terminal=True)
+                                (
+                                    terminal_reason.value
+                                    if terminal_reason is not None
+                                    else None
+                                ),
+                                terminal=True)
 
     def mark_unknown(self, intent_id: str, owner: str, version: int) -> bool:
         return self._transition(intent_id, owner, version, ("running",), "unknown",
@@ -313,7 +327,8 @@ class TelegramCommandStore:
             return (
                 ClaimedIntent(
                     row.id, row.update_id, row.command, row.state_fingerprint,
-                    json.loads(row.targets_json), row.version),
+                    json.loads(row.targets_json), row.version,
+                    row.failure_kind),
                 row.status,
             )
 
