@@ -29,6 +29,7 @@ store를 만난다(Global Constraints — store 통짜 주입 금지).
 import asyncio
 import logging
 import re
+from collections.abc import Callable
 from collections import OrderedDict, defaultdict
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
@@ -97,6 +98,8 @@ class _StoreLike(Protocol):
                    warnings: str | None = None) -> None: ...
     def create_position(self, run_id: int, position: TradePosition) -> int: ...
     def update_position(self, position_id: int, **kwargs) -> None: ...
+    def update_position_mark(self, position_id: int, price: int,
+                             marked_at: datetime) -> None: ...
     def save_position_snapshot(self, position_id: int,
                                pos: TradePosition) -> None: ...
     def save_position_snapshot_state_only(
@@ -631,6 +634,7 @@ class TradingService(BackgroundRunService):
         self._monitor = PositionMonitor(
             self._orders, self._config, self._calendar, self._caps.check,
             persist_position=self._persist_by_symbol,
+            persist_mark=self._prepare_mark_persist_by_symbol,
             on_order=self._record_order_by_symbol,
             on_fill=self._record_fill_observation,
             lookup_instrument_state=self._lookup_state,
@@ -660,6 +664,8 @@ class TradingService(BackgroundRunService):
             status, failure = "failed", type(exc).__name__
             logger.exception("trading run failed")
         finally:
+            if self._monitor is not None:
+                await self._monitor.close_mark_persists()
             # 모든 종료 경로에서 finish_run 보장(§9 — status='running' 좀비
             # 행은 감사 질문에 답하지 못한다. P5-T5 보안 이월)
             mode = self.stop_requested()
@@ -1451,6 +1457,14 @@ class TradingService(BackgroundRunService):
         if pos_id is None:
             raise ValueError(f"unknown position for persist: {pos.symbol}")
         self._store.save_position_snapshot(pos_id, pos)
+
+    def _prepare_mark_persist_by_symbol(
+            self, pos: TradePosition, price: int,
+            marked_at: datetime) -> Callable[[], None]:
+        pos_id = self._pos_ids.get(pos.symbol)
+        if pos_id is None:
+            raise ValueError(f"unknown position for mark persist: {pos.symbol}")
+        return lambda: self._store.update_position_mark(pos_id, price, marked_at)
 
     def _executor_for(self, pos_id: int) -> EntryExecutor:
         return EntryExecutor(

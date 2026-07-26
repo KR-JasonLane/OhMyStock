@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
 from datetime import date
 
-from sqlalchemy import Engine, func, select
+from sqlalchemy import Engine, create_engine, func, or_, select, text, update
 from sqlalchemy.orm import sessionmaker
 
 from app.store.kst_time import (as_aware_utc, coarse_utc_bounds,
@@ -54,6 +54,10 @@ def _validate_resp_body(resp_body: dict) -> dict:
 _OPEN_STATES = (PositionState.PENDING_ENTRY.value, PositionState.ENTERED.value,
                 PositionState.EXITING.value, PositionState.EXIT_FAILED.value)
 
+# mark는 대시보드 보조 관측값이다. lock/statement 대기가 청산 판단보다 오래
+# 살아남지 않도록 PostgreSQL의 mark 전용 transaction에만 짧은 상한을 둔다.
+_MARK_TRANSACTION_TIMEOUT_MS = 250
+
 
 @dataclass(frozen=True)
 class DailyOrderUsage:
@@ -89,14 +93,41 @@ def _row_to_position(row: TradePositionRow) -> TradePosition:
         exit_phase=ExitPhase(row.exit_phase) if row.exit_phase else None,
         exit_price=row.exit_price,
         exit_reason=ExitReason(row.exit_reason) if row.exit_reason else None,
-        realized_pnl=row.realized_pnl, closed_at=row.closed_at)
+        realized_pnl=row.realized_pnl, closed_at=row.closed_at,
+        mark_price=row.mark_price,
+        marked_at=(as_aware_utc(row.marked_at) if row.marked_at else None))
 
 
 class TradingStore:
     def __init__(self, engine: Engine,
-                 now: Callable[[], datetime] | None = None) -> None:
+                 now: Callable[[], datetime] | None = None,
+                 mark_timeout_ms: int = _MARK_TRANSACTION_TIMEOUT_MS) -> None:
+        if type(mark_timeout_ms) is not int or mark_timeout_ms <= 0:
+            raise ValueError("mark_timeout_ms must be positive")
         self._sessions = sessionmaker(bind=engine)
         self._now = now or (lambda: datetime.now(timezone.utc))
+        self._dialect_name = engine.dialect.name
+        self._mark_timeout_ms = mark_timeout_ms
+        # mark는 청산과 독립된 보조 관측이므로 PostgreSQL에서만 작은 전용
+        # pool을 쓴다. 공유 pool checkout이 mark timeout 설정보다 먼저
+        # 수십 초 막혀 run 종료를 지연시키는 경로를 닫는다.
+        self._owns_mark_engine = self._dialect_name == "postgresql"
+        mark_connect_timeout_sec = max(1, (mark_timeout_ms + 999) // 1000)
+        mark_connect_args = {
+            "connect_timeout": mark_connect_timeout_sec,
+            "options": (f"-c lock_timeout={mark_timeout_ms} "
+                        f"-c statement_timeout={mark_timeout_ms}"),
+        }
+        self._mark_engine = (
+            create_engine(
+                engine.url, pool_size=1, max_overflow=0,
+                pool_timeout=mark_timeout_ms / 1000,
+                # pre_ping은 connection checkout 뒤 별도 I/O라 connect/DB
+                # timeout보다 먼저 무기한 대기할 수 있다. mark는 보조값이므로
+                # 생략하고 실패를 monitor 경고로 격리한다.
+                pool_pre_ping=False, connect_args=mark_connect_args)
+            if self._owns_mark_engine else engine)
+        self._mark_sessions = sessionmaker(bind=self._mark_engine)
         self._notifications = NotificationStore(engine, now=self._now)
 
     # ---------- 런 ----------
@@ -423,6 +454,59 @@ class TradingStore:
             if closed_at is not None:
                 row.closed_at = closed_at
 
+    def update_position_mark(self, position_id: int, price: int,
+                             marked_at: datetime) -> None:
+        """최신 관측 가격·시각을 함께 갱신한다.
+
+        `peak_price`는 트레일링 방어선의 단조 고점이므로 현재가 표시와
+        분리한다. 이 메서드는 nullable 컬럼을 지우지 않으며, 유효한 관측
+        한 건을 같은 트랜잭션에서 원자적으로 반영한다.
+        """
+        if price <= 0:
+            raise ValueError("mark price must be positive")
+        if marked_at.tzinfo is None or marked_at.utcoffset() is None:
+            raise ValueError("marked_at must be timezone-aware")
+        marked_at = marked_at.astimezone(timezone.utc)
+        with self._mark_sessions.begin() as session:
+            self._apply_mark_timeouts(session)
+            # monitor의 비동기 격리 작업은 앞선 cycle의 DB 쓰기가 늦게 끝날
+            # 수 있다. 비교와 갱신을 하나의 SQL 문으로 수행해, 두 worker의
+            # read-then-write 경합에서도 오래된 관측이 최신 mark를 되돌리지
+            # 않게 한다. 동시 시각은 한 cycle의 동일 관측이므로 마지막 값도
+            # 무방하다.
+            result = session.execute(
+                update(TradePositionRow)
+                .where(
+                    TradePositionRow.id == position_id,
+                    or_(TradePositionRow.marked_at.is_(None),
+                        TradePositionRow.marked_at <= marked_at),
+                )
+                .values(mark_price=price, marked_at=marked_at))
+            if (result.rowcount == 0
+                    and session.get(TradePositionRow, position_id) is None):
+                raise ValueError(f"unknown trade position: {position_id}")
+
+    def _apply_mark_timeouts(self, session) -> None:
+        """PostgreSQL에서만 mark transaction의 lock/statement 상한을 건다.
+
+        SQLite는 이 명령을 지원하지 않으며 테스트·개발 경로에서 별도 설정이
+        필요 없다. `SET LOCAL`은 이 transaction에만 적용돼 주문·감사 저장의
+        기존 timeout 정책을 바꾸지 않는다.
+        """
+        if self._dialect_name != "postgresql":
+            return
+        timeout = f"{self._mark_timeout_ms}ms"
+        # timeout은 위에서 양의 int로 검증한 내부 설정값이므로 literal로
+        # 안전하다. PostgreSQL의 SET LOCAL 문법은 bind parameter를 값으로
+        # 받지 않으므로 이 형태가 실제 서버에서도 유효하다.
+        session.execute(text(f"SET LOCAL lock_timeout = '{timeout}'"))
+        session.execute(text(f"SET LOCAL statement_timeout = '{timeout}'"))
+
+    def dispose_mark_engine(self) -> None:
+        """lifespan 종료 시 전용 mark pool을 기본 engine보다 먼저 닫는다."""
+        if self._owns_mark_engine:
+            self._mark_engine.dispose()
+
     def submitted_order_nos(self, position_id: int) -> tuple[str, ...]:
         """포지션에 연결된 미종결(submitted) 주문번호 — reconcile ②의 명시
         연결 입력(§6-6: symbol 매칭 금지, trade_position_id로만 판단)."""
@@ -537,7 +621,8 @@ class TradingStore:
         exit_reason의 명시적 clear를 전제하며, 미변경으로 남기면 재기동
         reconcile이 스테일 phase를 보고 살아있는 시장가 청산 주문을
         오취소한다). 식별 필드(symbol/name/market/trade_run_id)는 불변 —
-        갱신하지 않는다."""
+        갱신하지 않는다. 최신 mark는 관측 순서 fence가 필요한 별도 시계열
+        값이므로 이 스냅샷에 포함하지 않고 `update_position_mark`만 갱신한다."""
         with self._sessions.begin() as session:
             row = session.get(TradePositionRow, position_id)
             if row is None:

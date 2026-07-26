@@ -421,6 +421,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 try:
                     await _shutdown_runtime(app)
                 finally:
+                    # mark 전용 PostgreSQL pool은 TradingService가 모든
+                    # worker를 terminal 회수한 뒤 기본 engine보다 먼저 닫는다.
+                    await asyncio.to_thread(
+                        app.state.trading_store.dispose_mark_engine)
                     clients = (
                         app.state.telegram_client,
                         app.state.broker,

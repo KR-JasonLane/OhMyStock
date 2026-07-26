@@ -6,6 +6,8 @@ interval=1.0 기준 유예 sleep 1회 + 폴 3회, 미관측 주문의 부재는 
 
 from datetime import datetime
 from decimal import Decimal
+from time import monotonic
+import threading
 
 import pytest
 
@@ -67,12 +69,17 @@ def _pos(symbol="005930", entry=100_000, peak=None, trailing=False,
 
 
 def _monitor(fake, store, calendar=None, caps=None, on_order=None, on_fill=None,
-             lookup=None, sleep=None) -> PositionMonitor:
+             lookup=None, sleep=None, persist_mark=None) -> PositionMonitor:
+    prepare_mark = (
+        (lambda pos, price, marked_at: lambda: persist_mark(
+            pos, price, marked_at))
+        if persist_mark is not None else None)
     return PositionMonitor(fake, CFG, calendar or FakeCalendar(),
                            caps or (lambda *_: None), store.persist,
                            on_order=on_order, on_fill=on_fill,
                            lookup_instrument_state=lookup,
-                           sleep=sleep or _no_sleep, now=lambda: T0)
+                           sleep=sleep or _no_sleep, now=lambda: T0,
+                           persist_mark=prepare_mark)
 
 
 @pytest.mark.anyio
@@ -83,6 +90,110 @@ async def test_청산_조건_미충족은_관측만_영속하고_주문_없음()
     assert actions == [] and fake.placed == []
     assert store.rows["005930"].peak_price == 101_000  # 고점 갱신 영속(§6-2)
     assert store.rows["005930"].trailing_active is False
+
+
+@pytest.mark.anyio
+async def test_유효_현재가는_방어선_평가와_동일한_가격_시각으로_mark에_한번_저장된다():
+    store = FakeStore(_pos())
+    observed = []
+    fake = FakeOrders(quotes_script=[{"005930": _md("005930", 101_200)}])
+
+    monitor = _monitor(
+        fake, store,
+        persist_mark=lambda pos, price, marked_at: observed.append(
+            (pos.symbol, price, marked_at)),
+    )
+    await monitor.poll_once(store.open_positions(), T0)
+    await __import__("asyncio").gather(*monitor._mark_tasks.values())
+
+    assert observed == [("005930", 101_200, T0)]
+
+
+@pytest.mark.anyio
+async def test_가격_조회_실패_사이클은_이전_mark를_지우거나_새_시각을_기록하지_않는다():
+    store = FakeStore(_pos())
+    observed = []
+    fake = FakeOrders(quotes_script=[
+        {"005930": _md("005930", 101_200)}, RuntimeError("quote unavailable"),
+    ])
+    monitor = _monitor(
+        fake, store,
+        persist_mark=lambda pos, price, marked_at: observed.append(
+            (pos.symbol, price, marked_at)),
+    )
+
+    await monitor.poll_once(store.open_positions(), T0)
+    await monitor.poll_once(store.open_positions(), T0.replace(minute=1))
+    await __import__("asyncio").gather(*monitor._mark_tasks.values())
+
+    assert observed == [("005930", 101_200, T0)]
+
+
+@pytest.mark.anyio
+async def test_mark_저장_실패는_방어선_평가를_바꾸지_않고_경고로_남는다():
+    store = FakeStore(_pos())
+    fake = FakeOrders(quotes_script=[{"005930": _md("005930", 101_000)}])
+
+    monitor = _monitor(
+        fake, store,
+        persist_mark=lambda *_: (_ for _ in ()).throw(RuntimeError("db down")),
+    )
+    actions = await monitor.poll_once(store.open_positions(), T0)
+    await __import__("asyncio").gather(*monitor._mark_tasks.values())
+
+    assert actions == []
+    assert store.rows["005930"].peak_price == 101_000
+    assert any("mark persist failing" in warning for warning in monitor.warnings)
+
+
+@pytest.mark.anyio
+async def test_느린_mark_저장은_방어선_평가와_청산_주문을_지연시키지_않는다():
+    release = threading.Event()
+
+    def blocked_mark(*_):
+        release.wait(timeout=0.2)
+
+    store = FakeStore(_pos())
+    fake = FakeOrders(quotes_script=[{"005930": _md("005930", 94_000)}],
+                      open_orders_script=[None, None])
+    monitor = _monitor(fake, store, persist_mark=blocked_mark)
+    started = monotonic()
+    try:
+        actions = await monitor.poll_once(store.open_positions(), T0)
+    finally:
+        release.set()
+
+    assert monotonic() - started < 0.1
+    assert actions[0].reason is ExitReason.STOP_LOSS
+
+
+@pytest.mark.anyio
+async def test_mark_작업은_종료에서_실제_worker_완료까지_회수된다():
+    release = threading.Event()
+    started = threading.Event()
+    finished = threading.Event()
+
+    def blocked_mark(*_):
+        started.set()
+        release.wait(timeout=0.5)
+        finished.set()
+
+    store = FakeStore(_pos())
+    fake = FakeOrders(quotes_script=[{"005930": _md("005930", 101_000)}])
+    monitor = _monitor(fake, store, persist_mark=blocked_mark)
+    await monitor.poll_once(store.open_positions(), T0)
+    asyncio = __import__("asyncio")
+    await asyncio.to_thread(started.wait, 0.2)
+    closing = asyncio.create_task(monitor.close_mark_persists())
+    try:
+        await asyncio.sleep(0.3)
+        assert not closing.done()
+    finally:
+        release.set()
+
+    await closing
+    assert finished.is_set()
+    assert monitor._mark_tasks == {}
 
 
 @pytest.mark.anyio

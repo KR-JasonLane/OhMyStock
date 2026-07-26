@@ -138,6 +138,28 @@ class StoreForTest(TradingStore):
         return None
 
 
+def test_서비스_mark_작업은_예약시점_symbol_소유_position_id에_고정된다(
+        store):
+    service = _service(FakeBroker(), store)
+    run_id = store.create_run(CFG.to_json(), "mock")
+    position = TradePosition("005930", "삼성전자", "kospi",
+                             PositionState.ENTERED, 100_050, 9, 100_050,
+                             False, entered_at=T0)
+    position_id = store.create_position(run_id, position)
+    service._pos_ids = {"005930": position_id}
+    marked_at = datetime(2026, 7, 26, 1, 23, tzinfo=timezone.utc)
+
+    persist = service._prepare_mark_persist_by_symbol(
+        position, 101_200, marked_at)
+    later_run = store.create_run(CFG.to_json(), "mock")
+    later_position_id = store.create_position(later_run, position)
+    service._pos_ids = {"005930": later_position_id}
+    persist()
+
+    assert store.get_position(position_id).mark_price == 101_200
+    assert store.get_position(later_position_id).mark_price is None
+
+
 async def _yield_sleep(_):
     await asyncio.sleep(0)
 

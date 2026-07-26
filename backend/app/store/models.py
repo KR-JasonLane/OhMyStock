@@ -239,6 +239,10 @@ class TradePositionRow(Base):
     peak_price: Mapped[int] = mapped_column(Integer)
     trailing_active: Mapped[bool] = mapped_column(
         Boolean, default=False, server_default="0")
+    # 최신 관측 가격 — 트레일링 고점과 구분해 대시보드 현재가에 사용한다.
+    mark_price: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    marked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True)
     exit_price: Mapped[int | None] = mapped_column(Integer, nullable=True)
     exit_reason: Mapped[str | None] = mapped_column(String(20), nullable=True)
     realized_pnl: Mapped[int | None] = mapped_column(Integer, nullable=True)

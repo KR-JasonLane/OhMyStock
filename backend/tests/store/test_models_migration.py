@@ -244,3 +244,29 @@ def test_0013이_telegram_영속테이블과_고유키를_만든다(tmp_path, mo
 
     command.downgrade(cfg, "0012")
     assert not expected & set(inspect(create_engine(db_url)).get_table_names())
+
+
+def test_0015가_포지션_최신_mark_가격과_시각을_왕복한다(tmp_path, monkeypatch):
+    """대시보드 현재가와 trailing peak를 분리하는 nullable mark 스키마다."""
+    db_url = f"sqlite+pysqlite:///{tmp_path / 'mig.db'}"
+    monkeypatch.setenv("DATABASE_URL", db_url)
+    cfg = Config(str(BACKEND_DIR / "alembic.ini"))
+    cfg.set_main_option("script_location", str(BACKEND_DIR / "alembic"))
+
+    command.upgrade(cfg, "0014")
+    before = {column["name"] for column in inspect(
+        create_engine(db_url)).get_columns("trade_positions")}
+    assert not {"mark_price", "marked_at"} & before
+
+    command.upgrade(cfg, "0015")
+    columns = {column["name"]: column for column in inspect(
+        create_engine(db_url)).get_columns("trade_positions")}
+    assert columns["mark_price"]["type"].__class__.__name__ == "BIGINT"
+    assert columns["mark_price"]["nullable"] is True
+    assert columns["marked_at"]["type"].__class__.__name__ == "DATETIME"
+    assert columns["marked_at"]["nullable"] is True
+
+    command.downgrade(cfg, "0014")
+    after = {column["name"] for column in inspect(
+        create_engine(db_url)).get_columns("trade_positions")}
+    assert not {"mark_price", "marked_at"} & after

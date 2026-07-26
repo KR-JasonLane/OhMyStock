@@ -1,6 +1,6 @@
 """TradingStore(P5 Task 5) — 런/포지션 전이/주문·체결 기록/미종결 조회."""
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 
 import pytest
 from sqlalchemy import create_engine, select
@@ -11,6 +11,14 @@ from app.store.models import Base, TradeOrderRow
 from app.store.trading_store import TradingStore
 
 T0 = datetime(2026, 7, 22, 0, 0, tzinfo=timezone.utc)
+
+
+class _OffsetlessTz(tzinfo):
+    def utcoffset(self, dt):
+        return None
+
+    def dst(self, dt):
+        return None
 
 
 @pytest.fixture
@@ -64,6 +72,111 @@ def test_포지션_생성_전이_왕복(store):
     assert pos.peak_price == 280_000 and pos.trailing_active is True
     # enum 왕복(문자열 저장 → enum 복원)이 정확한지 — reconcile 입력 계약
     assert pos.entry_phase is EntryPhase.LIMIT_SUBMITTED
+
+
+def test_포지션_최신_mark는_같은_환경의_열린_포지션으로_UTC_시각과_왕복한다(
+        store):
+    run_id = store.create_run("{}", "mock")
+    pos_id = store.create_position(
+        run_id, _pos(state=PositionState.ENTERED, entered_at=T0))
+    marked_at = datetime(2026, 7, 26, 1, 23, tzinfo=timezone.utc)
+
+    store.update_position_mark(pos_id, 101_200, marked_at)
+
+    (actual_id, position), = store.open_positions("mock")[0]
+    assert actual_id == pos_id
+    assert position.mark_price == 101_200
+    assert position.marked_at == marked_at
+
+
+@pytest.mark.parametrize(
+    ("price", "marked_at", "message"),
+    [
+        (0, T0, "mark price must be positive"),
+        (101_200, datetime(2026, 7, 26, 1, 23),
+         "marked_at must be timezone-aware"),
+        (101_200, datetime(2026, 7, 26, 1, 23, tzinfo=_OffsetlessTz()),
+         "marked_at must be timezone-aware"),
+    ],
+)
+def test_포지션_mark는_양수_UTC_aware_시각만_받는다(
+        store, price, marked_at, message):
+    run_id = store.create_run("{}")
+    pos_id = store.create_position(run_id, _pos())
+
+    with pytest.raises(ValueError, match=message):
+        store.update_position_mark(pos_id, price, marked_at)
+
+
+def test_미지_포지션_mark_갱신은_ValueError(store):
+    with pytest.raises(ValueError, match="unknown trade position"):
+        store.update_position_mark(999, 101_200, T0)
+
+
+def test_늦게_끝난_오래된_mark_저장은_더_새로운_관측을_되돌리지_않는다(store):
+    run_id = store.create_run("{}")
+    pos_id = store.create_position(run_id, _pos())
+    earlier = datetime(2026, 7, 26, 1, 23, tzinfo=timezone.utc)
+    later = earlier + timedelta(seconds=1)
+
+    store.update_position_mark(pos_id, 101_100, later)
+    store.update_position_mark(pos_id, 101_000, earlier)
+
+    position = store.get_position(pos_id)
+    assert position.mark_price == 101_100
+    assert position.marked_at == later
+
+
+def test_mark_PostgreSQL_트랜잭션은_주입된_짧은_lock_문_timeout을_설정한다(
+        engine):
+    class RecordingSession:
+        def __init__(self):
+            self.calls = []
+
+        def execute(self, statement):
+            self.calls.append(str(statement))
+
+    store = TradingStore(engine, mark_timeout_ms=17)
+    store._dialect_name = "postgresql"
+    session = RecordingSession()
+
+    store._apply_mark_timeouts(session)
+
+    assert session.calls == [
+        "SET LOCAL lock_timeout = '17ms'",
+        "SET LOCAL statement_timeout = '17ms'",
+    ]
+
+
+def test_mark_SQLite_트랜잭션에는_PostgreSQL_timeout_명령을_보내지_않는다(store):
+    class RecordingSession:
+        def execute(self, statement):
+            raise AssertionError(f"unexpected SQL: {statement}")
+
+    store._apply_mark_timeouts(RecordingSession())
+
+
+def test_mark_PostgreSQL_전용_pool은_주입_timeout으로_connection_대기를_제한한다(
+        engine, monkeypatch):
+    monkeypatch.setattr(engine.dialect, "name", "postgresql")
+    captured = {}
+
+    def fake_create_engine(url, **kwargs):
+        captured["url"] = url
+        captured.update(kwargs)
+        return engine
+
+    monkeypatch.setattr("app.store.trading_store.create_engine", fake_create_engine)
+
+    store = TradingStore(engine, mark_timeout_ms=17)
+
+    assert store._owns_mark_engine is True
+    assert captured["pool_timeout"] == pytest.approx(0.017)
+    assert captured["pool_pre_ping"] is False
+    assert captured["connect_args"] == {
+        "connect_timeout": 1,
+        "options": "-c lock_timeout=17 -c statement_timeout=17",
+    }
 
 
 def test_open_positions는_종결_상태를_제외하되_EXIT_FAILED는_포함(store):

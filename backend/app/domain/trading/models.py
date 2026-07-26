@@ -190,6 +190,9 @@ class TradePosition:
     exit_reason: ExitReason | None = None
     realized_pnl: int | None = None         # 비용 반영 실현손익 (costs.py — §7)
     closed_at: datetime | None = None
+    # 최신 관측 가격 — peak_price(트레일링 방어선 고점)를 현재가로 오용하지 않는다.
+    mark_price: int | None = None
+    marked_at: datetime | None = None
 
     def __post_init__(self) -> None:
         if self.quantity <= 0:

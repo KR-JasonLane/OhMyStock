@@ -53,6 +53,9 @@ logger = logging.getLogger(__name__)
 LookupState = Callable[[str], Awaitable[str | None]]
 OnFill = Callable[
     [TradePosition, dict[str, object]], Awaitable[None] | None]
+PreparedMarkPersist = Callable[[], None]
+PrepareMarkPersist = Callable[
+    [TradePosition, int, datetime], PreparedMarkPersist]
 
 # 동시호가 진입 시각(15:20 KST) — 이후 주문은 15:30 단일가 매칭까지 대기(§6-4)
 _AUCTION_START = time(15, 20)
@@ -123,7 +126,8 @@ class PositionMonitor:
                  on_fill: OnFill | None = None,
                  lookup_instrument_state: LookupState | None = None,
                  sleep: Callable[[float], Awaitable[None]] | None = None,
-                 now: Callable[[], datetime] | None = None) -> None:
+                 now: Callable[[], datetime] | None = None,
+                 persist_mark: PrepareMarkPersist | None = None) -> None:
         """calendar: `held_business_days(entry_date, now)`·`is_market_hours
         (now)`·`KST`를 제공하는 객체(core.market_calendar 모듈 — Task 7 주입,
         테스트는 fake). domain이 core 모듈을 직접 임포트하지 않는 이유:
@@ -133,6 +137,7 @@ class PositionMonitor:
         self._calendar = calendar
         self._check_caps = check_order_caps
         self._persist = persist_position
+        self._prepare_mark_persist = persist_mark
         self._on_order = on_order
         self._on_fill = on_fill
         self._lookup_state = lookup_instrument_state
@@ -143,6 +148,9 @@ class PositionMonitor:
         self._pending_check_failures = 0          # pending 재확인 연속 실패
         self._symbol_failures: dict[str, int] = {}  # 종목별 연속 결측
         self._submit_failures: dict[str, int] = {}  # 종목별 청산 발주 연속 실패
+        # symbol당 작업 하나만 유지한다. DB 지연 때 every-tick task가 쌓여
+        # executor를 고갈시키지 않으며, 다음 cycle이 최신 mark를 다시 시도한다.
+        self._mark_tasks: dict[str, asyncio.Task[None]] = {}
         # key→메시지 (상태 API 노출 — ⚠️ 예외 원문 금지, 타입명 등 정형 요약만.
         # 원문은 로그 전용: DB 예외는 DSN 자격증명 포함 가능 — 보안 P5-T6b #3)
         self._warnings: dict[str, str] = {}
@@ -241,6 +249,7 @@ class PositionMonitor:
                          pos.symbol)
             return None
         self._warnings.pop(f"corrupt:{pos.symbol}", None)  # 복구 시 해제
+        self._schedule_mark_persist(pos, md.quote.price, now)
         entry_date = pos.entered_at.astimezone(self._calendar.KST).date()
         held = self._calendar.held_business_days(entry_date, now)
         evaluation = evaluate_exit(
@@ -283,6 +292,70 @@ class PositionMonitor:
         if evaluation.reason is None:
             return None
         return updated, md, evaluation.reason
+
+    def _schedule_mark_persist(self, pos: TradePosition, price: int,
+                               marked_at: datetime) -> None:
+        """현재가 저장은 방어선·주문 경로를 기다리지 않는 부수 작업이다.
+
+        callback은 service의 동기 SQLAlchemy 저장소이므로 worker thread에서
+        실행한다. symbol별 진행 중 작업을 하나로 제한해 DB lock 장애가
+        executor 큐를 무한히 키우지 않게 한다.
+        """
+        if (self._prepare_mark_persist is None
+                or pos.symbol in self._mark_tasks):
+            return
+        try:
+            persist = self._prepare_mark_persist(pos, price, marked_at)
+        except Exception as exc:  # noqa: BLE001
+            self._warnings[f"mark:{pos.symbol}"] = (
+                f"{pos.symbol}: mark persist failing "
+                f"({type(exc).__name__}) — dashboard price may be stale")
+            logger.error("prepare position mark persistence failed for %s "
+                         "(error=%s)", pos.symbol, type(exc).__name__)
+            return
+        task = asyncio.create_task(self._persist_mark_isolated(pos, persist))
+        self._mark_tasks[pos.symbol] = task
+        task.add_done_callback(
+            lambda completed: self._mark_tasks.pop(pos.symbol, None)
+            if self._mark_tasks.get(pos.symbol) is completed else None)
+
+    async def _persist_mark_isolated(self, pos: TradePosition,
+                                     persist: PreparedMarkPersist) -> None:
+        try:
+            await asyncio.to_thread(persist)
+            self._warnings.pop(f"mark:{pos.symbol}", None)
+        except Exception as exc:  # noqa: BLE001
+            self._warnings[f"mark:{pos.symbol}"] = (
+                f"{pos.symbol}: mark persist failing "
+                f"({type(exc).__name__}) — dashboard price may be stale")
+            logger.error("persist position mark failed for %s (error=%s)",
+                         pos.symbol, type(exc).__name__)
+
+    async def close_mark_persists(self) -> None:
+        """run 종료에서 DB timeout으로 제한된 worker를 실제 완료까지 회수한다.
+
+        `to_thread` wrapper만 취소하면 이미 시작한 동기 DB 호출이 engine
+        dispose 뒤까지 남는다. mark transaction의 PostgreSQL lock/statement
+        timeout이 종료 대기를 상한하므로, 여기서는 취소 대신 terminal까지
+        await해 수명주기를 닫는다.
+        """
+        tasks = tuple(self._mark_tasks.values())
+        if not tasks:
+            return
+        worker = asyncio.gather(*tasks, return_exceptions=True)
+        cancelled = False
+        try:
+            await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            cancelled = True
+            current = asyncio.current_task()
+            if current is not None:
+                current.uncancel()
+            await asyncio.shield(worker)
+        finally:
+            self._mark_tasks.clear()
+        if cancelled:
+            raise asyncio.CancelledError
 
     # ── 집행 (§6-2-b) ───────────────────────────────────────────────────
 
