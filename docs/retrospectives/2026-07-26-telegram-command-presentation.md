@@ -551,3 +551,28 @@ ephemeral sender 상태와 문서 수치의 Minor 2건을 발견했다.
   `StarletteDeprecationWarning`이다.
 - 기본 pytest 설정에 따라 live marker 11건은 제외됐다. 실제 Telegram,
   키움, 주문, 운영 PostgreSQL은 호출하지 않았고 커밋도 수행하지 않았다.
+
+## 실제 배포와 조회 재수용
+
+- Task 2는
+  `424f9f6`(`feat(telegram): present readable command responses`)로
+  커밋했다.
+- 사용자의 별도 배포 승인 후 backend 이미지를 재빌드·재기동했다. Codex
+  실행 계정에는 Docker 소켓 권한이 없어 사용자가
+  `sudo docker compose up -d --build backend`를 직접 실행했다.
+- 재기동 후 localhost `/health`는 `status=ok`, `db=ok`, `mode=mock`을
+  반환했다. `/schedule/status`는 scheduler가
+  `enabled=true`, `paused=false`, `dead=false`임을 반환했다.
+- 사용자가 실제 Telegram에서 조회 전용 `/status`, `/account`,
+  `/positions`, `/help`를 차례로 전송했고 네 응답 모두 새 가독성 형식으로
+  수신됐다. 상태 변경 명령과 주문은 실행하지 않았다.
+- `/status`는 시스템 정상, 자동 일정 운영 중, 자동매매 대기, 관리 포지션
+  0개, Telegram 정상, 대기 메시지 0건과 KST 기준 시각을 표시했다.
+- `/account`는 예수금 9,979,053원, 주문 가능 9,979,053원, 보유주식 평가
+  0원, 총자산 `확인 불가`, 평가손익 0원, 오늘 실현손익(관리매매)
+  0원(추정)을 표시했다. 실제 수용에서 발견한 계좌 필드 의미 차이가
+  의도대로 분리됐고 검증되지 않은 총자산 합산은 없었다.
+- `/positions`는 관리 포지션이 없음을 짧게 표시했고, `/help`는 조회·제어·
+  확인 필요 명령을 세 구역으로 나눴다.
+- 다음 운영 검증은 자동 모의운용을 방해하지 않는 시간에 수행할
+  7b-⑤ 재부팅 캐치업 검증이다.
