@@ -239,11 +239,11 @@ async def test_지연표지공간을_넘는긴급본문은_enqueue에서_거부�
 
 @pytest.mark.anyio
 async def test_인증실패는_주입된공유회로를_dead로_전파한다(sender):
-    _, store, telegram, _ = sender
+    _, store, telegram, clock = sender
     circuit = TelegramCircuit()
     worker = OutboxSender(
         store, telegram, chat_id=1234, worker_id="shared-circuit",
-        authentication_circuit=circuit)
+        authentication_circuit=circuit, now=clock)
     store.enqueue_parts("auth-circuit", ["one"])
     telegram.fail(TelegramAuthenticationError("sendMessage"))
 
