@@ -1,34 +1,14 @@
-# frontend
+# OhMyStock 프런트엔드
 
-An Electron application with React and TypeScript
-
-## Recommended IDE Setup
-
-- [VSCode](https://code.visualstudio.com/) + [ESLint](https://marketplace.visualstudio.com/items?itemName=dbaeumer.vscode-eslint) + [Prettier](https://marketplace.visualstudio.com/items?itemName=esbenp.prettier-vscode)
-
-## Project Setup
-
-### Install
+Vite와 React 기반의 조회 전용 대시보드입니다. 브라우저는 같은 origin의
+`/api/dashboard/overview`만 호출하며, 운영 배포에서는 프런트 프록시가
+백엔드 읽기 API로 전달합니다.
 
 ```bash
-$ pnpm install
-```
-
-### Development
-
-```bash
-$ pnpm dev
-```
-
-### Build
-
-```bash
-# For windows
-$ pnpm build:win
-
-# For macOS
-$ pnpm build:mac
-
-# For Linux
-$ pnpm build:linux
+pnpm install --frozen-lockfile
+pnpm dev
+pnpm lint
+pnpm test
+pnpm typecheck
+pnpm build
 ```
