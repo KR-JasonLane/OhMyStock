@@ -134,8 +134,10 @@ GET /dashboard/overview?from=YYYY-MM-DD&to=YYYY-MM-DD&timezone=Asia/Seoul
 - **누적 곡선**: 조회 기간 내 청산 확정 순서대로 확정 손익을 누적
 - **거래 단위**: 같은 관리 포지션의 분할 체결은 포지션 생애주기 하나로
   집계하며 주문 행 수를 거래 수로 세지 않음
-- **비용**: 저장된 수수료와 세금만 차감한다. 완전한 비용 근거가 없으면
-  추정하지 않고 `cost_basis=unavailable`로 표시
+- **비용**: 현재 `realized_pnl`은 프로젝트 비용 모델이 반영된 추정값이므로
+  `cost_basis=estimated`로 표시하며, 실제 브로커 비용과 완전 대사된 값처럼
+  표현하지 않는다(사용자 결정 2026-07-26). 청산 행에 `realized_pnl`이 없어
+  비용 계산 자체가 불가능한 경우만 `cost_basis=unavailable`로 표시한다.
 
 평가손익의 최신 가격이 없거나 신선도 기준을 넘으면 `0`이 아니라
 `unavailable`로 반환한다. 이 경우 총손익도 완전한 값으로 가장하지 않고
