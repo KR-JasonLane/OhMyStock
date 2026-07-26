@@ -3,8 +3,7 @@
 > 규칙 4에 따른 태스크별 회고. 스펙
 > `docs/specs/2026-07-23-phase6-scheduler-design.md`(v2, 결정 #37~#40),
 > 계획서 `docs/plans/2026-07-23-phase6-scheduler-plan.md`(v2, Task 1~8).
-> 상태: **Task 1~6·7a·8 완결, 7b(실환경 하루 관찰) 진행 중** — 7b 완료 시
-> §7을 갱신한다.
+> 상태: **Task 1~8과 7b 실환경 관찰 완결 — Phase 6 종결**.
 
 ## 0. 무엇을 만들었나 (비전문가용 요약)
 
@@ -178,7 +177,7 @@ speed=1.0, 시드 035760. 증거 `.superpowers/sdd/p6-task-8-replay-restart.txt`
   `reason=replay_profile`, 정상 셧다운(run 1 kill TERM)은
   stopped(kill_switch=0) 기록 — §4-d 분기 원천 데이터 확인.
 
-## 3. 7b — 실환경 수용 검증 (진행 중)
+## 3. 7b — 실환경 수용 검증 (완료)
 
 - ✅ ① 재기동 후 스케줄러 기동·status 확인(§2 Task 7a 배포 항목).
 - ✅ ② 저녁 19:00 수집 자동 트리거(19:00:28 첫 틱 —
@@ -222,14 +221,34 @@ speed=1.0, 시드 035760. 증거 `.superpowers/sdd/p6-task-8-replay-restart.txt`
   - 즉 분기 ①(분석 낡음→재시도) → ②(신선한 픽 0→래치) 전이가 실환경
     에서 관찰됐다. 진입 0건은 AI 판정(개장 직후 코스피 −1.35% 급락 →
     risk_off)이지 결함이 아니다.
-- ⏳ ⑤ 서버 재부팅 1회 → 자동 복귀 + 캐치업.
+- ✅ **⑤ 서버 재부팅 1회 → 자동 복귀 + 비거래일 휴면
+  (2026-07-26 19:16~19:27)**:
+  - 재부팅 전 docker·ollama는 active/enabled, `/health`는
+    `status=ok`, `db=ok`, `mode=mock`, scheduler는 enabled·not paused·
+    not dead였다. 거래는 idle, 미종결 포지션과 킬스위치가 없었다.
+  - 19:19:21 KST 새 부팅 뒤 docker·ollama가 자동 복귀하고 backend와
+    healthy db가 각각 localhost 8000·15432에서 Up 상태가 됐다.
+  - 19:19:40 KST scheduler와 Telegram service가 enabled로 기동하고
+    application startup이 완료됐다. health·schedule·trade 조회는 모두
+    HTTP 200이었다.
+  - 일요일 비거래일이므로 analyze·trade는 `not_trading_day`로 휴면했고,
+    새 trade run이나 scheduler event를 잘못 만들지 않았다. 재부팅 당시
+    running run이 없어 새 `process_restart` 정정이 없는 것도 기대값이다.
+    기존 정정 run id=2·3과 최신 succeeded run id=4는 그대로 보존됐다.
+  - 실제 Telegram `/status`는 19:27:39 KST에 시스템 정상, 자동 일정 운영
+    중, 자동매매 대기, 관리 포지션 0개, Telegram 정상, 대기 메시지 0건을
+    반환해 poller·commands·sender·reconciliation의 무인 복귀를 확인했다.
+  - 종료 과정(새 부팅 전 10:18:18~10:18:24 UTC)에 DB 의존 Telegram
+    loop들이 짧은 `internal_error`를 기록했지만, 새 기동 후 canonical
+    상태와 실제 명령 응답은 정상 복구했다. 이는 기능 차단 결함이 아니라
+    컨테이너 종료 순서에서 남는 관측성 잡음으로 기록한다.
+  - 상세 증거는 gitignore 경로
+    `.superpowers/sdd/reboot-7b5-2026-07-26.md`에 남겼다.
 - 부수 적용: compose backend에 **로그 회전(json-file 50MB×5)** — 결정 #36
   상세 로그가 기본 무회전 드라이버로 무한 성장하는 것을 상한. ⚠️ 컨테이너
   재생성 시 로그 유실은 드라이버 한계로 잔존 — 판정·감사의 SSOT는
   DB(run 테이블·scheduler_events·trade_orders)이고 로그는 디버그 스택
   용도라는 경계를 주석으로 명시.
-
-완료 시 이 절과 STATUS.md를 갱신한다.
 
 ### Task 7c — 트레이딩 관측성 (결정 #36 갭 3건, 커밋 02d1753)
 
@@ -332,7 +351,6 @@ warnings가 통째로 소실**(7c가 크래시 경로에서 무력화). 스케�
 
 ## 5. 이월/백로그
 
-- **7b 잔여**(§3) → 완료 후 본 문서 갱신.
 - **실전 전환 게이트 추가**: 스케줄러 dead 능동 알림(트레이더 T5 —
   로그·status뿐인 현 상태로는 실전 금지), 전일 킬스위치 발동 시 익일
   자동 재개 정책 재확인(§10-6).
