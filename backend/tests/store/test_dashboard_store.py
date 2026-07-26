@@ -1,7 +1,7 @@
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import event, create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.domain.dashboard.models import DashboardPeriod
@@ -158,3 +158,74 @@ def test_dashboard_조회는_주입하지_않은_broker_fixture를_호출하지_
     assert overview.summary.realized_pnl == 10_000
     assert calls == 0
     assert broker_fixture is not None
+
+
+def test_최근거래는_전체_성과와_곡선을_훼손하지_않고_SQL에서_100건으로_제한한다(
+        engine):
+    _seed(
+        engine,
+        *(("mock", {
+            # KST 7월 26일 00:00 — 기존 coarse UTC 범위에는 들어오지만
+            # 조회 종료일(7월 25일) 밖이라 recent LIMIT보다 먼저 제외돼야 한다.
+            "symbol": f"OUT{index:03}",
+            "closed_at": datetime(2026, 7, 25, 15, tzinfo=timezone.utc),
+            "realized_pnl": 9_999,
+        }) for index in range(1, 101)),
+        *(("mock", {
+            "symbol": f"T{index:03}",
+            "closed_at": datetime(2026, 7, 24, 6, tzinfo=timezone.utc),
+            "realized_pnl": index,
+        }) for index in range(1, 102)),
+    )
+    statements: list[tuple[str, object]] = []
+
+    def capture_sql(conn, cursor, statement, parameters, context, executemany):
+        statements.append((statement, parameters))
+
+    event.listen(engine, "before_cursor_execute", capture_sql)
+    try:
+        overview = DashboardStore(engine).overview(PERIOD, "mock", NOW)
+    finally:
+        event.remove(engine, "before_cursor_execute", capture_sql)
+
+    assert overview.summary.closed_trade_count == 101
+    assert len(overview.equity_curve) == 101
+    assert len(overview.recent_trades) == 100
+    assert overview.recent_trades[0].symbol == "T101"
+    assert overview.recent_trades[-1].symbol == "T002"
+    assert any(
+        "LIMIT" in statement.upper() and 100 in parameters
+        for statement, parameters in statements
+    )
+
+
+def test_최근거래와_요약은_한_읽기_snapshot에서_동시_청산을_섞지_않는다(engine):
+    _seed(engine, ("mock", {"symbol": "FIRST"}))
+    with engine.connect() as connection:
+        connection.exec_driver_sql("PRAGMA journal_mode=WAL")
+    inserted = False
+
+    def insert_after_summary(conn, cursor, statement, parameters, context, executemany):
+        nonlocal inserted
+        if inserted or "SELECT" not in statement.upper() or "trade_positions" not in statement:
+            return
+        inserted = True
+        sessions = sessionmaker(bind=engine)
+        with sessions.begin() as writer:
+            run_id = writer.query(TradeRunRow.id).filter_by(
+                run_environment="mock").scalar()
+            writer.add(_position(
+                run_id, symbol="LATE",
+                closed_at=datetime(2026, 7, 24, 7, tzinfo=timezone.utc),
+                realized_pnl=20_000,
+            ))
+
+    event.listen(engine, "after_cursor_execute", insert_after_summary)
+    try:
+        overview = DashboardStore(engine).overview(PERIOD, "mock", NOW)
+    finally:
+        event.remove(engine, "after_cursor_execute", insert_after_summary)
+
+    assert inserted is True
+    assert overview.summary.closed_trade_count == 1
+    assert [trade.symbol for trade in overview.recent_trades] == ["FIRST"]

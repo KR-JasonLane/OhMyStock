@@ -4,15 +4,17 @@
 join한다. 원시 브로커 응답과 계좌 식별자는 선택하지 않는다.
 """
 
-from datetime import datetime, timedelta
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import Engine, and_, or_, select
-from sqlalchemy.orm import sessionmaker
 
 from app.domain.dashboard.models import (ClosedPosition, DashboardOverview,
                                          DashboardPeriod, OpenPosition,
+                                         RecentTrade,
                                          build_dashboard_overview)
 from app.domain.trading.models import ExitReason, PositionState
+from app.core.market_calendar import KST
 from app.store.kst_time import as_aware_utc, coarse_utc_bounds
 from app.store.models import TradePositionRow, TradeRunRow
 
@@ -25,19 +27,21 @@ _DASHBOARD_OPEN_STATES = frozenset({
 _KNOWN_POSITION_STATES = frozenset(state.value for state in PositionState)
 _KNOWN_EXIT_REASONS = frozenset(reason.value for reason in ExitReason)
 _MARK_STALE_AFTER = timedelta(minutes=10)
+_RECENT_TRADES_LIMIT = 100
 
 
 class DashboardStore:
     """관리매매 성과만 조립하는 SQL 읽기 모델."""
 
     def __init__(self, engine: Engine):
-        self._sessions = sessionmaker(bind=engine)
+        self._engine = engine
 
     def overview(self, period: DashboardPeriod, run_environment: str,
                  now: datetime) -> DashboardOverview:
         """환경별 행을 읽고, KST 날짜를 Python에서 다시 정확히 판정한다."""
         lo, _ = coarse_utc_bounds(period.start)
         _, hi = coarse_utc_bounds(period.end)
+        recent_lo, recent_hi = _exact_utc_period_bounds(period)
         columns = (
             TradePositionRow.id,
             TradePositionRow.symbol,
@@ -74,8 +78,26 @@ class DashboardStore:
                 ),
             )
         )
-        with self._sessions() as session:
-            rows = session.execute(statement).mappings().all()
+        # summary·equity_curve는 전체 기간 거래를 기반으로 해야 하므로 위 집계를
+        # 100건으로 잘라 성과를 왜곡하지 않는다. 상세 recent_trades만 별도 SQL
+        # projection에서 최신순 100건으로 제한한다.
+        recent_statement = (
+            select(*columns)
+            .select_from(TradePositionRow)
+            .join(TradeRunRow,
+                  TradePositionRow.trade_run_id == TradeRunRow.id)
+            .where(
+                TradeRunRow.run_environment == run_environment,
+                TradePositionRow.state == PositionState.CLOSED.value,
+                TradePositionRow.closed_at.is_not(None),
+                TradePositionRow.closed_at >= recent_lo,
+                TradePositionRow.closed_at < recent_hi,
+            )
+            .order_by(TradePositionRow.closed_at.desc(), TradePositionRow.id.desc())
+            .limit(_RECENT_TRADES_LIMIT)
+        )
+        rows, recent_rows = self._read_in_one_snapshot(
+            statement, recent_statement)
 
         closed: list[ClosedPosition] = []
         open_: list[OpenPosition] = []
@@ -114,9 +136,30 @@ class DashboardStore:
             else:
                 open_.append(position)
 
-        return build_dashboard_overview(
+        overview = build_dashboard_overview(
             period, closed, open_, now=now, corrupted_row_count=corrupted,
             mark_stale_after=_MARK_STALE_AFTER)
+        return replace(overview, recent_trades=_recent_trades(recent_rows, period))
+
+    def _read_in_one_snapshot(self, statement, recent_statement):
+        """집계와 상세 projection을 같은 읽기 snapshot에서 실행한다."""
+        with self._engine.connect() as connection:
+            if connection.dialect.name == "postgresql":
+                connection = connection.execution_options(
+                    isolation_level="REPEATABLE READ")
+                connection.begin()
+            elif connection.dialect.name == "sqlite":
+                # sqlite3의 legacy SELECT는 자동으로 transaction을 열지 않을 수
+                # 있어, 두 SELECT 사이 새 청산이 섞이지 않도록 명시 BEGIN을 쓴다.
+                connection.exec_driver_sql("BEGIN")
+            else:
+                connection.begin()
+            try:
+                rows = connection.execute(statement).mappings().all()
+                recent_rows = connection.execute(recent_statement).mappings().all()
+                return rows, recent_rows
+            finally:
+                connection.rollback()
 
 
 def _closed_position(row, closed_at: datetime) -> ClosedPosition | None:
@@ -134,6 +177,32 @@ def _closed_position(row, closed_at: datetime) -> ClosedPosition | None:
     return ClosedPosition(
         row["id"], row["symbol"], row["name"], row["entry_price"],
         row["quantity"], exit_price, realized_pnl, closed_at, exit_reason)
+
+
+def _recent_trades(rows, period: DashboardPeriod) -> tuple[RecentTrade, ...]:
+    """SQL 상한 아래에서 유효한 최근 청산만 HTTP read model로 만든다."""
+    trades: list[RecentTrade] = []
+    for row in rows:
+        closed_at = _aware_or_none(row["closed_at"])
+        if closed_at is None or not period.includes(closed_at):
+            continue
+        position = _closed_position(row, closed_at)
+        if position is None:
+            continue
+        trades.append(RecentTrade(
+            position.position_id, position.symbol, position.name,
+            position.entry_price, position.quantity, position.exit_price,
+            position.realized_pnl, position.closed_at, position.exit_reason))
+    return tuple(sorted(
+        trades, key=lambda item: (item.closed_at, item.position_id), reverse=True))
+
+
+def _exact_utc_period_bounds(period: DashboardPeriod) -> tuple[datetime, datetime]:
+    """recent LIMIT 전에 적용할 정확한 KST 반열린 기간을 UTC로 바꾼다."""
+    start = datetime.combine(period.start, datetime.min.time(), tzinfo=KST)
+    end = datetime.combine(
+        period.end + timedelta(days=1), datetime.min.time(), tzinfo=KST)
+    return start.astimezone(timezone.utc), end.astimezone(timezone.utc)
 
 
 def _open_position(row) -> OpenPosition | None:

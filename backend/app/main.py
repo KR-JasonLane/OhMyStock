@@ -15,6 +15,7 @@ from app.adapters.ollama.client import OllamaClient
 from app.adapters.telegram import TelegramClient
 from app.api.analyze import router as analyze_router
 from app.api.collect import router as collect_router
+from app.api.dashboard import router as dashboard_router
 from app.api.health import router as health_router
 from app.api.schedule import router as schedule_router
 from app.api.score import router as score_router
@@ -58,6 +59,7 @@ from app.domain.trading.config import TradingConfig
 from app.domain.trading.service import TradingService
 from app.store.analysis_store import AnalysisStore
 from app.store.collection_store import CollectionStore
+from app.store.dashboard_store import DashboardStore
 from app.store.db import create_db_engine
 from app.store.scheduler_store import SchedulerStore
 from app.store.scoring_store import ScoringStore
@@ -155,6 +157,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "인증 없이 열려 있음 (실전 전환 전 필수 설정)")
         app.state.engine = create_db_engine(settings)
         try:
+            app.state.dashboard_store = DashboardStore(app.state.engine)
             app.state.broker = KiwoomBroker(KiwoomHttpClient(settings))
             # conflict_check 람다는 app.state를 통해 늦은 바인딩되므로 두 서비스의
             # 생성 순서와 무관하다 (아래에서 scoring이 나중에 만들어져도 안전).
@@ -466,6 +469,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(collect_router)
     app.include_router(score_router)
     app.include_router(analyze_router)
+    app.include_router(dashboard_router)
     app.include_router(trade_router)
     app.include_router(schedule_router)
     return app
