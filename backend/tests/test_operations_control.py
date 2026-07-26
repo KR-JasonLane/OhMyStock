@@ -57,9 +57,12 @@ class Trading:
 
 class Broker:
     balance_error = None
+    deposit_error = None
 
     async def get_deposit(self):
         await asyncio.sleep(0)
+        if self.deposit_error:
+            raise self.deposit_error
         return Deposit(1_000_000, 1_000_000)
 
     async def get_balance(self):
@@ -101,6 +104,7 @@ async def test_resume은_scheduler_pause만_해제한다(control):
 @pytest.mark.anyio
 async def test_account는_두소스를_병렬조회하고_총수익률을_만들지_않는다(control):
     summary = await control.account_summary()
+    assert summary.deposit == 1_000_000
     assert summary.available_deposit == 1_000_000
     assert summary.total_eval == 1_200_000
     assert summary.total_return_rate is None
@@ -116,6 +120,19 @@ async def test_balance실패에도_deposit과_실현손익을_유지한다(contr
     assert summary.realized_pnl == -12_000
     assert summary.realized_pnl_confidence == "estimated"
     assert summary.failed_fields == ("balance",)
+
+
+@pytest.mark.anyio
+async def test_deposit실패에도_balance와실현손익을_유지한다(control):
+    control.broker.deposit_error = RuntimeError("down")
+    summary = await control.account_summary()
+    assert summary.deposit is None
+    assert summary.available_deposit is None
+    assert summary.total_eval == 1_200_000
+    assert summary.total_profit == 20_000
+    assert summary.realized_pnl == -12_000
+    assert summary.realized_pnl_confidence == "estimated"
+    assert summary.failed_fields == ("deposit",)
 
 
 @pytest.mark.anyio

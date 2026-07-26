@@ -16,6 +16,7 @@ from app.domain.trading.models import LiquidationResult, LiquidationTarget
 
 @dataclass(frozen=True)
 class AccountSummary:
+    deposit: int | None
     available_deposit: int | None
     total_eval: int | None
     total_profit: int | None
@@ -144,12 +145,26 @@ class OperationsControl:
         if store_failed:
             failed.append("realized_pnl")
         summary = AccountSummary(
-            None if isinstance(deposit, BaseException) else deposit.available,
-            None if isinstance(balance, BaseException) else balance.total_eval,
-            None if isinstance(balance, BaseException) else balance.total_profit,
-            None, realized, confidence,
-            as_of.astimezone(self.calendar.KST).date(), as_of,
-            "broker+trade_store", tuple(failed))
+            deposit=(
+                None if isinstance(deposit, BaseException) else deposit.total
+            ),
+            available_deposit=(
+                None if isinstance(deposit, BaseException) else deposit.available
+            ),
+            total_eval=(
+                None if isinstance(balance, BaseException) else balance.total_eval
+            ),
+            total_profit=(
+                None if isinstance(balance, BaseException) else balance.total_profit
+            ),
+            total_return_rate=None,
+            realized_pnl=realized,
+            realized_pnl_confidence=confidence,
+            trading_day=as_of.astimezone(self.calendar.KST).date(),
+            as_of=as_of,
+            source="broker+trade_store",
+            failed_fields=tuple(failed),
+        )
         self._cache, self._cache_at = summary, self._now()
         return summary
 
