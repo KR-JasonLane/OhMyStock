@@ -18,6 +18,7 @@ from app.core.telegram_service import (
     InboxPoller,
     OutboxSender,
     TelegramCircuit,
+    TelegramMaintenance,
     TelegramService,
     external_id_hash,
 )
@@ -623,9 +624,129 @@ async def test_독립loop_failure_budget과_telegram전용종료():
     await service.begin_shutdown()
     await service.finish_shutdown(deadline_s=0.1)
     assert service.stop_trace == [
-        "poller", "inbox_commit", "command_claims", "projector", "sender"
+        "poller", "inbox_commit", "command_claims", "maintenance", "projector", "sender"
     ]
     assert sender.released == 1
+
+
+@pytest.mark.anyio
+async def test_분석요약실패는_composite_maintenance와_다른_telegram_loop를멈추지않는다():
+    entered = asyncio.Event()
+
+    class Digest:
+        calls = 0
+
+        async def run_once(self):
+            self.calls += 1
+            return 1
+
+    class AnalysisSummary:
+        async def run_once(self):
+            entered.set()
+            raise RuntimeError("analysis read unavailable")
+
+        def snapshot(self):
+            return {
+                "state": "running", "last_created": 0,
+                "backoff_reason": "internal_error",
+            }
+
+    digest = Digest()
+    maintenance = TelegramMaintenance(
+        digest, LoopStep(), analysis_summary=AnalysisSummary())
+    sender = LoopStep()
+    service = TelegramService(
+        poller=LoopStep(), dispatcher=LoopStep(), projector=LoopStep(),
+        sender=sender, maintenance=maintenance, idle_s=0.001)
+
+    service.start()
+    await entered.wait()
+    await asyncio.sleep(0)
+    snapshot = service.snapshot()
+
+    assert digest.calls == 1
+    assert snapshot["maintenance"]["failures"] == 0
+    assert snapshot["analysis_summary"] == {
+        "state": "running", "last_created": 0,
+        "backoff_reason": "internal_error",
+    }
+    assert "analysis_summary" in snapshot["backoff_components"]
+    assert sender.calls > 0
+    await service.begin_shutdown()
+    await service.finish_shutdown(deadline_s=0.1)
+
+
+@pytest.mark.anyio
+async def test_종료는_maintenance_producer를_sender_최종drain보다_먼저_종료한다():
+    entered, release, sender_called = (
+        asyncio.Event(), asyncio.Event(), asyncio.Event())
+
+    class InFlightMaintenance:
+        async def run_once(self):
+            entered.set()
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                await release.wait()
+            return 0
+
+    class Sender:
+        def __init__(self) -> None:
+            self._stopped = False
+
+        async def run_once(self):
+            if self._stopped:
+                sender_called.set()
+                return 0
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self._stopped = True
+                raise
+
+        async def release_leases(self):
+            return 0
+
+    service = TelegramService(
+        poller=LoopStep(), dispatcher=LoopStep(), projector=LoopStep(),
+        sender=Sender(), maintenance=InFlightMaintenance(), idle_s=0.001)
+    service.start()
+    await entered.wait()
+    await service.begin_shutdown()
+    shutdown = asyncio.create_task(service.finish_shutdown(deadline_s=1))
+    await asyncio.sleep(0.01)
+
+    assert sender_called.is_set() is False
+    release.set()
+    await shutdown
+
+
+@pytest.mark.anyio
+async def test_종료는_실패한_maintenance_producer_join뒤에도_sender를_drain한다():
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    class FailingDigest:
+        async def run_once(self):
+            entered.set()
+            await release.wait()
+            raise RuntimeError("digest store unavailable")
+
+    maintenance = TelegramMaintenance(FailingDigest(), LoopStep())
+    tick = asyncio.create_task(maintenance.run_once())
+    await entered.wait()
+    tick.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await tick
+    release.set()
+
+    sender = LoopStep()
+    service = TelegramService(
+        poller=LoopStep(), dispatcher=LoopStep(), projector=LoopStep(),
+        sender=sender, maintenance=maintenance, idle_s=0.001)
+
+    await service.finish_shutdown(deadline_s=0.1)
+
+    assert sender.calls == 1
 
 
 @pytest.mark.anyio

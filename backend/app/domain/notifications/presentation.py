@@ -188,6 +188,14 @@ class TelegramCommandPresenter:
             elif component is None or component_dead is not False:
                 telegram_warnings.append(unknown_message)
 
+        analysis_summary = _field(telegram, "analysis_summary", _MISSING)
+        if analysis_summary is not _MISSING:
+            analysis_summary_state = _field(analysis_summary, "state")
+            if analysis_summary_state == "dead":
+                telegram_failures.append("아침 분석 요약 생성 중단")
+            elif analysis_summary_state != "running":
+                telegram_warnings.append("아침 분석 요약 생성 상태 확인 필요")
+
         outbox_state = _field(outbox, "state")
         if outbox_state == "dead":
             telegram_failures.append("메시지 전송 중단")
@@ -215,6 +223,7 @@ class TelegramCommandPresenter:
             "projector": "운영 알림 생성 지연",
             "sender": "Telegram 전송 지연",
             "maintenance": "Telegram 보존 정리 지연",
+            "analysis_summary": "아침 분석 요약 생성 지연",
             "control_delay": "Telegram 제어 명령 처리 지연",
             "ephemeral": "Telegram 확인 응답 전송 지연",
         }

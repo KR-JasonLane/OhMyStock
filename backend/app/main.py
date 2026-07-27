@@ -27,6 +27,7 @@ from app.core.operations_control import OperationsControl
 from app.core.replay_clock import make_replay_clock
 from app.core.sensitive_logging import configure_sensitive_http_logging
 from app.core.telegram_service import (
+    AnalysisSummaryService,
     AsyncProjector,
     CommandDispatcher,
     CommandResponsePublisher,
@@ -64,6 +65,7 @@ from app.store.db import create_db_engine
 from app.store.scheduler_store import SchedulerStore
 from app.store.scoring_store import ScoringStore
 from app.store.notification_store import (
+    AnalysisSummaryRunStore,
     DigestRunStore,
     NotificationStore,
 )
@@ -391,6 +393,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     NotificationProjector(notification_store))
                 digest_runs = DigestRunStore(
                     app.state.engine, settings.run_environment)
+                analysis_summary_runs = AnalysisSummaryRunStore(
+                    app.state.engine, settings.run_environment)
+                analysis_summary = AnalysisSummaryService(
+                    analysis_summary_runs, notification_store,
+                    run_environment=settings.run_environment)
                 digest = DigestService(
                     DigestPlanner(
                         market_calendar, notification_store,
@@ -402,6 +409,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     notification_store)
                 maintenance = TelegramMaintenance(
                     digest, Maintenance(notification_store),
+                    analysis_summary=analysis_summary,
                     scheduler_snapshot=lambda: (
                         app.state.scheduler.snapshot()
                         if app.state.scheduler is not None else None))

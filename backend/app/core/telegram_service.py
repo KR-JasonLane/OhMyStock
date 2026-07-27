@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import hmac
 import logging
+import threading
 from collections import deque
 from collections.abc import Awaitable, Callable, Collection
 from datetime import datetime, timedelta, timezone
@@ -17,6 +18,7 @@ from app.adapters.telegram import (TelegramAuthenticationError,
                                    TelegramPermanentError,
                                    TelegramRateLimited,
                                    TelegramTemporaryError)
+from app.domain.notifications.analysis_summary import render_analysis_parts
 from app.domain.notifications.formatting import delay_notice, render_parts
 from app.domain.notifications.digest import DigestBuilder, DigestPlanner
 from app.domain.notifications.authorization import is_authorized
@@ -27,7 +29,8 @@ from app.domain.notifications.models import (
     OperatorIdentity,
 )
 from app.domain.notifications.parsing import parse_command
-from app.store.notification_store import Delivery, NotificationStore
+from app.store.notification_store import (AnalysisSummaryRunStore, Delivery,
+                                          NotificationStore)
 
 logger = logging.getLogger(__name__)
 
@@ -522,19 +525,40 @@ class TelegramMaintenance:
 
     def __init__(
         self, digest: "DigestService", maintenance: "Maintenance", *,
+        analysis_summary: "AnalysisSummaryService | None" = None,
         now: Callable[[], datetime] | None = None,
         scheduler_snapshot: Callable[[], dict[str, object] | None] | None = None,
     ) -> None:
         self._digest = digest
         self._maintenance = maintenance
+        self._analysis_summary = analysis_summary
         self._now = now or (lambda: datetime.now(timezone.utc))
         self._scheduler_snapshot = scheduler_snapshot or (lambda: None)
         self._last_cleanup_day = None
         self._scheduler_dead = False
         self._scheduler_dead_transitions = 0
+        self._run_task: asyncio.Task[int] | None = None
 
     async def run_once(self) -> int:
+        task = self._run_task
+        if task is None:
+            task = asyncio.create_task(self._run_once())
+            self._run_task = task
+        try:
+            return await asyncio.shield(task)
+        finally:
+            if task.done():
+                self._run_task = None
+
+    async def _run_once(self) -> int:
         created = await self._digest.run_once()
+        if self._analysis_summary is not None:
+            try:
+                created += await self._analysis_summary.run_once()
+            except Exception as exc:
+                logger.error(
+                    "telegram analysis summary materialize failed kind=%s",
+                    _error_kind(exc))
         now = self._now()
         kst = now.astimezone(__import__("zoneinfo").ZoneInfo("Asia/Seoul"))
         if ((kst.hour, kst.minute) >= (3, 30)
@@ -548,11 +572,37 @@ class TelegramMaintenance:
         self._scheduler_dead = dead
         return created
 
+    async def finish(self) -> None:
+        """Join a shielded composite tick before its consumers drain."""
+        task = self._run_task
+        if task is not None:
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.error(
+                    "telegram maintenance producer failed during shutdown kind=%s",
+                    _error_kind(exc))
+            finally:
+                if task.done():
+                    self._run_task = None
+
+    async def begin_shutdown(self) -> None:
+        if hasattr(self._digest, "begin_shutdown"):
+            await self._digest.begin_shutdown()
+        if (self._analysis_summary is not None
+                and hasattr(self._analysis_summary, "begin_shutdown")):
+            await self._analysis_summary.begin_shutdown()
+
     def snapshot(self) -> dict[str, object]:
-        return {
+        snapshot: dict[str, object] = {
             "scheduler_dead": self._scheduler_dead,
             "scheduler_dead_transitions": self._scheduler_dead_transitions,
         }
+        if self._analysis_summary is not None:
+            snapshot["analysis_summary"] = self._analysis_summary.snapshot()
+        return snapshot
 
 
 class TelegramService:
@@ -662,6 +712,8 @@ class TelegramService:
         loop = asyncio.get_running_loop()
         began_at = loop.time()
         self._shutdown_started = True
+        if hasattr(self._maintenance, "begin_shutdown"):
+            await self._maintenance.begin_shutdown()
         poller = self._tasks.get("poller")
         if poller is not None:
             poller.cancel()
@@ -706,6 +758,10 @@ class TelegramService:
         async def finish() -> None:
             if hasattr(self._dispatcher, "finish_shutdown"):
                 await self._dispatcher.finish_shutdown()
+            await self._stop_task("maintenance")
+            if hasattr(self._maintenance, "finish"):
+                await self._maintenance.finish()
+            self.stop_trace.append("maintenance")
             await self._stop_task("projector", final_run=self._projector.run_once)
             self.stop_trace.append("projector")
             await self._stop_task("sender")
@@ -713,7 +769,6 @@ class TelegramService:
                 if await self._sender.run_once() == 0:
                     break
             self.stop_trace.append("sender")
-            await self._stop_task("maintenance")
 
         loop = asyncio.get_running_loop()
         deadline = loop.time() + max(0.0, deadline_s - self._shutdown_spent_s)
@@ -781,6 +836,14 @@ class TelegramService:
                 result[name].update(component.snapshot())
                 if supervisor_dead:
                     result[name]["dead"] = True
+        maintenance = result.get("maintenance")
+        if isinstance(maintenance, dict):
+            analysis_summary = maintenance.pop("analysis_summary", None)
+            if isinstance(analysis_summary, dict):
+                summary = dict(analysis_summary)
+                if maintenance.get("dead") is True:
+                    summary["state"] = "dead"
+                result["analysis_summary"] = summary
         backoff_components: list[str] = []
         for name in (
             "poller",
@@ -790,6 +853,7 @@ class TelegramService:
             "projector",
             "sender",
             "maintenance",
+            "analysis_summary",
         ):
             state = result.get(name)
             if not isinstance(state, dict):
@@ -814,6 +878,13 @@ class TelegramService:
             and "poller" not in backoff_components
         ):
             backoff_components.append("poller")
+        analysis_summary = result.get("analysis_summary")
+        if (
+            isinstance(analysis_summary, dict)
+            and analysis_summary.get("backoff_reason")
+            and "analysis_summary" not in backoff_components
+        ):
+            backoff_components.append("analysis_summary")
         sender = result.get("sender")
         outbox = sender.get("outbox") if isinstance(sender, dict) else None
         if (
@@ -889,21 +960,104 @@ class DigestService:
         self._builder = builder
         self._store = store
         self._now = now or (lambda: datetime.now(timezone.utc))
+        self._stopping = threading.Event()
+        self._materialize_lock = threading.Lock()
 
     async def run_once(self) -> int:
+        if self._stopping.is_set():
+            return 0
         now = self._now()
         due_dates = await asyncio.to_thread(self._planner.due_dates, now)
         created = 0
         for trading_day in due_dates:
             digest = await self._builder.build(trading_day)
             result = await asyncio.to_thread(
-                self._store.materialize_digest,
-                digest.idempotency_key, digest.payload, digest.bodies,
+                self._materialize_if_accepting, digest,
                 occurred_at=now)
+            if result is None:
+                break
             if result.created:
                 created += 1
                 self._planner.mark_generated(trading_day)
         return created
+
+    async def begin_shutdown(self) -> None:
+        self._stopping.set()
+
+    def _materialize_if_accepting(self, digest, *, occurred_at):
+        with self._materialize_lock:
+            if self._stopping.is_set():
+                return None
+            return self._store.materialize_digest(
+                digest.idempotency_key, digest.payload, digest.bodies,
+                occurred_at=occurred_at)
+
+
+class AnalysisSummaryService:
+    """Materialize each succeeded morning analysis as a durable outbox item."""
+
+    def __init__(
+            self, runs: AnalysisSummaryRunStore, store: NotificationStore, *,
+            run_environment: str,
+            now: Callable[[], datetime] | None = None,
+            batch_size: int = 10,
+    ) -> None:
+        if run_environment not in {"mock", "real"}:
+            raise ValueError("run_environment must be mock or real")
+        if batch_size < 1:
+            raise ValueError("batch_size must be positive")
+        self._runs = runs
+        self._store = store
+        self._run_environment = run_environment
+        self._now = now or (lambda: datetime.now(timezone.utc))
+        self._batch_size = batch_size
+        self._last_created = 0
+        self._backoff_reason: str | None = None
+        self._stopping = threading.Event()
+        self._materialize_lock = threading.Lock()
+
+    async def run_once(self) -> int:
+        if self._stopping.is_set():
+            return 0
+        try:
+            generated = await asyncio.to_thread(
+                self._store.generated_analysis_run_ids, self._run_environment)
+            summaries = await asyncio.to_thread(
+                self._runs.pending_succeeded_today, generated, self._batch_size)
+            occurred_at = self._now()
+            created = 0
+            for summary in summaries:
+                result = await asyncio.to_thread(
+                    self._materialize_if_accepting,
+                    summary, render_analysis_parts(summary),
+                    occurred_at=occurred_at)
+                if result is None:
+                    break
+                created += int(result.created)
+        except Exception:
+            self._backoff_reason = "internal_error"
+            raise
+        self._last_created = created
+        self._backoff_reason = None
+        return created
+
+    async def begin_shutdown(self) -> None:
+        """Fence late read results before the final sender drain starts."""
+        self._stopping.set()
+
+    def _materialize_if_accepting(self, summary, bodies, *, occurred_at):
+        with self._materialize_lock:
+            if self._stopping.is_set():
+                return None
+            return self._store.materialize_analysis_summary(
+                summary, bodies, occurred_at=occurred_at)
+
+    def snapshot(self) -> dict[str, object]:
+        return {
+            "state": "running",
+            "last_created": self._last_created,
+            "backoff_reason": self._backoff_reason,
+        }
 
 
 class OutboxSender:
