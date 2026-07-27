@@ -61,6 +61,30 @@ services:
       db:
         condition: service_healthy
 
+  frontend:
+    image: ohmystock-frontend:local
+    build:
+      context: ./frontend
+    restart: unless-stopped
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    depends_on:
+      backend:
+        condition: service_started
+    ports:
+      - "127.0.0.1:3000:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
   # 리플레이 목 서버(스펙 §4-2) — `docker compose --profile replay up` 로만
   # 기동. 프로덕션 backend 이미지와 분리된 스테이지·진입점(uvicorn
   # replay.main). ⚠️ 무인증 관리 API(/_replay)가 있으므로 포트는 반드시

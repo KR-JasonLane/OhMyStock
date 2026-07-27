@@ -1,0 +1,16 @@
+.env
+.env.*
+.npmrc
+*.key
+*.pem
+*.p12
+*.pfx
+.git
+.DS_Store
+node_modules
+dist
+tests
+resources
+electron*
+*.map
+*.log*
