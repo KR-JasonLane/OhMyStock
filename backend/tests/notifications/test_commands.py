@@ -16,6 +16,7 @@ from app.domain.notifications.analysis_summary import (
     MorningAnalysisSummary,
     render_analysis_summary,
 )
+from app.domain.notifications.digest import render_retained_digest
 from app.domain.notifications.models import CommandKind
 from app.domain.trading.models import (
     LiquidationReason,
@@ -123,6 +124,32 @@ class AnalysisReports:
     def latest_analysis(self):
         self.calls += 1
         return self.summary
+
+
+class DigestReports:
+    def __init__(self, payload=None):
+        self.payload = payload
+        self.calls = 0
+
+    def latest_digest_payload(self):
+        self.calls += 1
+        return self.payload
+
+
+def _digest_payload():
+    return {
+        "version": 1, "trading_day": "2026-07-24", "run_environment": "mock",
+        "pipeline": {"facts": {"collection_status": "done"}, "as_of": None,
+                     "failed_fields": []},
+        "trading": {"facts": {"order_count": 1}, "as_of": None,
+                    "failed_fields": []},
+        "account": {
+            "available_deposit": None, "total_eval": None, "total_profit": None,
+            "realized_pnl": None, "realized_pnl_confidence": "unknown",
+            "source": "unavailable", "failed_fields": ["account_snapshot"],
+            "as_of": None, "trading_day": None,
+        },
+    }
 
 
 def _analysis_summary() -> MorningAnalysisSummary:
@@ -265,7 +292,8 @@ def processor(tmp_path):
     calls = []
     return (CommandProcessor(inbox, commands, Control(calls, commands), "worker",
                              chat_hash=CHAT, now=lambda: NOW,
-                             analysis_reports=AnalysisReports()), inbox, commands, calls)
+                             analysis_reports=AnalysisReports(),
+                             digest_reports=DigestReports()), inbox, commands, calls)
 
 
 @pytest.mark.anyio
@@ -279,7 +307,7 @@ async def test_analysis는_저장된_요약만_조회하고_control을_호출하
     reports = AnalysisReports(summary)
     worker = CommandProcessor(
         inbox, commands, control, "worker", chat_hash=CHAT, now=lambda: NOW,
-        analysis_reports=reports,
+        analysis_reports=reports, digest_reports=DigestReports(),
     )
     inbox.persist_batch_and_offset(
         [{"update_id": 30, "operator_hash": OP, "command": "analysis", "received_at": NOW}],
@@ -306,7 +334,7 @@ async def test_analysis는_저장된성공분석이없으면_명시적으로알�
     reports = AnalysisReports()
     worker = CommandProcessor(
         inbox, commands, control, "worker", chat_hash=CHAT, now=lambda: NOW,
-        analysis_reports=reports,
+        analysis_reports=reports, digest_reports=DigestReports(),
     )
     inbox.persist_batch_and_offset(
         [{"update_id": 31, "operator_hash": OP, "command": "analysis", "received_at": NOW}],
@@ -321,6 +349,125 @@ async def test_analysis는_저장된성공분석이없으면_명시적으로알�
     assert control.calls == []
     assert control.calls_by_kind == []
     assert reports.calls == 1
+
+
+@pytest.mark.anyio
+async def test_digest는_보존payload만_렌더링하고_control을_호출하지않는다(tmp_path):
+    """현재 계좌/broker를 호출해 과거 digest를 재계산하면 실패한다."""
+    engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'digest.db'}")
+    Base.metadata.create_all(engine)
+    inbox = TelegramInboxStore(engine, now=lambda: NOW)
+    commands = TelegramCommandStore(engine, now=lambda: NOW)
+    control = Control([], commands)
+    reports = DigestReports(_digest_payload())
+    worker = CommandProcessor(
+        inbox, commands, control, "worker", chat_hash=CHAT, now=lambda: NOW,
+        analysis_reports=AnalysisReports(), digest_reports=reports,
+    )
+    inbox.persist_batch_and_offset(
+        [{"update_id": 34, "operator_hash": OP, "command": "digest", "received_at": NOW}],
+        35,
+    )
+
+    result = await worker.process_next()
+
+    assert result.kind == "digest"
+    assert result.outbox_sensitive is True
+    assert result.response_text == render_retained_digest(_digest_payload())
+    assert control.calls == []
+    assert control.calls_by_kind == []
+    assert reports.calls == 1
+
+
+@pytest.mark.anyio
+async def test_digest는_보존결과가없으면_명시적으로알린다(tmp_path):
+    engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'digest-none.db'}")
+    Base.metadata.create_all(engine)
+    inbox = TelegramInboxStore(engine, now=lambda: NOW)
+    commands = TelegramCommandStore(engine, now=lambda: NOW)
+    control = Control([], commands)
+    reports = DigestReports()
+    worker = CommandProcessor(
+        inbox, commands, control, "worker", chat_hash=CHAT, now=lambda: NOW,
+        analysis_reports=AnalysisReports(), digest_reports=reports,
+    )
+    inbox.persist_batch_and_offset(
+        [{"update_id": 35, "operator_hash": OP, "command": "digest", "received_at": NOW}],
+        36,
+    )
+
+    result = await worker.process_next()
+
+    assert result.kind == "digest"
+    assert result.outbox_sensitive is True
+    assert result.response_text == (
+        "📋 최근 거래 다이제스트\n\n조회 가능한 최근 거래 다이제스트가 없습니다.")
+    assert control.calls == []
+    assert control.calls_by_kind == []
+    assert reports.calls == 1
+
+
+@pytest.mark.anyio
+async def test_digest_terminal은_보존결과만_다시표시한다(tmp_path):
+    """완료된 query intent가 현재 control 상태를 재조회하면 실패한다."""
+    engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'digest-terminal.db'}")
+    Base.metadata.create_all(engine)
+    inbox = TelegramInboxStore(engine, now=lambda: NOW)
+    commands = TelegramCommandStore(engine, now=lambda: NOW)
+    control = Control([], commands)
+    reports = DigestReports(_digest_payload())
+    inbox.persist_batch_and_offset(
+        [{"update_id": 36, "operator_hash": OP, "command": "digest", "received_at": NOW}],
+        37,
+    )
+    intent = commands.create_intent_for_update(36, "digest")
+    claimed = commands.claim_intent_by_id(intent.id, "old-worker")
+    assert claimed is not None
+    assert commands.mark_running(intent.id, "old-worker", claimed.version)
+    assert commands.mark_terminal(intent.id, "old-worker", claimed.version + 1, "succeeded")
+    worker = CommandProcessor(
+        inbox, commands, control, "worker", chat_hash=CHAT, now=lambda: NOW,
+        analysis_reports=AnalysisReports(), digest_reports=reports,
+    )
+
+    result = await worker.process_next()
+
+    assert result.response_text == render_retained_digest(_digest_payload())
+    assert reports.calls == 1
+    assert control.calls == []
+    assert control.calls_by_kind == []
+
+
+@pytest.mark.anyio
+async def test_digest_unknown대사는_현재값을재조회하지않고_성공으로_재조정한다(tmp_path):
+    """unknown digest를 재조정할 때 broker/control을 부르면 실패한다."""
+    engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'digest-reconcile.db'}")
+    Base.metadata.create_all(engine)
+    inbox = TelegramInboxStore(engine, now=lambda: NOW)
+    commands = TelegramCommandStore(engine, now=lambda: NOW)
+    control = Control([], commands)
+    reports = DigestReports(_digest_payload())
+    inbox.persist_batch_and_offset(
+        [{"update_id": 37, "operator_hash": OP, "command": "digest", "received_at": NOW}],
+        38,
+    )
+    intent = commands.create_intent_for_update(37, "digest")
+    claimed = commands.claim_intent_by_id(intent.id, "old-worker")
+    assert claimed is not None
+    assert commands.mark_running(intent.id, "old-worker", claimed.version)
+    assert commands.mark_owned_running_unknown("old-worker") == 1
+    worker = CommandProcessor(
+        inbox, commands, control, "worker", chat_hash=CHAT, now=lambda: NOW,
+        analysis_reports=AnalysisReports(), digest_reports=reports,
+    )
+
+    result = await worker.reconcile_unknown()
+
+    assert result is not None and result.kind == "succeeded"
+    assert commands.intent_status(intent.id) == "succeeded"
+    assert reports.calls == 0
+    assert control.calls == []
+    assert control.calls_by_kind == []
 
 
 @pytest.mark.anyio
@@ -343,7 +490,7 @@ async def test_analysis_terminal은_저장된결과만_다시표시한다(tmp_pa
     assert commands.mark_terminal(intent.id, "old-worker", claimed.version + 1, "succeeded")
     worker = CommandProcessor(
         inbox, commands, control, "worker", chat_hash=CHAT, now=lambda: NOW,
-        analysis_reports=reports,
+        analysis_reports=reports, digest_reports=DigestReports(),
     )
 
     result = await worker.process_next()
@@ -373,7 +520,7 @@ async def test_analysis_unknown대사는_성공으로_재조정하고_분석을�
     assert commands.mark_owned_running_unknown("old-worker") == 1
     worker = CommandProcessor(
         inbox, commands, control, "worker", chat_hash=CHAT, now=lambda: NOW,
-        analysis_reports=reports,
+        analysis_reports=reports, digest_reports=DigestReports(),
     )
 
     result = await worker.reconcile_unknown()
@@ -431,7 +578,8 @@ async def test_긴control호출동안_heartbeat가_running_lease를_갱신한다
     worker = CommandProcessor(inbox, commands, control, "worker",
                               chat_hash=CHAT, now=clock,
                               execution_lease_s=1, heartbeat_s=0.005,
-                              analysis_reports=AnalysisReports())
+                              analysis_reports=AnalysisReports(),
+                              digest_reports=DigestReports())
     inbox.persist_batch_and_offset([
         {"update_id": 8, "operator_hash": OP, "command": "pause", "received_at": NOW}
     ], 9)
@@ -681,7 +829,7 @@ async def test_operations_control의_손상된성공은_미관리잔고가있어
         "worker",
         chat_hash=CHAT,
         now=lambda: NOW,
-        analysis_reports=AnalysisReports(),
+        analysis_reports=AnalysisReports(), digest_reports=DigestReports(),
     )
     inbox.persist_batch_and_offset(
         [
@@ -898,7 +1046,7 @@ async def test_operations_control_monitor완료는_미관리잔고결과를_재�
         chat_hash=CHAT,
         now=lambda: NOW,
         heartbeat_s=0.005,
-        analysis_reports=AnalysisReports(),
+        analysis_reports=AnalysisReports(), digest_reports=DigestReports(),
     )
     inbox.persist_batch_and_offset(
         [
@@ -1017,7 +1165,7 @@ async def test_operations_control_unknown복구는_미관리잔고결과를_재�
         "worker",
         chat_hash=CHAT,
         now=lambda: NOW,
-        analysis_reports=AnalysisReports(),
+        analysis_reports=AnalysisReports(), digest_reports=DigestReports(),
     )
     issued = commands.issue_confirmation(
         OP,
@@ -1148,7 +1296,8 @@ async def test_accepted_liquidation은_terminal대사까지_lease를_유지한�
     worker = CommandProcessor(inbox, commands, control, "worker",
                                   chat_hash=CHAT, now=lambda: NOW,
                               execution_lease_s=1, heartbeat_s=0.005,
-                              analysis_reports=AnalysisReports())
+                              analysis_reports=AnalysisReports(),
+                              digest_reports=DigestReports())
     inbox.persist_batch_and_offset([
         {"update_id": 41, "operator_hash": OP, "command": "liquidate_all", "received_at": NOW}
     ], 42)
@@ -1193,7 +1342,7 @@ async def test_청산accepted_reason손상은_주의응답후_재실행없이mon
         now=lambda: NOW,
         execution_lease_s=1,
         heartbeat_s=0.005,
-        analysis_reports=AnalysisReports(),
+        analysis_reports=AnalysisReports(), digest_reports=DigestReports(),
     )
     inbox.persist_batch_and_offset([
         {"update_id": 45, "operator_hash": OP, "command": "liquidate_all",
@@ -1242,7 +1391,7 @@ async def test_청산monitor의_불일치성공도_needs_attention으로종결�
         now=lambda: NOW,
         execution_lease_s=1,
         heartbeat_s=0.005,
-        analysis_reports=AnalysisReports(),
+        analysis_reports=AnalysisReports(), digest_reports=DigestReports(),
     )
     inbox.persist_batch_and_offset([
         {"update_id": 43, "operator_hash": OP, "command": "liquidate_all",
@@ -1409,7 +1558,7 @@ async def test_조회와제어결과는_주입된프레젠터를통과한다(
         chat_hash=CHAT,
         now=lambda: NOW,
         presenter=presenter,
-        analysis_reports=AnalysisReports(),
+        analysis_reports=AnalysisReports(), digest_reports=DigestReports(),
     )
     inbox.persist_batch_and_offset(
         [
@@ -1447,7 +1596,7 @@ async def test_위험명령확인은_전체confirm명령과함께프레젠터를
         chat_hash=CHAT,
         now=lambda: NOW,
         presenter=presenter,
-        analysis_reports=AnalysisReports(),
+        analysis_reports=AnalysisReports(), digest_reports=DigestReports(),
     )
     inbox.persist_batch_and_offset(
         [
@@ -1491,7 +1640,7 @@ async def test_확인소비후위험명령결과도_프레젠터를통과한다(
         chat_hash=CHAT,
         now=lambda: NOW,
         presenter=presenter,
-        analysis_reports=AnalysisReports(),
+        analysis_reports=AnalysisReports(), digest_reports=DigestReports(),
     )
     inbox.persist_batch_and_offset(
         [
@@ -1570,7 +1719,7 @@ async def test_기존terminal은_프레젠터로재표시하고_제어를재실�
         chat_hash=CHAT,
         now=lambda: NOW,
         presenter=presenter,
-        analysis_reports=AnalysisReports(),
+        analysis_reports=AnalysisReports(), digest_reports=DigestReports(),
     )
 
     result = await worker.process_next()
@@ -1601,7 +1750,7 @@ async def test_유효하지않은confirm도_프레젠터의기존결과경계를
         chat_hash=CHAT,
         now=lambda: NOW,
         presenter=presenter,
-        analysis_reports=AnalysisReports(),
+        analysis_reports=AnalysisReports(), digest_reports=DigestReports(),
     )
     inbox.persist_batch_and_offset(
         [
@@ -1644,7 +1793,7 @@ async def test_프레젠터예외는_적용된stop_intent를_unknown으로바꾸
         chat_hash=CHAT,
         now=lambda: NOW,
         presenter=RaisingPresenter(),
-        analysis_reports=AnalysisReports(),
+        analysis_reports=AnalysisReports(), digest_reports=DigestReports(),
     )
     inbox.persist_batch_and_offset(
         [
@@ -1696,7 +1845,7 @@ async def test_falsey프레젠터도_명시적주입값을그대로사용한다(
         chat_hash=CHAT,
         now=lambda: NOW,
         presenter=presenter,
-        analysis_reports=AnalysisReports(),
+        analysis_reports=AnalysisReports(), digest_reports=DigestReports(),
     )
     inbox.persist_batch_and_offset(
         [

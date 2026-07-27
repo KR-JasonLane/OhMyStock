@@ -639,6 +639,7 @@ def test_help_조회제어확인필요를구분하고_confirm은일반명령에�
     assert "/account    계좌와 손익" in text
     assert "/positions  관리 포지션" in text
     assert "/analysis   최근 AI 분석" in text
+    assert "/digest     최근 거래 다이제스트" in text
     assert "\n제어\n" in text
     assert "/pause      자동 일정 일시정지" in text
     assert "/stop       신규 진입 중지" in text

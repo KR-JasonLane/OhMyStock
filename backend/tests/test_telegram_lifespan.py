@@ -67,6 +67,11 @@ class EmptyAnalysisReports:
         return None
 
 
+class EmptyDigestReports:
+    def latest_digest_payload(self):
+        return None
+
+
 def _store(tmp_path, clock: Clock) -> TelegramInboxStore:
     engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'telegram.db'}")
     Base.metadata.create_all(engine)
@@ -253,6 +258,29 @@ async def test_analysis는_실제_pending_inbox에서_query_lane으로만처리�
     assert processor.seen == []
     assert await dispatcher.tick_query() == 1
     assert processor.seen == [(20, "analysis")]
+
+
+@pytest.mark.anyio
+async def test_digest는_실제_pending_inbox에서_query_lane으로만처리한다(tmp_path):
+    """digest가 control lane에서 실행되면 읽기 조회가 제어 작업을 막는다."""
+    clock = Clock()
+    store = _store(tmp_path, clock)
+    poller = InboxPoller(
+        telegram=FakeTelegram([_message(21, "/digest")]),
+        inbox=store,
+        operators=(OperatorIdentity(11, 22),),
+        bot_token=SecretStr("BOT-TOKEN"), worker_id="poller",
+        circuit=TelegramCircuit(), now=clock,
+    )
+    processor = RecordingProcessor()
+    dispatcher = CommandDispatcher(store, processor, worker_id="commands", now=clock)
+
+    assert await poller.run_once() == 1
+    assert store.pending_count({"digest"}) == 1
+    assert await dispatcher.tick_control() == 0
+    assert processor.seen == []
+    assert await dispatcher.tick_query() == 1
+    assert processor.seen == [(21, "digest")]
 
 
 @pytest.mark.anyio
@@ -495,7 +523,7 @@ async def test_명령응답_경로는_token_confirmation_계좌금액을_로그�
     processor = CommandProcessor(
         inbox, commands, SensitiveControl(), "secret-log-command",
         chat_hash="v1:" + "c" * 64, now=clock,
-        analysis_reports=EmptyAnalysisReports())
+        analysis_reports=EmptyAnalysisReports(), digest_reports=EmptyDigestReports())
     dispatcher = CommandDispatcher(
         inbox, processor, worker_id="secret-log-dispatcher", now=clock,
         response_publisher=publisher)

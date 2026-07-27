@@ -66,6 +66,7 @@ from app.store.scheduler_store import SchedulerStore
 from app.store.scoring_store import ScoringStore
 from app.store.notification_store import (
     AnalysisSummaryRunStore,
+    DigestReportStore,
     DigestRunStore,
     NotificationStore,
 )
@@ -361,6 +362,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 notification_store = NotificationStore(app.state.engine)
                 analysis_summary_runs = AnalysisSummaryRunStore(
                     app.state.engine, settings.run_environment)
+                digest_reports = DigestReportStore(
+                    notification_store, settings.run_environment)
                 worker_suffix = __import__("secrets").token_hex(8)
                 command_worker = f"telegram-command-{worker_suffix}"
                 command_processor = CommandProcessor(
@@ -368,7 +371,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     command_worker,
                     chat_hash=external_id_hash(
                         token, "chat", settings.telegram_allowed_chat_id),
-                    analysis_reports=analysis_summary_runs)
+                    analysis_reports=analysis_summary_runs,
+                    digest_reports=digest_reports)
                 poller = InboxPoller(
                     telegram=telegram_client, inbox=inbox_store,
                     operators=(OperatorIdentity(

@@ -16,8 +16,10 @@ from typing import Any
 
 from app.domain.notifications.models import CommandKind
 from app.domain.notifications.analysis_summary import render_analysis_summary
+from app.domain.notifications.digest import render_retained_digest
 from app.domain.notifications.ports import (
     AnalysisReportQueryPort,
+    DigestReportQueryPort,
     OperationsControlPort,
 )
 from app.domain.notifications.presentation import TelegramCommandPresenter
@@ -68,7 +70,8 @@ class CommandProcessor:
                  chat_hash: str, now=None, execution_lease_s: int = 30,
                  heartbeat_s: float = 10.0,
                  presenter: TelegramCommandPresenter | None = None,
-                 analysis_reports: AnalysisReportQueryPort) -> None:
+                 analysis_reports: AnalysisReportQueryPort,
+                 digest_reports: DigestReportQueryPort) -> None:
         self._inbox = inbox
         self._commands = commands
         self._control = control
@@ -83,6 +86,7 @@ class CommandProcessor:
             presenter if presenter is not None else TelegramCommandPresenter()
         )
         self._analysis_reports = analysis_reports
+        self._digest_reports = digest_reports
         self._accepted_monitors: dict[str, asyncio.Task] = {}
 
     async def process_next(self) -> CommandResult | None:
@@ -136,6 +140,7 @@ class CommandProcessor:
                 if kind in {
                         CommandKind.STATUS, CommandKind.ACCOUNT,
                         CommandKind.POSITIONS, CommandKind.ANALYSIS,
+                        CommandKind.DIGEST,
                         CommandKind.HELP}:
                     result, _terminal = await self._call_handler(created)
                     return result
@@ -442,6 +447,19 @@ class CommandProcessor:
                     if summary is not None
                     else "🧠 최근 AI 분석\n\n조회 가능한 AI 분석이 없습니다."
                 ),
+            ), "succeeded"
+        if kind is CommandKind.DIGEST:
+            payload = await asyncio.to_thread(self._digest_reports.latest_digest_payload)
+            try:
+                response_text = (
+                    render_retained_digest(payload) if payload is not None else None
+                )
+            except ValueError:
+                response_text = None
+            return CommandResult(
+                "digest", outbox_sensitive=True,
+                response_text=(response_text or "📋 최근 거래 다이제스트\n\n"
+                               "조회 가능한 최근 거래 다이제스트가 없습니다."),
             ), "succeeded"
         if kind is CommandKind.HELP:
             return CommandResult(
@@ -817,6 +835,7 @@ class CommandProcessor:
         kind = CommandKind(intent.command)
         if kind in {CommandKind.STATUS, CommandKind.ACCOUNT,
                     CommandKind.POSITIONS, CommandKind.ANALYSIS,
+                    CommandKind.DIGEST,
                     CommandKind.HELP}:
             return "succeeded"
         status = await self._control.system_status()

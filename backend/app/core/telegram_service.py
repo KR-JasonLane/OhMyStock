@@ -87,6 +87,7 @@ class InboxPoller:
     _QUERY = frozenset({
         CommandKind.STATUS.value, CommandKind.ACCOUNT.value,
         CommandKind.POSITIONS.value, CommandKind.ANALYSIS.value,
+        CommandKind.DIGEST.value,
         CommandKind.HELP.value,
     })
 
@@ -229,6 +230,7 @@ class CommandDispatcher:
     _QUERY = frozenset({
         CommandKind.STATUS.value, CommandKind.ACCOUNT.value,
         CommandKind.POSITIONS.value, CommandKind.ANALYSIS.value,
+        CommandKind.DIGEST.value,
         CommandKind.HELP.value,
     })
     _CONTROL = frozenset({

@@ -58,6 +58,11 @@ class MaterializedNotification:
     priority: NotificationPriority
 
 
+def _is_retained_digest(outbox: NotificationOutboxRow) -> bool:
+    """`/digest` 전용 24시간 보존본만 성공 전송 뒤에도 남긴다."""
+    return outbox.kind == "digest" and outbox.retention_kind == "digest"
+
+
 class AnalysisSummaryRunStore:
     """성공한 분석 결과를 알림 허용목록 DTO로만 읽는 SQL read model."""
 
@@ -177,6 +182,20 @@ class AnalysisSummaryRunStore:
             started_at=as_aware_utc(run.started_at),
             finished_at=as_aware_utc(run.finished_at), verdicts=verdicts,
             corrupted_rows=corrupted_rows)
+
+
+class DigestReportStore:
+    """TTL 전의 보존 digest를 읽기 전용으로 제공하는 query adapter."""
+
+    def __init__(self, notifications: "NotificationStore", run_environment: str,
+                 *, now: Callable[[], datetime] | None = None) -> None:
+        self._notifications = notifications
+        self._run_environment = run_environment
+        self._now = now or (lambda: datetime.now(timezone.utc))
+
+    def latest_digest_payload(self) -> dict[str, object] | None:
+        return self._notifications.latest_retained_digest_payload(
+            self._run_environment, now=self._now())
 
 
 def _json_string_tuple(value: str | bytes) -> tuple[tuple[str, ...], bool]:
@@ -489,6 +508,41 @@ class NotificationStore:
                 # 다른 producer의 malformed key는 scheduler를 막지 않는다.
                 continue
         return tuple(sorted(days))
+
+    def latest_retained_digest_payload(
+            self, run_environment: str, *, now: datetime,
+    ) -> dict[str, object] | None:
+        """scrub 전의 환경별 digest payload를 최대 100개까지 역순으로 읽는다."""
+        now = _aware(now)
+        if run_environment not in {"mock", "real"}:
+            raise ValueError("run_environment must be mock or real")
+        prefix = f"digest:{run_environment}:"
+        delivery = aliased(NotificationDeliveryRow)
+        with self._sessions() as session:
+            rows = session.scalars(select(NotificationOutboxRow.payload).where(
+                NotificationOutboxRow.kind == "digest",
+                NotificationOutboxRow.status == "sent",
+                NotificationOutboxRow.idempotency_key.like(f"{prefix}%"),
+                NotificationOutboxRow.sensitive.is_(True),
+                NotificationOutboxRow.purge_at > now,
+                NotificationOutboxRow.payload.is_not(None),
+                select(delivery.id).where(
+                    delivery.outbox_id == NotificationOutboxRow.id,
+                    delivery.body.is_not(None),
+                ).exists(),
+            ).order_by(
+                NotificationOutboxRow.occurred_at.desc(),
+                NotificationOutboxRow.id.desc(),
+            ).limit(100)).all()
+        for raw_payload in rows:
+            try:
+                payload = json.loads(raw_payload)
+            except (TypeError, UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            if (isinstance(payload, dict)
+                    and payload.get("run_environment") == run_environment):
+                return payload
+        return None
 
     def generated_analysis_run_ids(self, run_environment: str) -> tuple[int, ...]:
         """생성된 분석 outbox id는 delivery 상태와 무관하게 완료 이력이다."""
@@ -880,7 +934,8 @@ class NotificationStore:
                     owner=None, lease_until=None, version=version + 1))
             if result.rowcount != 1:
                 return False
-            if outbox.sensitive:
+            if (outbox.sensitive
+                    and not _is_retained_digest(outbox)):
                 session.execute(update(NotificationDeliveryRow).where(
                     NotificationDeliveryRow.id == delivery_id).values(body=None))
                 outbox.payload = None
@@ -893,11 +948,17 @@ class NotificationStore:
                 NotificationDeliveryRow.outbox_id == outbox_id,
                 NotificationDeliveryRow.status != "sent")) or 0
         if remaining == 0:
-            session.execute(update(NotificationOutboxRow).where(
-                NotificationOutboxRow.id == outbox_id).values(
-                status="sent", sent_at=now, payload=None))
-            session.execute(update(NotificationDeliveryRow).where(
-                NotificationDeliveryRow.outbox_id == outbox_id).values(body=None))
+            outbox = session.get(NotificationOutboxRow, outbox_id)
+            if outbox is not None and _is_retained_digest(outbox):
+                session.execute(update(NotificationOutboxRow).where(
+                    NotificationOutboxRow.id == outbox_id).values(
+                    status="sent", sent_at=now))
+            else:
+                session.execute(update(NotificationOutboxRow).where(
+                    NotificationOutboxRow.id == outbox_id).values(
+                    status="sent", sent_at=now, payload=None))
+                session.execute(update(NotificationDeliveryRow).where(
+                    NotificationDeliveryRow.outbox_id == outbox_id).values(body=None))
 
     def retry_delivery(self, delivery_id: int, owner: str, version: int,
                    error_kind: str,
@@ -1005,19 +1066,26 @@ class NotificationStore:
                         NotificationDeliveryRow.body.is_not(None))) or 0
                 if outbox.payload is None and body_count == 0:
                     continue
-                session.execute(update(NotificationDeliveryRow).where(
-                    NotificationDeliveryRow.outbox_id == outbox_id,
-                    NotificationDeliveryRow.body.is_not(None)).values(
-                    body=None,
-                    status=case(
-                        (NotificationDeliveryRow.status == "sent", "sent"),
-                        else_="dead_letter"),
-                    owner=None, lease_until=None,
-                    version=NotificationDeliveryRow.version + 1))
-                session.execute(update(NotificationOutboxRow).where(
-                    NotificationOutboxRow.id == outbox_id).values(
-                    payload=None, status="dead_letter",
-                    last_error_kind="sensitive_payload_expired"))
+                if outbox.status == "sent":
+                    session.execute(update(NotificationDeliveryRow).where(
+                        NotificationDeliveryRow.outbox_id == outbox_id,
+                        NotificationDeliveryRow.body.is_not(None)).values(body=None))
+                    session.execute(update(NotificationOutboxRow).where(
+                        NotificationOutboxRow.id == outbox_id).values(payload=None))
+                else:
+                    session.execute(update(NotificationDeliveryRow).where(
+                        NotificationDeliveryRow.outbox_id == outbox_id,
+                        NotificationDeliveryRow.body.is_not(None)).values(
+                        body=None,
+                        status=case(
+                            (NotificationDeliveryRow.status == "sent", "sent"),
+                            else_="dead_letter"),
+                        owner=None, lease_until=None,
+                        version=NotificationDeliveryRow.version + 1))
+                    session.execute(update(NotificationOutboxRow).where(
+                        NotificationOutboxRow.id == outbox_id).values(
+                        payload=None, status="dead_letter",
+                        last_error_kind="sensitive_payload_expired"))
                 purged += 1
             return purged
 

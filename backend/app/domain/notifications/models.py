@@ -13,6 +13,7 @@ class CommandKind(StrEnum):
     ACCOUNT = "account"
     POSITIONS = "positions"
     ANALYSIS = "analysis"
+    DIGEST = "digest"
     PAUSE = "pause"
     STOP = "stop"
     RESUME = "resume"

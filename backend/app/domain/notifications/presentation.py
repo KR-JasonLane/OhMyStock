@@ -455,6 +455,7 @@ class TelegramCommandPresenter:
                 "/account    계좌와 손익",
                 "/positions  관리 포지션",
                 "/analysis   최근 AI 분석",
+                "/digest     최근 거래 다이제스트",
                 "",
                 "제어",
                 "/pause      자동 일정 일시정지",

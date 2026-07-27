@@ -19,6 +19,9 @@ from app.domain.notifications.formatting import render_parts
 from app.domain.notifications.ports import (AccountSnapshotDeferred,
                                             OperationsControlPort)
 
+
+_DIGEST_ENVIRONMENTS = frozenset({"mock", "real"})
+
 class CalendarPort(Protocol):
     KST: Any
 
@@ -101,6 +104,10 @@ class Digest:
     pipeline: DigestSection
     trading: DigestSection
     account: DigestAccount
+
+    def __post_init__(self) -> None:
+        if self.run_environment not in _DIGEST_ENVIRONMENTS:
+            raise ValueError("digest run_environment must be mock or real")
 
     @property
     def idempotency_key(self) -> str:
@@ -300,3 +307,108 @@ def _as_of(value: datetime | None) -> str:
 
 def _failed(fields: tuple[str, ...]) -> str:
     return " (누락 필드: " + ", ".join(fields) + ")" if fields else ""
+
+
+def render_retained_digest(payload: Mapping[str, object]) -> str:
+    """저장 당시의 digest payload만 검증해 동일 본문으로 다시 표시한다."""
+    if not isinstance(payload, Mapping):
+        raise ValueError("retained digest payload must be an object")
+    if payload.get("version") != 1 or type(payload.get("version")) is not int:
+        raise ValueError("unsupported retained digest version")
+    trading_day = _required_date(payload, "trading_day")
+    run_environment = _required_str(payload, "run_environment")
+    return Digest(
+        trading_day=trading_day,
+        run_environment=run_environment,
+        pipeline=_retained_section(payload, "pipeline"),
+        trading=_retained_section(payload, "trading"),
+        account=_retained_account(payload),
+    ).body
+
+
+def _retained_section(payload: Mapping[str, object], name: str) -> DigestSection:
+    section = _required_object(payload, name)
+    facts = _required_object(section, "facts")
+    return DigestSection(
+        facts=dict(facts),
+        as_of=_optional_datetime(section, "as_of"),
+        failed_fields=_string_tuple(section, "failed_fields"),
+    )
+
+
+def _retained_account(payload: Mapping[str, object]) -> DigestAccount:
+    account = _required_object(payload, "account")
+    amounts: list[int | None] = []
+    for field in ("available_deposit", "total_eval", "total_profit", "realized_pnl"):
+        value = _required_value(account, field)
+        if value is not None and type(value) is not int:
+            raise ValueError(f"retained digest account {field} must be int or null")
+        amounts.append(value)
+    trading_day = _required_value(account, "trading_day")
+    if trading_day is not None:
+        if type(trading_day) is not str:
+            raise ValueError("retained digest account trading_day must be string or null")
+        try:
+            trading_day = date.fromisoformat(trading_day)
+        except ValueError as exc:
+            raise ValueError("invalid retained digest account trading_day") from exc
+    return DigestAccount(
+        *amounts,
+        realized_pnl_confidence=_required_str(account, "realized_pnl_confidence"),
+        source=_required_str(account, "source"),
+        failed_fields=_string_tuple(account, "failed_fields"),
+        as_of=_optional_datetime(account, "as_of"),
+        trading_day=trading_day,
+    )
+
+
+def _required_object(payload: Mapping[str, object], name: str) -> Mapping[str, object]:
+    value = _required_value(payload, name)
+    if not isinstance(value, Mapping):
+        raise ValueError(f"retained digest {name} must be an object")
+    return value
+
+
+def _required_value(payload: Mapping[str, object], name: str) -> object:
+    if name not in payload:
+        raise ValueError(f"retained digest is missing {name}")
+    return payload[name]
+
+
+def _required_str(payload: Mapping[str, object], name: str) -> str:
+    value = _required_value(payload, name)
+    if type(value) is not str or not value:
+        raise ValueError(f"retained digest {name} must be a non-empty string")
+    return value
+
+
+def _required_date(payload: Mapping[str, object], name: str) -> date:
+    value = _required_value(payload, name)
+    if type(value) is not str:
+        raise ValueError(f"retained digest {name} must be an ISO date")
+    try:
+        return date.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError(f"invalid retained digest {name}") from exc
+
+
+def _optional_datetime(payload: Mapping[str, object], name: str) -> datetime | None:
+    value = _required_value(payload, name)
+    if value is None:
+        return None
+    if type(value) is not str:
+        raise ValueError(f"retained digest {name} must be an ISO datetime or null")
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError(f"invalid retained digest {name}") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(f"retained digest {name} must be timezone-aware")
+    return parsed
+
+
+def _string_tuple(payload: Mapping[str, object], name: str) -> tuple[str, ...]:
+    value = _required_value(payload, name)
+    if not isinstance(value, list) or not all(type(item) is str for item in value):
+        raise ValueError(f"retained digest {name} must be a string list")
+    return tuple(value)

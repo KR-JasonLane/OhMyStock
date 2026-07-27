@@ -4,6 +4,7 @@
 공용 운영 제어만 구체화하며, broker나 주문 포트를 직접 노출하지 않는다.
 """
 
+from collections.abc import Mapping
 from typing import Any, Protocol
 
 from app.domain.notifications.analysis_summary import MorningAnalysisSummary
@@ -32,3 +33,9 @@ class AnalysisReportQueryPort(Protocol):
     """저장된 성공 분석의 읽기 모델 경계."""
 
     def latest_analysis(self) -> MorningAnalysisSummary | None: ...
+
+
+class DigestReportQueryPort(Protocol):
+    """보존 기간 안의 거래 다이제스트를 읽는 별도 read model 경계."""
+
+    def latest_digest_payload(self) -> Mapping[str, object] | None: ...

@@ -1,3 +1,4 @@
+from copy import deepcopy
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
@@ -5,7 +6,8 @@ from sqlalchemy import create_engine
 
 from app.core.operations_control import AccountSnapshotDeferred
 from app.domain.notifications.digest import (Digest, DigestAccount, DigestBuilder,
-                                             DigestPlanner, DigestSection)
+                                             DigestPlanner, DigestSection,
+                                             render_retained_digest)
 from app.domain.errors import BrokerError
 from app.domain.notifications.models import NotificationPriority
 from app.store.models import (AnalysisRunRow, Base, CollectionRunRow, ScoreRunRow,
@@ -195,6 +197,53 @@ def test_digest본문은_각_read_model의_누락필드를_명시한다():
 
     assert "누락 필드: collection" in digest.body
     assert "누락 필드: trade_runs" in digest.body
+
+
+def _retained_digest() -> Digest:
+    return Digest(
+        date(2026, 7, 24), "mock",
+        DigestSection({"collection_status": "done"}, kst(2026, 7, 24, 16, 10)),
+        DigestSection({"order_count": 1}, kst(2026, 7, 24, 16, 10)),
+        DigestAccount(
+            1_000, 2_000, 30, 40, "estimated", "cached", (),
+            kst(2026, 7, 24, 16, 10), date(2026, 7, 24)),
+    )
+
+
+def test_retained_digest_payload은_원래_digest본문으로_재표시한다():
+    """보존 payload를 현재 계좌 값으로 재계산하면 실패한다."""
+    digest = _retained_digest()
+
+    assert render_retained_digest(digest.payload) == digest.body
+
+
+def test_digest는_지원하지않는_환경을_거부한다():
+    """지원하지 않는 환경이 보존 payload에 섞이면 fail-closed해야 한다."""
+    digest = _retained_digest()
+
+    with pytest.raises(ValueError, match="run_environment"):
+        Digest(
+            date(2026, 7, 24), "replay", digest.pipeline, digest.trading, digest.account)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda payload: payload.__setitem__("version", 2),
+        lambda payload: payload.__setitem__("run_environment", 1),
+        lambda payload: payload.__setitem__("trading_day", "not-a-date"),
+        lambda payload: payload.__setitem__("pipeline", []),
+        lambda payload: payload.__setitem__("account", []),
+        lambda payload: payload["account"].__setitem__("available_deposit", "1000"),
+    ],
+)
+def test_retained_digest_payload은_필수_schema가_손상되면_거부한다(mutate):
+    """과거 payload의 누락/형변환을 정상 다이제스트처럼 표시하면 실패한다."""
+    payload = deepcopy(_retained_digest().payload)
+    mutate(payload)
+
+    with pytest.raises(ValueError):
+        render_retained_digest(payload)
 
 
 def test_run_read_model은_거래일의_전거래일수집과_score기준일을_따른다(tmp_path):
