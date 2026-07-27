@@ -6,6 +6,8 @@
 
 from typing import Any, Protocol
 
+from app.domain.notifications.analysis_summary import MorningAnalysisSummary
+
 
 class AccountSnapshotDeferred(RuntimeError):
     """저우선 digest가 새 broker snapshot을 시작하지 않았다는 명시 계약."""
@@ -24,3 +26,9 @@ class OperationsControlPort(Protocol):
     async def liquidate_managed(self, intent_id: str, targets: Any,
                                 *, expected_run_id: int | None = None) -> Any: ...
     async def reconcile_control_intent(self, intent_id: str, targets: Any = ()) -> Any: ...
+
+
+class AnalysisReportQueryPort(Protocol):
+    """저장된 성공 분석의 읽기 모델 경계."""
+
+    def latest_analysis(self) -> MorningAnalysisSummary | None: ...

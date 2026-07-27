@@ -86,7 +86,8 @@ class InboxPoller:
     _QUERY_CAPACITY = 20
     _QUERY = frozenset({
         CommandKind.STATUS.value, CommandKind.ACCOUNT.value,
-        CommandKind.POSITIONS.value, CommandKind.HELP.value,
+        CommandKind.POSITIONS.value, CommandKind.ANALYSIS.value,
+        CommandKind.HELP.value,
     })
 
     def __init__(
@@ -227,7 +228,8 @@ class CommandDispatcher:
 
     _QUERY = frozenset({
         CommandKind.STATUS.value, CommandKind.ACCOUNT.value,
-        CommandKind.POSITIONS.value, CommandKind.HELP.value,
+        CommandKind.POSITIONS.value, CommandKind.ANALYSIS.value,
+        CommandKind.HELP.value,
     })
     _CONTROL = frozenset({
         CommandKind.PAUSE.value, CommandKind.STOP.value,

@@ -66,6 +66,16 @@ def test_analysis_summary는_최종후보와_차순위승인을_구분한다():
     assert "검토 결과  승인 2 · 거절 1" in text
 
 
+def test_analysis_summary는_점수기준일과_KST완료시각을_명시한다():
+    text = render_analysis_summary(_summary(
+        score_reference_date=date(2026, 7, 27),
+        finished_at=datetime(2026, 7, 28, 8, 21, tzinfo=timezone.utc),
+    ))
+
+    assert "점수 기준일  2026-07-27" in text
+    assert "분석 완료  2026-07-28 17:21 KST" in text
+
+
 def test_analysis_summary는_결정론적으로_후보와_차순위를_정렬한다():
     text = render_analysis_summary(_summary(max_picks_advice=2, verdicts=(
         _verdict("007160", "첫째", "approve", 0.10, True, 2),

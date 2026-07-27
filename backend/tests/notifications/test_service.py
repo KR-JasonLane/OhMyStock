@@ -79,6 +79,8 @@ async def test_analysis_summary는_오래된순으로_materialize하고_재기�
     assert await service.run_once() == 2
     assert [item[0] for item in store.materialized] == [1, 2]
     assert all(bodies for _run_id, bodies, _occurred_at in store.materialized)
+    assert "점수 기준일  2026-07-24" in store.materialized[0][1][0]
+    assert "분석 완료  2026-07-27 09:02 KST" in store.materialized[0][1][0]
     assert [item[2] for item in store.materialized] == [NOW, NOW]
     assert await service.run_once() == 0
     assert runs.calls == [((), 10), ((1, 2), 10)]

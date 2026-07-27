@@ -62,6 +62,11 @@ class FakeTelegram:
         return [item for item in self.updates if item.update_id >= offset]
 
 
+class EmptyAnalysisReports:
+    def latest_analysis(self):
+        return None
+
+
 def _store(tmp_path, clock: Clock) -> TelegramInboxStore:
     engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'telegram.db'}")
     Base.metadata.create_all(engine)
@@ -224,6 +229,30 @@ async def test_제어lane은_update순서를_지키고_느린조회와_분리된
     )
     await dispatcher.tick_control()
     assert dispatcher.snapshot()["control_delay_warning"] is True
+
+
+@pytest.mark.anyio
+async def test_analysis는_실제_pending_inbox에서_query_lane으로만처리한다(tmp_path):
+    clock = Clock()
+    store = _store(tmp_path, clock)
+    poller = InboxPoller(
+        telegram=FakeTelegram([_message(20, "/analysis")]),
+        inbox=store,
+        operators=(OperatorIdentity(11, 22),),
+        bot_token=SecretStr("BOT-TOKEN"), worker_id="poller",
+        circuit=TelegramCircuit(), now=clock,
+    )
+    processor = RecordingProcessor()
+    dispatcher = CommandDispatcher(
+        store, processor, worker_id="commands", now=clock,
+    )
+
+    assert await poller.run_once() == 1
+    assert store.pending_count({"analysis"}) == 1
+    assert await dispatcher.tick_control() == 0
+    assert processor.seen == []
+    assert await dispatcher.tick_query() == 1
+    assert processor.seen == [(20, "analysis")]
 
 
 @pytest.mark.anyio
@@ -465,7 +494,8 @@ async def test_명령응답_경로는_token_confirmation_계좌금액을_로그�
     assert await poller.run_once() == 2
     processor = CommandProcessor(
         inbox, commands, SensitiveControl(), "secret-log-command",
-        chat_hash="v1:" + "c" * 64, now=clock)
+        chat_hash="v1:" + "c" * 64, now=clock,
+        analysis_reports=EmptyAnalysisReports())
     dispatcher = CommandDispatcher(
         inbox, processor, worker_id="secret-log-dispatcher", now=clock,
         response_publisher=publisher)

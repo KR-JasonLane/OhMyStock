@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from math import isfinite
 from unicodedata import category
+from zoneinfo import ZoneInfo
 
 from app.domain.notifications.formatting import render_parts
 
@@ -28,6 +29,7 @@ _MAX_VERDICTS = 20
 _MAX_PICKS = 5
 _MAX_REASONS = 3
 _MAX_RISK_FLAGS = 5
+_KST = ZoneInfo("Asia/Seoul")
 
 
 @dataclass(frozen=True)
@@ -152,6 +154,8 @@ def render_analysis_summary(summary: MorningAnalysisSummary) -> str:
         f"🧠 아침 AI 분석 완료 · {_ENVIRONMENT_LABEL[summary.run_environment]}",
         "",
         f"시장 국면  {_REGIME_LABEL[summary.regime]}",
+        f"점수 기준일  {summary.score_reference_date.isoformat()}",
+        f"분석 완료  {summary.finished_at.astimezone(_KST):%Y-%m-%d %H:%M KST}",
         f"최대 진입 권고  {summary.max_picks_advice}종목",
     ]
     if final_picks:

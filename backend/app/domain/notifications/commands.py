@@ -15,7 +15,11 @@ from datetime import datetime, timezone
 from typing import Any
 
 from app.domain.notifications.models import CommandKind
-from app.domain.notifications.ports import OperationsControlPort
+from app.domain.notifications.analysis_summary import render_analysis_summary
+from app.domain.notifications.ports import (
+    AnalysisReportQueryPort,
+    OperationsControlPort,
+)
 from app.domain.notifications.presentation import TelegramCommandPresenter
 from app.domain.trading.models import LiquidationReason
 
@@ -63,7 +67,8 @@ class CommandProcessor:
     def __init__(self, inbox, commands, control: OperationsControlPort, worker_id: str, *,
                  chat_hash: str, now=None, execution_lease_s: int = 30,
                  heartbeat_s: float = 10.0,
-                 presenter: TelegramCommandPresenter | None = None) -> None:
+                 presenter: TelegramCommandPresenter | None = None,
+                 analysis_reports: AnalysisReportQueryPort) -> None:
         self._inbox = inbox
         self._commands = commands
         self._control = control
@@ -77,6 +82,7 @@ class CommandProcessor:
         self._presenter = (
             presenter if presenter is not None else TelegramCommandPresenter()
         )
+        self._analysis_reports = analysis_reports
         self._accepted_monitors: dict[str, asyncio.Task] = {}
 
     async def process_next(self) -> CommandResult | None:
@@ -129,8 +135,9 @@ class CommandProcessor:
                 # acknowledgement and are never replayed.
                 if kind in {
                         CommandKind.STATUS, CommandKind.ACCOUNT,
-                        CommandKind.POSITIONS, CommandKind.HELP}:
-                    result, _terminal = await self._call_control(created)
+                        CommandKind.POSITIONS, CommandKind.ANALYSIS,
+                        CommandKind.HELP}:
+                    result, _terminal = await self._call_handler(created)
                     return result
                 return CommandResult(
                     status,
@@ -274,7 +281,7 @@ class CommandProcessor:
         heartbeat = asyncio.create_task(
             self._maintain_execution_lease(intent.id, running_version, stopped, lease_lost))
         try:
-            result, terminal = await self._call_control(intent)
+            result, terminal = await self._call_handler(intent)
         except BaseException:
             await self._stop_heartbeat(stopped, heartbeat)
             # We cannot know whether the in-memory or broker-side effect began.
@@ -394,7 +401,7 @@ class CommandProcessor:
                     return
                 version[0] = renewed
 
-    async def _call_control(self, intent) -> tuple[CommandResult, str | None]:
+    async def _call_handler(self, intent) -> tuple[CommandResult, str | None]:
         kind = CommandKind(intent.command)
         if kind is CommandKind.STATUS:
             status = await self._control.system_status()
@@ -424,6 +431,16 @@ class CommandProcessor:
                     self._presenter.positions,
                     summary,
                     fallback=_PRESENTATION_FALLBACK,
+                ),
+            ), "succeeded"
+        if kind is CommandKind.ANALYSIS:
+            summary = await asyncio.to_thread(self._analysis_reports.latest_analysis)
+            return CommandResult(
+                "analysis", outbox_sensitive=True,
+                response_text=(
+                    render_analysis_summary(summary)
+                    if summary is not None
+                    else "🧠 최근 AI 분석\n\n조회 가능한 AI 분석이 없습니다."
                 ),
             ), "succeeded"
         if kind is CommandKind.HELP:
@@ -799,7 +816,8 @@ class CommandProcessor:
         """Read current shared-control state; do not replay an ambiguous command."""
         kind = CommandKind(intent.command)
         if kind in {CommandKind.STATUS, CommandKind.ACCOUNT,
-                    CommandKind.POSITIONS, CommandKind.HELP}:
+                    CommandKind.POSITIONS, CommandKind.ANALYSIS,
+                    CommandKind.HELP}:
             return "succeeded"
         status = await self._control.system_status()
         scheduler = status.get("scheduler") if isinstance(status, dict) else None
