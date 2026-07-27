@@ -1,7 +1,8 @@
 """Append-only operational events and fixed-part notification delivery."""
 
 import json
-from collections.abc import Callable, Sequence
+import logging
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
@@ -10,10 +11,14 @@ from sqlalchemy import Engine, and_, case, func, or_, select, update
 from sqlalchemy.orm import aliased
 from sqlalchemy.orm import sessionmaker
 
+from app.core.market_calendar import KST
+from app.domain.notifications.analysis_summary import (AnalysisVerdictSummary,
+                                                        MorningAnalysisSummary)
 from app.domain.notifications.models import NotificationPriority, OperationalEvent
 from app.domain.notifications.digest import DigestSection
 from app.store.kst_time import as_aware_utc, coarse_utc_bounds, within_kst_day
 from app.store.models import (AnalysisRunRow, AnalysisVerdictRow, CollectionRunRow,
+                              InstrumentRow,
                               NotificationDeliveryRow, NotificationOutboxRow,
                               OperationalEventRow, SchedulerEventRow, ScoreRunRow,
                               TelegramStateRow, TradeOrderRow, TradePositionRow,
@@ -23,6 +28,9 @@ from app.store.telegram_common import (MAX_DELIVERY_PARTS,
                                        aware as _aware, canonical_json,
                                        delivery_body, exact_nonnegative_int,
                                        identifier, positive_int, safe_identifier)
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -42,12 +50,144 @@ class Delivery:
 
 
 @dataclass(frozen=True)
-class MaterializedDigest:
-    """One durable digest outbox materialization result."""
+class MaterializedNotification:
+    """One durable notification outbox materialization result."""
 
     outbox_id: int
     created: bool
     priority: NotificationPriority
+
+
+class AnalysisSummaryRunStore:
+    """성공한 분석 결과를 알림 허용목록 DTO로만 읽는 SQL read model."""
+
+    def __init__(self, engine: Engine, run_environment: str,
+                 now: Callable[[], datetime] | None = None) -> None:
+        self._sessions = sessionmaker(bind=engine, expire_on_commit=False)
+        self._run_environment = run_environment
+        self._now = now or (lambda: datetime.now(timezone.utc))
+
+    def pending_succeeded_today(
+            self, generated_run_ids: Collection[int], limit: int = 10,
+    ) -> tuple[MorningAnalysisSummary, ...]:
+        """당일 KST에 시작한 미생성 성공 분석을 id 오름차순으로 반환한다."""
+        limit = positive_int(limit, "limit")
+        generated = {
+            run_id for run_id in generated_run_ids
+            if type(run_id) is int and run_id > 0
+        }
+        now = as_aware_utc(self._now())
+        today = now.astimezone(KST).date()
+        lo, hi = coarse_utc_bounds(today)
+        with self._sessions() as session:
+            statement = select(AnalysisRunRow, ScoreRunRow.reference_date).join(
+                ScoreRunRow, AnalysisRunRow.score_run_id == ScoreRunRow.id,
+            ).where(
+                AnalysisRunRow.status == "succeeded",
+                AnalysisRunRow.finished_at.is_not(None),
+                AnalysisRunRow.started_at >= lo,
+                AnalysisRunRow.started_at <= hi,
+            )
+            if generated:
+                statement = statement.where(~AnalysisRunRow.id.in_(generated))
+            # coarse_utc_bounds는 ±1일의 SQL prefilter다. 여기서 LIMIT를 먼저
+            # 적용하면 전일/익일 후보가 당일 run을 밀어내므로, 정확 KST 판정 뒤
+            # 서비스 tick 상한을 적용한다.
+            runs = session.execute(statement.order_by(AnalysisRunRow.id)).all()
+            summaries = [
+                summary for run, reference_day in runs
+                if within_kst_day(run.started_at, today)
+                if (summary := self._summary_for_run(session, run, reference_day)) is not None
+            ]
+        return tuple(summaries[:limit])
+
+    def latest_analysis(self) -> MorningAnalysisSummary | None:
+        """가장 최근 성공 분석만 읽는다. 환경은 DB 필터가 아닌 설정 값이다."""
+        with self._sessions() as session:
+            row = session.execute(select(
+                AnalysisRunRow, ScoreRunRow.reference_date,
+            ).join(
+                ScoreRunRow, AnalysisRunRow.score_run_id == ScoreRunRow.id,
+            ).where(
+                AnalysisRunRow.status == "succeeded",
+                AnalysisRunRow.finished_at.is_not(None),
+            ).order_by(
+                AnalysisRunRow.finished_at.desc(), AnalysisRunRow.id.desc(),
+            ).limit(1)).first()
+            if row is None:
+                return None
+            run, reference_day = row
+            return self._summary_for_run(session, run, reference_day)
+
+    def _summary_for_run(self, session, run: AnalysisRunRow,
+                         reference_day: date) -> MorningAnalysisSummary | None:
+        rows = session.execute(select(
+            AnalysisVerdictRow, InstrumentRow.name,
+        ).outerjoin(
+            InstrumentRow, InstrumentRow.symbol == AnalysisVerdictRow.symbol,
+        ).where(
+            AnalysisVerdictRow.run_id == run.id,
+        ).order_by(AnalysisVerdictRow.symbol)).all()
+        if len(rows) > 20:
+            # 어느 20행을 남길지 정하면 DB 정렬 순서가 분석 판단을 바꾼다.
+            # 상한 위반 run의 verdict 전체를 격리해 후보를 만들어 내지 않는다.
+            try:
+                return self._make_summary(run, reference_day, (), len(rows))
+            except ValueError:
+                logger.warning("analysis summary read skipped corrupt run %d", run.id)
+                return None
+
+        corrupted_rows = 0
+        verdicts: list[AnalysisVerdictSummary] = []
+        for verdict, name in rows:
+            reasons, bad_reasons = _json_string_tuple(verdict.reasons)
+            risk_flags, bad_risk_flags = _json_string_tuple(verdict.risk_flags)
+            try:
+                verdicts.append(AnalysisVerdictSummary(
+                    symbol=verdict.symbol, name=name, verdict=verdict.verdict,
+                    confidence=verdict.confidence, reasons=reasons,
+                    risk_flags=risk_flags, picked=verdict.picked,
+                    pick_rank=verdict.pick_rank))
+            except ValueError:
+                corrupted_rows += 1
+                continue
+            corrupted_rows += int(bad_reasons or bad_risk_flags)
+
+        try:
+            return self._make_summary(run, reference_day, tuple(verdicts), corrupted_rows)
+        except ValueError:
+            # pick_rank의 gap/중복, pick 상한 초과는 어느 행 하나를 고쳐서
+            # 안전하게 해석할 수 없다. 최종 후보 전체를 보수적으로 격리한다.
+            non_picks = tuple(verdict for verdict in verdicts if not verdict.picked)
+            corrupted_rows += len(verdicts) - len(non_picks)
+            try:
+                return self._make_summary(run, reference_day, non_picks, corrupted_rows)
+            except ValueError:
+                logger.warning("analysis summary read skipped corrupt run %d", run.id)
+                return None
+
+    def _make_summary(self, run: AnalysisRunRow, reference_day: date,
+                      verdicts: tuple[AnalysisVerdictSummary, ...],
+                      corrupted_rows: int) -> MorningAnalysisSummary:
+        return MorningAnalysisSummary(
+            run_id=run.id, run_environment=self._run_environment,
+            regime=run.regime, market_summary=run.market_summary,
+            max_picks_advice=run.max_picks_advice,
+            score_reference_date=reference_day,
+            started_at=as_aware_utc(run.started_at),
+            finished_at=as_aware_utc(run.finished_at), verdicts=verdicts,
+            corrupted_rows=corrupted_rows)
+
+
+def _json_string_tuple(value: str | bytes) -> tuple[tuple[str, ...], bool]:
+    """DB JSON은 string array만 허용한다. 그 외는 안전한 빈 값으로 격리한다."""
+    try:
+        decoded = json.loads(value)
+    except (TypeError, UnicodeDecodeError, json.JSONDecodeError):
+        return (), True
+    if not isinstance(decoded, list) or not all(type(item) is str for item in decoded):
+        return (), True
+    return tuple(decoded), False
 
 
 class DigestRunStore:
@@ -350,6 +490,19 @@ class NotificationStore:
                 continue
         return tuple(sorted(days))
 
+    def generated_analysis_run_ids(self, run_environment: str) -> tuple[int, ...]:
+        """생성된 분석 outbox id는 delivery 상태와 무관하게 완료 이력이다."""
+        prefix = f"analysis-summary:{run_environment}:"
+        with self._sessions() as session:
+            keys = session.scalars(select(NotificationOutboxRow.idempotency_key).where(
+                NotificationOutboxRow.idempotency_key.like(f"{prefix}%"))).all()
+        run_ids: set[int] = set()
+        for key in keys:
+            suffix = key.removeprefix(prefix)
+            if suffix.isdecimal() and (run_id := int(suffix)) > 0:
+                run_ids.add(run_id)
+        return tuple(sorted(run_ids))
+
     def record_digest_skipped_stale(self, trading_day: date,
                                     run_environment: str, now: datetime) -> None:
         """7 거래일 window 밖 누락을 재생성하지 않고 audit으로 종결한다."""
@@ -361,7 +514,7 @@ class NotificationStore:
 
     def materialize_digest(self, idempotency_key: str, payload: Any,
                            bodies: Sequence[str] | str,
-                           *, occurred_at: datetime) -> MaterializedDigest:
+                           *, occurred_at: datetime) -> MaterializedNotification:
         """Digest payload와 고정 delivery body를 한 transaction에 생성한다."""
         identifier(idempotency_key, "idempotency_key", 128)
         if not idempotency_key.startswith("digest:"):
@@ -385,8 +538,38 @@ class NotificationStore:
                 purge_at=now + timedelta(hours=24)))
             if created:
                 self._add_delivery_rows(session, outbox_id, checked, now)
-            return MaterializedDigest(
+            return MaterializedNotification(
                 outbox_id, created, NotificationPriority.DIGEST)
+
+    def materialize_analysis_summary(
+            self, summary: MorningAnalysisSummary, bodies: Sequence[str], *,
+            occurred_at: datetime) -> MaterializedNotification:
+        """분석 허용목록 payload와 delivery parts를 하나의 transaction에 만든다."""
+        if isinstance(bodies, str) or not bodies:
+            raise ValueError("analysis summary requires at least one delivery body")
+        if len(bodies) > MAX_DELIVERY_PARTS:
+            raise ValueError("analysis summary delivery part count exceeds 64")
+        occurred = _aware(occurred_at)
+        now = _aware(self._now())
+        checked = self._checked_delivery_bodies(bodies, NotificationPriority.NORMAL)
+        payload = {
+            "version": 1,
+            "analysis_run_id": summary.run_id,
+            "run_environment": summary.run_environment,
+            "score_reference_date": summary.score_reference_date.isoformat(),
+        }
+        with self._sessions.begin() as session:
+            outbox_id, created = self._insert_outbox(session, dict(
+                idempotency_key=summary.idempotency_key, kind="analysis_summary",
+                priority=NotificationPriority.NORMAL, sensitive=True,
+                payload=canonical_json(payload), status="pending",
+                next_attempt_at=now, occurred_at=occurred, created_at=now,
+                sent_at=None, last_error_kind=None, retention_kind="digest",
+                purge_at=now + timedelta(hours=24)))
+            if created:
+                self._add_delivery_rows(session, outbox_id, checked, now)
+            return MaterializedNotification(
+                outbox_id, created, NotificationPriority.NORMAL)
 
     def materialize_missing_operational_deliveries(
             self, render: Callable[[str, dict[str, object]], tuple[str, ...]],
@@ -838,17 +1021,25 @@ class NotificationStore:
                 purged += 1
             return purged
 
-    def load_payload(self, outbox_id: int) -> Any | None:
+    def outbox_payload(self, outbox_id: int) -> Any | None:
         with self._sessions() as session:
             value = session.scalar(select(NotificationOutboxRow.payload).where(
                 NotificationOutboxRow.id == outbox_id))
             return json.loads(value) if value is not None else None
 
-    def load_delivery_bodies(self, outbox_id: int) -> list[str | None]:
+    def delivery_bodies(self, outbox_id: int) -> list[str | None]:
         with self._sessions() as session:
             return list(session.scalars(select(NotificationDeliveryRow.body).where(
                 NotificationDeliveryRow.outbox_id == outbox_id).order_by(
                     NotificationDeliveryRow.part_index)))
+
+    # 기존 Telegram 회귀 테스트와 호출부는 이름을 유지한다. 새 read-model
+    # 계약은 보다 명확한 outbox_payload/delivery_bodies를 사용한다.
+    def load_payload(self, outbox_id: int) -> Any | None:
+        return self.outbox_payload(outbox_id)
+
+    def load_delivery_bodies(self, outbox_id: int) -> list[str | None]:
+        return self.delivery_bodies(outbox_id)
 
     def purge_retention(self, before: datetime, limit: int = 1000) -> int:
         """Delete only terminal metadata; unknown/unresolved and audit evidence remain."""

@@ -10,7 +10,8 @@ from app.domain.errors import BrokerError
 from app.domain.notifications.models import NotificationPriority
 from app.store.models import (AnalysisRunRow, Base, CollectionRunRow, ScoreRunRow,
                               TradeRunRow)
-from app.store.notification_store import DigestRunStore, NotificationStore
+from app.store.notification_store import (DigestRunStore, MaterializedNotification,
+                                          NotificationStore)
 
 
 KST = __import__("zoneinfo").ZoneInfo("Asia/Seoul")
@@ -141,6 +142,7 @@ def test_digest_materialization은_env와날짜로_중복을막고_민감본문�
 
     assert first.created is True
     assert second.created is False
+    assert isinstance(first, MaterializedNotification)
     assert store.count_outbox() == 1
     assert first.priority == NotificationPriority.DIGEST
     assert store.load_payload(first.outbox_id) == {"total_eval": 1_200_000}
