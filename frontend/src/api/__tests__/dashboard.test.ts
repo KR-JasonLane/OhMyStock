@@ -8,6 +8,7 @@ import {
 } from '../dashboard'
 
 const overviewFixture: DashboardOverview = {
+  environment: 'mock',
   period: { start: '2026-07-20', end: '2026-07-25', timezone: 'Asia/Seoul' },
   summary: {
     realized_pnl: 10_000,
@@ -79,6 +80,14 @@ describe('parseDashboardOverview', () => {
     expect(() => parseDashboardOverview(missingFreshness)).toThrow(DashboardRequestError)
     expect(() => parseDashboardOverview(missingFreshness)).toThrow('dashboard_invalid_response')
   })
+
+  it.each(['paper', 'production', '', null])(
+    '알 수 없는 실행환경 %s는 fail-closed로 거부한다',
+    (environment) => {
+      expect(() => parseDashboardOverview({ ...overviewFixture, environment }))
+        .toThrow('dashboard_invalid_response')
+    }
+  )
 
   it.each([Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY])(
     '유한하지 않은 숫자 %s를 거부한다',

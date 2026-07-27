@@ -1,0 +1,51 @@
+:root {
+  color-scheme: light;
+  --oms-bg: #f4f6f8;
+  --oms-surface: #ffffff;
+  --oms-surface-subtle: #f8f9fb;
+  --oms-surface-strong: #111827;
+  --oms-text: #18212f;
+  --oms-text-strong: #0c1320;
+  --oms-text-muted: #697386;
+  --oms-border: #dfe3e8;
+  --oms-border-strong: #c9d0d9;
+  --oms-accent: #315b9a;
+  --oms-accent-soft: #e9eff8;
+  --oms-positive: #137a5a;
+  --oms-positive-soft: #e5f4ee;
+  --oms-negative: #b33a46;
+  --oms-negative-soft: #faeaec;
+  --oms-warning: #8a5a13;
+  --oms-warning-soft: #fff4dc;
+  --oms-focus: #3469b8;
+  --oms-shadow-subtle: 0 1px 2px rgb(15 23 42 / 5%);
+  --oms-radius-sm: 8px;
+  --oms-radius-md: 12px;
+  --oms-radius-lg: 16px;
+  --oms-content: 1360px;
+  --oms-font-sans: Inter, Pretendard, "Noto Sans KR", "Apple SD Gothic Neo", system-ui, sans-serif;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --oms-bg: #0d1117;
+  --oms-surface: #141a22;
+  --oms-surface-subtle: #10161e;
+  --oms-surface-strong: #f3f6fa;
+  --oms-text: #dfe5ed;
+  --oms-text-strong: #f4f7fb;
+  --oms-text-muted: #97a3b2;
+  --oms-border: #2a3340;
+  --oms-border-strong: #3a4655;
+  --oms-accent: #8aafe2;
+  --oms-accent-soft: #1c2b40;
+  --oms-positive: #5bc39c;
+  --oms-positive-soft: #16372d;
+  --oms-negative: #ef8d96;
+  --oms-negative-soft: #3b2025;
+  --oms-warning: #e9b75f;
+  --oms-warning-soft: #3a2c16;
+  --oms-focus: #8eb9ef;
+  --oms-shadow-subtle: 0 1px 2px rgb(0 0 0 / 20%);
+}
+

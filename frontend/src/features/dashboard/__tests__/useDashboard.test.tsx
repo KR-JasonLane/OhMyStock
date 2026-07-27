@@ -6,6 +6,7 @@ import type { DashboardOverview } from '../../../api/dashboard'
 import { useDashboard } from '../useDashboard'
 
 const fixture: DashboardOverview = {
+  environment: 'mock',
   period: { start: '2026-07-20', end: '2026-07-25', timezone: 'Asia/Seoul' },
   summary: {
     realized_pnl: 10_000,

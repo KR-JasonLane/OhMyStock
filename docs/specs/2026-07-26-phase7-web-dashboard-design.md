@@ -110,6 +110,7 @@ GET /dashboard/overview?from=YYYY-MM-DD&to=YYYY-MM-DD&timezone=Asia/Seoul
 
 ### 5.2 응답 영역
 
+- 현재 실행 환경 transport metadata(`mock`, `real`, `replay`)
 - 조회 기간과 KST 기준시각
 - 데이터 최신 기준시각과 시세 경과시간
 - 확정 손익, 평가손익, 총손익
@@ -151,7 +152,7 @@ GET /dashboard/overview?from=YYYY-MM-DD&to=YYYY-MM-DD&timezone=Asia/Seoul
 
 1. **상단 바**
    - OhMyStock
-   - 모의투자 환경 표시
+   - API가 반환한 현재 실행 환경 표시(모의투자·실거래·리플레이)
    - 시스템 상태
    - 테마 전환
    - 새로고침

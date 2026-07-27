@@ -96,6 +96,7 @@ class DashboardWarningsResponse(_ResponseModel):
 
 
 class DashboardOverviewResponse(_ResponseModel):
+    environment: Literal["mock", "real", "replay"]
     period: DashboardPeriodResponse
     summary: DashboardSummaryResponse
     equity_curve: tuple[EquityPointResponse, ...]
@@ -139,11 +140,21 @@ def dashboard_overview(
     """현재 실행 환경의 관리 포지션 SQL 읽기 모델만 반환한다."""
     period = _period_or_422(from_date, to_date, timezone)
     try:
+        run_environment = request.app.state.settings.run_environment
         overview = request.app.state.dashboard_store.overview(
-            period, request.app.state.settings.run_environment, datetime.now(KST))
+            period, run_environment, datetime.now(KST))
         bounded_overview = replace(
             overview, recent_trades=overview.recent_trades[:_RECENT_TRADES_LIMIT])
-        return DashboardOverviewResponse.model_validate(bounded_overview)
+        return DashboardOverviewResponse(
+            environment=run_environment,
+            period=bounded_overview.period,
+            summary=bounded_overview.summary,
+            equity_curve=bounded_overview.equity_curve,
+            positions=bounded_overview.positions,
+            recent_trades=bounded_overview.recent_trades,
+            freshness=bounded_overview.freshness,
+            warnings=bounded_overview.warnings,
+        )
     except Exception as exc:  # noqa: BLE001 - 외부 계약은 안정된 코드만 노출한다.
         logger.warning("dashboard overview unavailable: %s", type(exc).__name__)
         return JSONResponse(

@@ -3,6 +3,7 @@
 from dataclasses import replace
 from datetime import date, datetime, timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -154,9 +155,10 @@ def test_명시한_기간의_양끝을_store에_전달하고_영역별_JSON_계�
     assert run_environment == "mock"
     body = response.json()
     assert set(body) == {
-        "period", "summary", "equity_curve", "positions", "recent_trades",
+        "environment", "period", "summary", "equity_curve", "positions", "recent_trades",
         "freshness", "warnings",
     }
+    assert body["environment"] == "mock"
     assert body["period"] == {
         "start": "2026-07-20", "end": "2026-07-25", "timezone": "Asia/Seoul",
     }
@@ -174,6 +176,18 @@ def test_명시한_기간의_양끝을_store에_전달하고_영역별_JSON_계�
     ]
     assert all(datetime.fromisoformat(value).utcoffset() is not None
                for value in timestamps)
+
+
+@pytest.mark.parametrize("expected", ["mock", "real", "replay"])
+def test_응답은_현재_실행환경을_정확한_transport_metadata로_반환한다(
+        client_and_store, expected):
+    client, app, _ = client_and_store
+    app.state.settings = SimpleNamespace(run_environment=expected)
+
+    response = client.get("/dashboard/overview")
+
+    assert response.status_code == 200
+    assert response.json()["environment"] == expected
 
 
 @pytest.mark.parametrize("params", [

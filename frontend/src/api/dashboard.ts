@@ -11,8 +11,10 @@ export interface DateRange {
 
 export type Completeness = 'complete' | 'partial' | 'unavailable'
 export type CostBasis = 'recorded' | 'estimated' | 'unavailable'
+export type RunEnvironment = 'mock' | 'real' | 'replay'
 
 export interface DashboardOverview {
+  environment: RunEnvironment
   period: DateRange
   summary: {
     realized_pnl: number | null
@@ -79,6 +81,7 @@ export class DashboardRequestError extends Error {
 
 const completenessValues = ['complete', 'partial', 'unavailable'] as const
 const costBasisValues = ['recorded', 'estimated', 'unavailable'] as const
+const runEnvironmentValues = ['mock', 'real', 'replay'] as const
 const isoDatePattern = /^\d{4}-\d{2}-\d{2}$/
 const awareDateTimePattern = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/
 
@@ -193,6 +196,7 @@ export function parseDashboardOverview(value: unknown): DashboardOverview {
   if (recentTrades.length > 100) invalidResponse()
 
   const overview: DashboardOverview = {
+    environment: enumValue(parsed.environment, runEnvironmentValues),
     period: parsePeriod(parsed.period),
     summary: parseSummary(parsed.summary),
     equity_curve: array(parsed.equity_curve).map((point) => {
