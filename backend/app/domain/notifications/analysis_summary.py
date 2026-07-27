@@ -6,8 +6,10 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import date, datetime
+from ipaddress import AddressValueError, IPv6Address
 from math import isfinite
 from unicodedata import category
 from zoneinfo import ZoneInfo
@@ -30,6 +32,18 @@ _MAX_PICKS = 5
 _MAX_REASONS = 3
 _MAX_RISK_FLAGS = 5
 _KST = ZoneInfo("Asia/Seoul")
+_URI_SCHEME = re.compile(
+    r"(?i)(?<![a-z0-9+._:-])([a-z][a-z0-9+.-]{0,31}):(?=\S)")
+_IDNA_DOT_TRANSLATION = str.maketrans({"\u3002": ".", "\uff0e": ".", "\uff61": "."})
+_HOST_WITH_DOT = re.compile(
+    r"(?<![\w＠])(?P<host>(?:[^\s/\\:@\[\]{}()\"'<>.,;!?]+\.)+"
+    r"[^\s/\\:@\[\]{}()\"'<>.,;!?]+)")
+_KOREAN_DECIMAL_UNIT = re.compile(r"\d+\.\d+(?:만원|억원|조원|배|원)")
+_IPV4 = re.compile(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?![\w.])")
+_IPV6_TOKEN = re.compile(
+    r"(?i)(?<![0-9a-f:])(?:::[0-9a-f]{0,4}|"
+    r"(?:[0-9a-f]{0,4}:){1,7}[0-9a-f]{0,4})(?![0-9a-f:])")
+_COMMAND_PREFIX = re.compile(r"(?<![\w/<>])/(?=[A-Za-z0-9_])")
 
 
 @dataclass(frozen=True)
@@ -151,7 +165,8 @@ def render_analysis_summary(summary: MorningAnalysisSummary) -> str:
     rejected = sum(verdict.verdict == "reject" for verdict in summary.verdicts)
 
     lines = [
-        f"🧠 아침 AI 분석 완료 · {_ENVIRONMENT_LABEL[summary.run_environment]}",
+        ("🧠 아침 AI 분석 완료 · 알림 환경 "
+         f"{_ENVIRONMENT_LABEL[summary.run_environment]}"),
         "",
         f"시장 국면  {_REGIME_LABEL[summary.regime]}",
         f"점수 기준일  {summary.score_reference_date.isoformat()}",
@@ -219,7 +234,35 @@ def _normalize_plain_text(value: str) -> str:
     normalized = "".join(
         " " if char in "\r\n\u2028\u2029" or category(char) in {"Cc", "Cf", "Cs"} else char
         for char in value)
-    return " ".join(normalized.split())
+    normalized = " ".join(normalized.split())
+    normalized = normalized.translate(_IDNA_DOT_TRANSLATION)
+    # Telegram can create clickable URL/mention entities even without an
+    # explicit parse mode. Model-derived prose must therefore not resemble a
+    # link or a bot command when it reaches the operator.
+    normalized = _URI_SCHEME.sub(r"\1：", normalized)
+    normalized = _HOST_WITH_DOT.sub(_neutralize_host, normalized)
+    normalized = _IPV4.sub(lambda match: match.group(0).replace(".", "[.]"), normalized)
+    normalized = _IPV6_TOKEN.sub(_neutralize_ipv6, normalized)
+    normalized = normalized.replace("@", "＠")
+    return _COMMAND_PREFIX.sub("／", normalized)
+
+
+def _neutralize_host(match: re.Match[str]) -> str:
+    """문자 TLD가 있는 bounded host token만 중화해 숫자 소수점을 보존한다."""
+    host = match.group("host")
+    if _KOREAN_DECIMAL_UNIT.fullmatch(host):
+        return host
+    return host.replace(".", "[.]") if any(char.isalpha() for char in host) else host
+
+
+def _neutralize_ipv6(match: re.Match[str]) -> str:
+    """유효 IPv6만 중화해 시각·비율처럼 보이는 일반 문장을 보존한다."""
+    token = match.group(0)
+    try:
+        IPv6Address(token)
+    except AddressValueError:
+        return token
+    return token.replace(":", "：")
 
 
 def _limited_items(value: tuple[str, ...], name: str, max_items: int) -> tuple[str, ...]:

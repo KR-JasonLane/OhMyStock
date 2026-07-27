@@ -68,7 +68,7 @@ class EmptyAnalysisReports:
 
 
 class EmptyDigestReports:
-    def latest_digest_payload(self):
+    def latest_digest(self):
         return None
 
 
@@ -732,6 +732,148 @@ async def test_분석요약실패는_composite_maintenance와_다른_telegram_lo
     assert sender.calls > 0
     await service.begin_shutdown()
     await service.finish_shutdown(deadline_s=0.1)
+
+
+@pytest.mark.anyio
+async def test_digest실패도_pending분석요약과_다른loop를막지않고_다음tick에복구한다():
+    second_digest_entered = asyncio.Event()
+    release_second_digest = asyncio.Event()
+    second_summary_finished = asyncio.Event()
+    scheduler_snapshots = []
+
+    class Digest:
+        calls = 0
+
+        async def run_once(self):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("digest store unavailable")
+            second_digest_entered.set()
+            await release_second_digest.wait()
+            return 1
+
+    class AnalysisSummary:
+        def __init__(self):
+            self.calls = 0
+            self.materialized = 0
+
+        async def run_once(self):
+            self.calls += 1
+            if self.materialized == 0:
+                self.materialized = 1
+                return 1
+            second_summary_finished.set()
+            return 0
+
+        def snapshot(self):
+            return {
+                "state": "running", "last_created": self.materialized,
+                "backoff_reason": None,
+            }
+
+    digest = Digest()
+    analysis_summary = AnalysisSummary()
+    cleanup = LoopStep()
+    maintenance = TelegramMaintenance(
+        digest, cleanup, analysis_summary=analysis_summary, now=lambda: NOW,
+        scheduler_snapshot=lambda: scheduler_snapshots.append("called") or {})
+    sender = LoopStep()
+    service = TelegramService(
+        poller=LoopStep(), dispatcher=LoopStep(), projector=LoopStep(),
+        sender=sender, maintenance=maintenance, idle_s=0.001)
+    service._loop_idle_s["maintenance"] = 0.001
+
+    service.start()
+    await asyncio.wait_for(second_digest_entered.wait(), timeout=0.1)
+    first_failure = service.snapshot()
+
+    assert digest.calls == 2
+    assert analysis_summary.calls == 1
+    assert analysis_summary.materialized == 1
+    assert cleanup.calls == 1
+    assert scheduler_snapshots == ["called"]
+    assert first_failure["maintenance"]["failures"] == 1
+    assert first_failure["maintenance"]["last_error_kind"] == "internal_error"
+    assert first_failure["maintenance"]["dead"] is False
+    assert sender.calls > 0
+
+    release_second_digest.set()
+    await asyncio.wait_for(second_summary_finished.wait(), timeout=0.1)
+    for _ in range(20):
+        recovered = service.snapshot()
+        if recovered["maintenance"]["failures"] == 0:
+            break
+        await asyncio.sleep(0.001)
+
+    assert analysis_summary.calls == 2
+    assert analysis_summary.materialized == 1
+    assert scheduler_snapshots == ["called", "called"]
+    assert recovered["maintenance"]["failures"] == 0
+    assert recovered["maintenance"]["last_error_kind"] is None
+    assert recovered["maintenance"]["dead"] is False
+    assert sender.calls > 0
+
+    await service.begin_shutdown()
+    await service.finish_shutdown(deadline_s=0.1)
+
+
+@pytest.mark.anyio
+async def test_digest정상일때_cleanup실패는_기존maintenance오류로전파한다():
+    digest = LoopStep()
+    analysis_summary = LoopStep()
+    cleanup = LoopStep(failures=1)
+    scheduler_snapshots = []
+    maintenance = TelegramMaintenance(
+        digest, cleanup, analysis_summary=analysis_summary, now=lambda: NOW,
+        scheduler_snapshot=lambda: scheduler_snapshots.append("called") or {})
+
+    with pytest.raises(RuntimeError, match="sensitive-value-must-not-be-used"):
+        await maintenance.run_once()
+
+    assert digest.calls == 1
+    assert analysis_summary.calls == 1
+    assert cleanup.calls == 1
+    assert scheduler_snapshots == ["called"]
+
+
+@pytest.mark.anyio
+async def test_digest와_cleanup동시실패도_scheduler를갱신하고_첫digest오류를전파한다(
+    caplog, monkeypatch,
+):
+    class FailingDigest:
+        calls = 0
+
+        async def run_once(self):
+            self.calls += 1
+            raise RuntimeError("digest-primary-secret")
+
+    digest = FailingDigest()
+    analysis_summary = LoopStep()
+    cleanup = LoopStep(failures=1)
+    scheduler_snapshots = []
+    maintenance = TelegramMaintenance(
+        digest, cleanup, analysis_summary=analysis_summary, now=lambda: NOW,
+        scheduler_snapshot=lambda: scheduler_snapshots.append("called") or {})
+
+    service_logger = logging.getLogger("app.core.telegram_service")
+    monkeypatch.setattr(service_logger, "disabled", False)
+    with caplog.at_level(logging.ERROR, logger="app.core.telegram_service"):
+        with pytest.raises(RuntimeError, match="digest-primary-secret"):
+            await maintenance.run_once()
+
+    assert digest.calls == 1
+    assert analysis_summary.calls == 1
+    assert cleanup.calls == 1
+    assert scheduler_snapshots == ["called"]
+    secondary_logs = [
+        record.getMessage()
+        for record in caplog.records
+        if "telegram maintenance secondary failure" in record.getMessage()
+    ]
+    assert secondary_logs == [
+        "telegram maintenance secondary failure component=cleanup kind=internal_error"
+    ]
+    assert "sensitive-value-must-not-be-used" not in secondary_logs[0]
 
 
 @pytest.mark.anyio

@@ -173,6 +173,84 @@ def test_analysis_summary는_동적문자열의_구조제어문자를_공백으�
     assert "\u2028" not in text and "\u2029" not in text and "\u202e" not in text
 
 
+def test_analysis_summary는_모델문자열의_Telegram_자동링크와명령형식을_무력화한다():
+    text = render_analysis_summary(_summary(
+        market_summary=("https://evil.example/@operator, evil.example, t.me/operator, "
+                        "tg://resolve, https://127.0.0.1/a, 127.0.0.1, "
+                        "https://[2001:db8::1]/, 2001:db8::1, [::1], ::1, "
+                        "2001:0:0:0:0:0:0:1, evil.xn--p1ai 에서 "
+                        "/pause, /123, /_hidden 하세요. (/pause) \"/stop\" · /status, "
+                        "/cmd@operator_bot. (evil.example), \"evil.example\", "
+                        "🔗evil.example🔗, 예시.한국, bücher.example, tel:+82101234, "
+                        "data:text/plain,ok. 삼성전자 12.34% 전망, 장 시작 08:20, 비율 1:2"),
+        verdicts=(_verdict(
+            reasons=("www.evil.example",), risk_flags=("@operator",),
+        ),),
+    ))
+
+    assert "https://" not in text and "tg://" not in text
+    assert "https：//evil[.]example/＠operator" in text
+    assert "evil.example" not in text and "t.me" not in text
+    assert "evil[.]example" in text and "t[.]me/operator" in text
+    assert "tg：//resolve" in text
+    assert "www[.]evil[.]example" in text
+    assert "127.0.0.1" not in text and "127[.]0[.]0[.]1" in text
+    assert "2001:db8::1" not in text
+    assert "2001：db8：：1" in text
+    assert "::1" not in text and "：：1" in text
+    assert "2001:0:0:0:0:0:0:1" not in text
+    assert "2001：0：0：0：0：0：0：1" in text
+    assert "evil.xn--p1ai" not in text and "evil[.]xn--p1ai" in text
+    assert "／pause" in text and "／123" in text and "／_hidden" in text
+    assert "(／pause)" in text and '"／stop"' in text and "· ／status" in text
+    assert "／cmd＠operator_bot" in text
+    assert "@operator" not in text
+    assert "(evil[.]example)" in text and '"evil[.]example"' in text
+    assert "🔗evil[.]example🔗" in text
+    assert "예시[.]한국" in text and "bücher[.]example" in text
+    assert "tel：+82101234" in text and "data：text/plain,ok" in text
+    assert "삼성전자 12.34% 전망" in text
+    assert "장 시작 08:20, 비율 1:2" in text
+
+
+def test_analysis_summary는_문맥과무관한_ASCII_슬래시_명령후보를_중화한다():
+    text = render_analysis_summary(_summary(
+        market_summary=("(/pause) \"/stop\" - /123, /_hidden, /cmd@operator_bot. "
+                        "삼성전자 P/E 1/2 input/output 매수/매도와 수익/손실, "
+                        "https://evil.example/report."),
+    ))
+
+    assert "(／pause)" in text and '"／stop"' in text and "- ／123" in text
+    assert "／_hidden" in text and "／cmd＠operator_bot" in text
+    assert "P/E 1/2 input/output" in text
+    assert "매수/매도와 수익/손실" in text
+    assert "https：//evil[.]example/report" in text
+
+
+def test_analysis_summary는_IDNA_대체점을_canonical_dot으로_중화한다():
+    text = render_analysis_summary(_summary(
+        market_summary="예시。한국, evil．example, evil｡example",
+    ))
+
+    assert "예시[.]한국" in text
+    assert text.count("evil[.]example") == 2
+    assert "。" not in text and "．" not in text and "｡" not in text
+
+
+def test_analysis_summary는_숫자소수와_한국어단위를_host로_오인하지않는다():
+    text = render_analysis_summary(_summary(
+        market_summary=("PER 12.34배, 목표가 7.5만원, 매출 1.2조원, "
+                        "127.0.0.1, 127.0.0.1원, 127.0.0.1만원, 1.2.3원, "
+                        "123.한국, evil.example"),
+    ))
+
+    assert "12.34배" in text and "7.5만원" in text and "1.2조원" in text
+    assert "127[.]0[.]0[.]1" in text
+    assert "127[.]0[.]0[.]1원" in text and "127[.]0[.]0[.]1만원" in text
+    assert "1[.]2[.]3원" in text
+    assert "123[.]한국" in text and "evil[.]example" in text
+
+
 @pytest.mark.parametrize(
     "summary, forged_section",
     [
@@ -253,7 +331,7 @@ def test_analysis_summary는_안전하지않은_입력을_생성시점에_거부
 def test_analysis_summary의_환경라벨과_idempotency_key는_고정된다():
     real = _summary(run_environment="real")
 
-    assert "🧠 아침 AI 분석 완료 · 🚨 실전" in render_analysis_summary(real)
+    assert "🧠 아침 AI 분석 완료 · 알림 환경 🚨 실전" in render_analysis_summary(real)
     assert real.idempotency_key == "analysis-summary:real:42"
 
 

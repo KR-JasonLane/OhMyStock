@@ -446,11 +446,13 @@ class CommandResponsePublisher:
             await self._ephemeral_sender.enqueue(
                 text, expires_at=result.confirmation_expires_at)
             return
-        parts = render_parts(text, claimed.correlation_id)
+        body_parts = result.response_parts
+        parts = (tuple(body_parts) if body_parts is not None
+                 else tuple(part.text for part in render_parts(text, claimed.correlation_id)))
         await asyncio.to_thread(
             self._store.enqueue_parts,
             f"command-response-{claimed.update_id}",
-            tuple(part.text for part in parts),
+            parts,
             sensitive=result.outbox_sensitive,
             payload={
                 "version": 1,
@@ -525,7 +527,7 @@ class AsyncProjector:
 
 
 class TelegramMaintenance:
-    """Frequent idempotent digest check and bounded once-per-day cleanup."""
+    """Run digest, analysis-summary, cleanup, and scheduler-health maintenance."""
 
     def __init__(
         self, digest: "DigestService", maintenance: "Maintenance", *,
@@ -555,7 +557,12 @@ class TelegramMaintenance:
                 self._run_task = None
 
     async def _run_once(self) -> int:
-        created = await self._digest.run_once()
+        failures: list[tuple[str, Exception]] = []
+        try:
+            created = await self._digest.run_once()
+        except Exception as exc:
+            created = 0
+            failures.append(("digest", exc))
         if self._analysis_summary is not None:
             try:
                 created += await self._analysis_summary.run_once()
@@ -563,17 +570,29 @@ class TelegramMaintenance:
                 logger.error(
                     "telegram analysis summary materialize failed kind=%s",
                     _error_kind(exc))
-        now = self._now()
-        kst = now.astimezone(__import__("zoneinfo").ZoneInfo("Asia/Seoul"))
-        if ((kst.hour, kst.minute) >= (3, 30)
-                and self._last_cleanup_day != kst.date()):
-            await self._maintenance.run_once()
-            self._last_cleanup_day = kst.date()
-        snapshot = self._scheduler_snapshot()
-        dead = bool(snapshot and snapshot.get("dead") is True)
-        if dead and not self._scheduler_dead:
-            self._scheduler_dead_transitions += 1
-        self._scheduler_dead = dead
+        try:
+            now = self._now()
+            kst = now.astimezone(__import__("zoneinfo").ZoneInfo("Asia/Seoul"))
+            if ((kst.hour, kst.minute) >= (3, 30)
+                    and self._last_cleanup_day != kst.date()):
+                await self._maintenance.run_once()
+                self._last_cleanup_day = kst.date()
+        except Exception as exc:
+            failures.append(("cleanup", exc))
+        try:
+            snapshot = self._scheduler_snapshot()
+            dead = bool(snapshot and snapshot.get("dead") is True)
+            if dead and not self._scheduler_dead:
+                self._scheduler_dead_transitions += 1
+            self._scheduler_dead = dead
+        except Exception as exc:
+            failures.append(("scheduler_health", exc))
+        for component, exc in failures[1:]:
+            logger.error(
+                "telegram maintenance secondary failure component=%s kind=%s",
+                component, _error_kind(exc))
+        if failures:
+            raise failures[0][1]
         return created
 
     async def finish(self) -> None:

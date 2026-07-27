@@ -11,7 +11,7 @@ from sqlalchemy import Engine, and_, case, func, or_, select, update
 from sqlalchemy.orm import aliased
 from sqlalchemy.orm import sessionmaker
 
-from app.core.market_calendar import KST
+from app.core.market_calendar import KST, is_trading_day
 from app.domain.notifications.analysis_summary import (AnalysisVerdictSummary,
                                                         MorningAnalysisSummary)
 from app.domain.notifications.models import NotificationPriority, OperationalEvent
@@ -58,9 +58,10 @@ class MaterializedNotification:
     priority: NotificationPriority
 
 
-def _is_retained_digest(outbox: NotificationOutboxRow) -> bool:
-    """`/digest` 전용 24시간 보존본만 성공 전송 뒤에도 남긴다."""
-    return outbox.kind == "digest" and outbox.retention_kind == "digest"
+def _retains_sensitive_payload(outbox: NotificationOutboxRow) -> bool:
+    """승인된 24시간 복기 대상만 성공 전송 뒤에도 본문을 남긴다."""
+    return (outbox.kind in {"digest", "analysis_summary"}
+            and outbox.retention_kind == "digest")
 
 
 class AnalysisSummaryRunStore:
@@ -83,6 +84,8 @@ class AnalysisSummaryRunStore:
         }
         now = as_aware_utc(self._now())
         today = now.astimezone(KST).date()
+        if not is_trading_day(today):
+            return ()
         lo, hi = coarse_utc_bounds(today)
         with self._sessions() as session:
             statement = select(AnalysisRunRow, ScoreRunRow.reference_date).join(
@@ -193,9 +196,14 @@ class DigestReportStore:
         self._run_environment = run_environment
         self._now = now or (lambda: datetime.now(timezone.utc))
 
-    def latest_digest_payload(self) -> dict[str, object] | None:
-        return self._notifications.latest_retained_digest_payload(
+    def latest_digest(self) -> tuple[dict[str, object], tuple[str, ...]] | None:
+        return self._notifications.latest_retained_digest(
             self._run_environment, now=self._now())
+
+    def latest_digest_payload(self) -> dict[str, object] | None:
+        """기존 read-only caller 호환용 payload view."""
+        retained = self.latest_digest()
+        return retained[0] if retained is not None else None
 
 
 def _json_string_tuple(value: str | bytes) -> tuple[tuple[str, ...], bool]:
@@ -509,17 +517,19 @@ class NotificationStore:
                 continue
         return tuple(sorted(days))
 
-    def latest_retained_digest_payload(
+    def latest_retained_digest(
             self, run_environment: str, *, now: datetime,
-    ) -> dict[str, object] | None:
-        """scrub 전의 환경별 digest payload를 최대 100개까지 역순으로 읽는다."""
+    ) -> tuple[dict[str, object], tuple[str, ...]] | None:
+        """scrub 전 digest의 검증용 payload와 원래 delivery part를 함께 읽는다."""
         now = _aware(now)
         if run_environment not in {"mock", "real"}:
             raise ValueError("run_environment must be mock or real")
         prefix = f"digest:{run_environment}:"
         delivery = aliased(NotificationDeliveryRow)
         with self._sessions() as session:
-            rows = session.scalars(select(NotificationOutboxRow.payload).where(
+            rows = session.execute(select(
+                NotificationOutboxRow.id, NotificationOutboxRow.payload,
+            ).where(
                 NotificationOutboxRow.kind == "digest",
                 NotificationOutboxRow.status == "sent",
                 NotificationOutboxRow.idempotency_key.like(f"{prefix}%"),
@@ -534,15 +544,28 @@ class NotificationStore:
                 NotificationOutboxRow.occurred_at.desc(),
                 NotificationOutboxRow.id.desc(),
             ).limit(100)).all()
-        for raw_payload in rows:
-            try:
-                payload = json.loads(raw_payload)
-            except (TypeError, UnicodeDecodeError, json.JSONDecodeError):
-                continue
-            if (isinstance(payload, dict)
-                    and payload.get("run_environment") == run_environment):
-                return payload
+            for outbox_id, raw_payload in rows:
+                bodies = tuple(session.scalars(select(delivery.body).where(
+                    delivery.outbox_id == outbox_id,
+                    delivery.status == "sent",
+                ).order_by(delivery.part_index)).all())
+                if not bodies or any(body is None for body in bodies):
+                    continue
+                try:
+                    payload = json.loads(raw_payload)
+                except (TypeError, UnicodeDecodeError, json.JSONDecodeError):
+                    continue
+                if (isinstance(payload, dict)
+                        and payload.get("run_environment") == run_environment):
+                    return payload, bodies  # type: ignore[return-value]
         return None
+
+    def latest_retained_digest_payload(
+            self, run_environment: str, *, now: datetime,
+    ) -> dict[str, object] | None:
+        """기존 read-only caller 호환용 payload view."""
+        retained = self.latest_retained_digest(run_environment, now=now)
+        return retained[0] if retained is not None else None
 
     def generated_analysis_run_ids(self, run_environment: str) -> tuple[int, ...]:
         """생성된 분석 outbox id는 delivery 상태와 무관하게 완료 이력이다."""
@@ -935,7 +958,7 @@ class NotificationStore:
             if result.rowcount != 1:
                 return False
             if (outbox.sensitive
-                    and not _is_retained_digest(outbox)):
+                    and not _retains_sensitive_payload(outbox)):
                 session.execute(update(NotificationDeliveryRow).where(
                     NotificationDeliveryRow.id == delivery_id).values(body=None))
                 outbox.payload = None
@@ -949,7 +972,7 @@ class NotificationStore:
                 NotificationDeliveryRow.status != "sent")) or 0
         if remaining == 0:
             outbox = session.get(NotificationOutboxRow, outbox_id)
-            if outbox is not None and _is_retained_digest(outbox):
+            if outbox is not None and _retains_sensitive_payload(outbox):
                 session.execute(update(NotificationOutboxRow).where(
                     NotificationOutboxRow.id == outbox_id).values(
                     status="sent", sent_at=now))

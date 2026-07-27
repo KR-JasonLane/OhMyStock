@@ -78,3 +78,11 @@
   같은 DB에서 갈라지기 전에 migration·분석 write path·read filter·기존 행
   fail-closed를 하나의 실전 전 안전 작업으로 수행해야 한다. 이번 Task 4의
   지정 read-only 포트와 스키마 범위에는 포함하지 않았다.
+
+> **2026-07-27 Task 6 후속 결정:** 위 환경 provenance 장기 과제는 현재
+> collection·score·analysis가 코드와 스키마상 환경 독립 **공유 시장분석**이라는
+> 확인으로 폐기·대체됐다. `run_environment`은 Telegram/broker 운영 런타임 label과
+> outbox namespace이며, mock↔real 전환에는 같은 analysis run도 환경별 outbox가
+> 한 번씩 생길 수 있다. 본문은 이를 `알림 환경`으로 명시한다. 장래 분석 입력을
+> 환경별로 분리하기로 제품 설계가 바뀌면 그때 migration·write/read filter를 별도
+> 설계 태스크로 다시 검토한다.

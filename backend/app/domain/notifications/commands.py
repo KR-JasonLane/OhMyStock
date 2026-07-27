@@ -43,6 +43,7 @@ class CommandResult:
     outbox_sensitive: bool = False
     confirmation_token: str | None = None
     response_text: str | None = None
+    response_parts: tuple[str, ...] | None = None
     ephemeral: bool = False
     confirmation_expires_at: datetime | None = None
     terminal_reason: LiquidationReason | None = None
@@ -443,16 +444,21 @@ class CommandProcessor:
             return CommandResult(
                 "analysis", outbox_sensitive=True,
                 response_text=(
-                    render_analysis_summary(summary)
+                    self._present(
+                        render_analysis_summary,
+                        summary,
+                        fallback=("🧠 최근 AI 분석\n\n"
+                                  "조회 가능한 AI 분석이 없습니다."),
+                    )
                     if summary is not None
                     else "🧠 최근 AI 분석\n\n조회 가능한 AI 분석이 없습니다."
                 ),
             ), "succeeded"
         if kind is CommandKind.DIGEST:
-            payload = await asyncio.to_thread(self._digest_reports.latest_digest_payload)
+            retained = await asyncio.to_thread(self._digest_reports.latest_digest)
             try:
                 response_text = (
-                    render_retained_digest(payload) if payload is not None else None
+                    render_retained_digest(retained[0]) if retained is not None else None
                 )
             except ValueError:
                 response_text = None
@@ -460,6 +466,9 @@ class CommandProcessor:
                 "digest", outbox_sensitive=True,
                 response_text=(response_text or "📋 최근 거래 다이제스트\n\n"
                                "조회 가능한 최근 거래 다이제스트가 없습니다."),
+                response_parts=(retained[1]
+                                if response_text is not None and retained is not None
+                                else None),
             ), "succeeded"
         if kind is CommandKind.HELP:
             return CommandResult(

@@ -4,12 +4,33 @@
 > 새 세션에서 재개할 때 이 문서를 가장 먼저 읽으세요. 매 작업 세션이 끝날 때마다
 > 이 문서를 갱신합니다(핸드오프 문서).
 
-- **최종 수정:** 2026-07-26
+- **최종 수정:** 2026-07-27
 - **프로젝트:** OhMyStock — 한국 주식 자동매매 시스템
 
 ---
 
 ## ▶ 여기서 재개 (다음 액션)
+
+**아침 AI 분석 Telegram 요약 Task 6 완료:** Task 1~5 구현 커밋은 `c3c4c00`,
+`13e007b`, `9c7f66b`, `565025c`, `af52937`이다. 실제 SQLite·store·summary
+service·inbox/dispatcher·durable sender와 fake Telegram sender를 연결한 합성
+E2E를 추가했고, gate 보완 round 5까지 완료했다. 최종 전체 비라이브 회귀는
+`1374 passed, live 11 deselected`, 기존
+Starlette warning 1건이었다. `compileall`, Alembic 단일 `0015 (head)`,
+`git diff --check`도 통과했다. DB schema/migration은 추가하지 않았다.
+senior-developer·senior-trader·architecture-expert·security-expert 최종 패널은
+Critical/Important 없음으로 승인했다. IDNA 대체점, Telegram command 경계와
+한국어 단위 소수 표시, IP 유사 다중점 차단, `/analysis` 표시 예외 격리,
+digest 장애 중 analysis summary·cleanup·scheduler health 독립 실행도 TDD로
+보강했다. 실제 Telegram·키움·broker·주문·분석 재실행·제어 명령·운영 DB는
+이번 태스크에서 호출하지 않았다.
+
+**다음 체크포인트:** 사용자 별도 승인과 다음 정상 아침 분석 뒤에만 모의
+Telegram에서 `/analysis` 1회, `/digest` 1회, 다음 정상 08:20 자동 알림 1회,
+동일 analysis run 중복 0회를 관찰한다. 분석 재실행·주문·pause/stop/resume/
+liquidate 계열 제어 명령은 호출하지 않는다. Task 6은 커밋을 만들지 않는다.
+
+**아래 기록은 2026-07-26까지의 이전 재개 지점으로 보존한다.**
 
 **Phase 8 실제 모의 Telegram 수용에서 조회 명령의 송수신과 단일 운영자
 인증은 성공했다. 이어진 가독성 개선 Task 0과 Task 1은 각각 기준선 시계

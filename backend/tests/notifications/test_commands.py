@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy import create_engine
 
+import app.domain.notifications.commands as command_module
 from app.core.operations_control import OperationsControl
 from app.domain.broker import Balance, Position
 from app.domain.notifications.commands import CommandProcessor
@@ -131,9 +132,10 @@ class DigestReports:
         self.payload = payload
         self.calls = 0
 
-    def latest_digest_payload(self):
+    def latest_digest(self):
         self.calls += 1
-        return self.payload
+        return ((self.payload, (render_retained_digest(self.payload),))
+                if self.payload is not None else None)
 
 
 def _digest_payload():
@@ -349,6 +351,56 @@ async def test_analysis는_저장된성공분석이없으면_명시적으로알�
     assert control.calls == []
     assert control.calls_by_kind == []
     assert reports.calls == 1
+
+
+@pytest.mark.anyio
+async def test_analysis는_표시실패를_fallback으로격리하고_intent를성공처리한다(
+    tmp_path, monkeypatch, caplog,
+):
+    engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'analysis-fallback.db'}")
+    Base.metadata.create_all(engine)
+    inbox = TelegramInboxStore(engine, now=lambda: NOW)
+    commands = TelegramCommandStore(engine, now=lambda: NOW)
+    control = Control([], commands)
+    reports = AnalysisReports(_analysis_summary())
+    worker = CommandProcessor(
+        inbox, commands, control, "worker", chat_hash=CHAT,
+        now=lambda: NOW, analysis_reports=reports,
+        digest_reports=DigestReports(),
+    )
+    inbox.persist_batch_and_offset(
+        [{"update_id": 36, "operator_hash": OP, "command": "analysis",
+          "received_at": NOW}],
+        37,
+    )
+
+    def fail_presentation(_summary):
+        raise RuntimeError("synthetic presenter failure")
+
+    monkeypatch.setattr(
+        command_module, "render_analysis_summary", fail_presentation)
+
+    result = await worker.process_next()
+
+    assert result.kind == "analysis"
+    assert result.outbox_sensitive is True
+    assert result.response_text == "🧠 최근 AI 분석\n\n조회 가능한 AI 분석이 없습니다."
+    assert commands.intent_status("telegram_command_update_36") == "succeeded"
+    assert control.calls == []
+    assert control.calls_by_kind == []
+    assert reports.calls == 1
+    presentation_logs = [
+        record.getMessage()
+        for record in caplog.records
+        if "telegram command presentation failed" in record.getMessage()
+    ]
+    assert presentation_logs == [
+        (
+            "telegram command presentation failed "
+            "method=fail_presentation exception_type=RuntimeError"
+        )
+    ]
+    assert "synthetic presenter failure" not in presentation_logs[0]
 
 
 @pytest.mark.anyio

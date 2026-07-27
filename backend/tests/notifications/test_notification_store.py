@@ -104,6 +104,22 @@ def test_pending_succeeded_today는_당일성공런만_생성이력제외후_오
     assert store.latest_analysis().run_id == 5
 
 
+def test_pending_succeeded_today는_비거래일_분석을_자동알림대상에서_제외한다(tmp_path):
+    """휴장일 수동 분석을 다음 거래일 진입 신호처럼 자동 전송하면 실패한다."""
+    now = kst(2026, 7, 25, 9)  # Saturday
+    engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'weekend-analysis.db'}")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        score_id = _add_score(session, date(2026, 7, 24))
+        _add_analysis(session, 71, score_id, started_at=kst(2026, 7, 25, 8, 20))
+        _add_verdict(session, 71, "005930", picked=True, pick_rank=1)
+        session.commit()
+
+    store = AnalysisSummaryRunStore(engine, "mock", now=lambda: now)
+
+    assert store.pending_succeeded_today(()) == ()
+
+
 def test_read_model은_손상된_이유위험JSON을_빈값으로격리하고_행수를_표시한다(tmp_path):
     """JSON 형식 오류가 전체 자동 알림을 중단시키는 회귀를 막는다."""
     now = kst(2026, 7, 27, 9)
@@ -269,6 +285,32 @@ def test_latest_retained_digest는_env와_TTL과본문을_지키고_읽기만한
     assert store.outbox_payload(mock.outbox_id) == retained
 
 
+def test_latest_retained_digest는_저장된_part순서를_그대로_반환한다(tmp_path):
+    """재조회가 payload를 재렌더·재분할하면 당시 Telegram 본문이 바뀐다."""
+    now = kst(2026, 7, 27, 9)
+    engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'retained-parts.db'}")
+    Base.metadata.create_all(engine)
+    store = NotificationStore(engine, now=lambda: now)
+    payload = {
+        "version": 1, "trading_day": "2026-07-27", "run_environment": "mock",
+        "pipeline": {"facts": {}, "as_of": None, "failed_fields": []},
+        "trading": {"facts": {}, "as_of": None, "failed_fields": []},
+        "account": {
+            "available_deposit": None, "total_eval": None, "total_profit": None,
+            "realized_pnl": None, "realized_pnl_confidence": "unknown",
+            "source": "unavailable", "failed_fields": ["account_snapshot"],
+            "as_of": None, "trading_day": None,
+        },
+    }
+    parts = ("[digest] [1/2] 첫 본문", "[digest] [2/2] 둘째 본문")
+    store.materialize_digest("digest:mock:2026-07-27", payload, parts, occurred_at=now)
+    _finish_next_delivery(store, 1)
+    _finish_next_delivery(store, 2)
+
+    assert DigestReportStore(store, "mock", now=lambda: now).latest_digest() == (
+        payload, parts)
+
+
 def test_latest_retained_digest는_모든_part가_sent인_완료outbox만_조회한다(tmp_path):
     """pending이나 multipart 부분 전송을 완료된 보존 결과로 노출하면 실패한다."""
     now = kst(2026, 7, 27, 9)
@@ -370,8 +412,8 @@ def test_sent_digest는_24시간_TTL까지_보존하고_만료뒤_scrub한다(tm
     assert store.load_deliveries(materialized.outbox_id)[0].status == "sent"
 
 
-def test_sent_analysis_summary는_성공직후_본문과payload를_scrub한다(tmp_path):
-    """digest 보존 예외가 분석 요약 본문까지 24시간 남기면 실패한다."""
+def test_sent_analysis_summary는_24시간_TTL까지_본문과payload를_보존한다(tmp_path):
+    """분석 요약을 성공 직후 지우면 승인된 TTL 복기 계약이 깨진다."""
     now = kst(2026, 7, 27, 9)
     engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'analysis-summary-scrub.db'}")
     Base.metadata.create_all(engine)
@@ -387,6 +429,15 @@ def test_sent_analysis_summary는_성공직후_본문과payload를_scrub한다(t
 
     assert store.finish_delivery(
         delivery.id, "sender", delivery.version, telegram_message_id=1, sent_at=now)
+    assert store.outbox_payload(materialized.outbox_id) == {
+        "version": 1,
+        "analysis_run_id": 7,
+        "run_environment": "mock",
+        "score_reference_date": "2026-07-24",
+    }
+    assert store.delivery_bodies(materialized.outbox_id) == ["analysis body"]
+
+    assert store.purge_expired_sensitive(now + timedelta(hours=24)) == 1
     assert store.outbox_payload(materialized.outbox_id) is None
     assert store.delivery_bodies(materialized.outbox_id) == [None]
 
