@@ -109,8 +109,9 @@ async def test_digest는_snapshot_deferred를_금액0이아닌_unavailable로_�
     assert digest.account.available_deposit is None
     assert digest.account.total_eval is None
     assert digest.account.failed_fields == ("account_snapshot",)
-    assert "조회 불가" in digest.body
-    assert "0원" not in digest.body
+    assert "계좌 스냅샷을 조회하지 못했습니다." in digest.body
+    account_section = digest.body.split("💰 계좌\n", 1)[1].split("\n\n", 1)[0]
+    assert "0원" not in account_section
 
 
 @pytest.mark.anyio
@@ -195,8 +196,222 @@ def test_digest본문은_각_read_model의_누락필드를_명시한다():
             None, None, None, None, "unknown", "unavailable",
             ("account_snapshot",), None, None))
 
-    assert "누락 필드: collection" in digest.body
-    assert "누락 필드: trade_runs" in digest.body
+    assert "- 데이터 수집 결과 없음" in digest.body
+    assert "- 거래 실행 기록 없음" in digest.body
+    assert "누락 필드:" not in digest.body
+
+
+def _readable_digest(
+    *,
+    run_environment="mock",
+    market_regime="risk_off",
+    pick_count=0,
+    candidate_count=2519,
+    entry_order_count=0,
+    exit_order_count=0,
+    current_position_count=0,
+    realized_pnl=0,
+    realized_pnl_confidence="estimated",
+    pipeline_failed=(),
+    trading_failed=(),
+    account_source="cached",
+    account_total_eval=0,
+    account_failed=(),
+    account_confidence="estimated",
+    account_trading_day=date(2026, 7, 28),
+):
+    return Digest(
+        date(2026, 7, 28),
+        run_environment,
+        DigestSection(
+            {
+                "collection_status": "done",
+                "collection_reference_day": "2026-07-27",
+                "scoring_status": "succeeded",
+                "scoring_reference_day": "2026-07-27",
+                "candidate_count": candidate_count,
+                "analysis_status": "succeeded",
+                "analysis_score_reference_day": "2026-07-27",
+                "pick_count": pick_count,
+                "market_regime": market_regime,
+            },
+            kst(2026, 7, 28, 8, 28),
+            pipeline_failed,
+        ),
+        DigestSection(
+            {
+                "order_count": entry_order_count + exit_order_count,
+                "entry_order_count": entry_order_count,
+                "exit_order_count": exit_order_count,
+                "current_position_count": current_position_count,
+                "realized_pnl": realized_pnl,
+                "realized_pnl_confidence": realized_pnl_confidence,
+                "kill_switch_run_count": 0,
+                "scheduler_gave_up_count": 0,
+                "scheduler_dead_count": 0,
+                "dead_letter_count": 0,
+            },
+            kst(2026, 7, 28, 16, 10),
+            trading_failed,
+        ),
+        DigestAccount(
+            9_979_053 if account_source != "unavailable" else None,
+            account_total_eval if account_source != "unavailable" else None,
+            0 if account_source != "unavailable" else None,
+            0 if account_source != "unavailable" else None,
+            account_confidence,
+            account_source,
+            account_failed,
+            kst(2026, 7, 28, 16, 10),
+            account_trading_day,
+        ),
+    )
+
+
+def test_digest본문은_정상상태를_한국어핵심요약으로_표시한다():
+    digest = _readable_digest()
+
+    assert digest.body == (
+        "📋 장 마감 다이제스트 · 모의투자\n"
+        "2026년 7월 28일\n\n"
+        "📊 오늘의 분석\n"
+        "데이터 수집      완료 · 기준 7월 27일\n"
+        "종목 점수 계산   완료 · 2,519종목\n"
+        "AI 분석          완료 · 위험회피\n"
+        "최종 진입 후보   없음\n\n"
+        "💼 자동매매\n"
+        "매수 주문        0건\n"
+        "매도 주문        0건\n"
+        "현재 관리 포지션 0개\n"
+        "실현손익         0원 (추정)\n\n"
+        "💰 계좌\n"
+        "주문 가능        9,979,053원\n"
+        "보유주식 평가    0원\n"
+        "평가손익         0원\n"
+        "실현손익         0원 (추정)\n\n"
+        "🕖 다음 일정\n"
+        "오늘 19:00 데이터 수집"
+    )
+
+
+@pytest.mark.parametrize(
+    ("stored", "displayed"),
+    [
+        ("risk_on", "위험선호"),
+        ("neutral", "중립"),
+        ("risk_off", "위험회피"),
+        ("unexpected", "확인 불가"),
+        (None, "확인 불가"),
+    ],
+)
+def test_digest본문은_시장국면을_허용목록으로_표시한다(stored, displayed):
+    digest = _readable_digest(market_regime=stored)
+
+    expected = (
+        f"완료 · {displayed}"
+        if displayed != "확인 불가"
+        else "확인 불가"
+    )
+    assert f"AI 분석          {expected}" in digest.body
+
+
+def test_digest본문은_실전환경과_후보_양수와_exact손익을_표시한다():
+    digest = _readable_digest(
+        run_environment="real",
+        pick_count=3,
+        realized_pnl=-12_345,
+        realized_pnl_confidence="exact",
+    )
+
+    assert digest.body.startswith("📋 장 마감 다이제스트 · 🚨 실전")
+    assert "최종 진입 후보   3종목" in digest.body
+    assert "실현손익         -12,345원" in digest.body
+    assert "-12,345원 (추정)" not in digest.body
+
+
+def test_digest본문은_누락과_손상값을_추측없이_경고한다():
+    digest = _readable_digest(
+        pipeline_failed=("collection", "scoring", "unknown_internal"),
+        trading_failed=("trade_runs", "unknown_internal"),
+        account_source="unavailable",
+        account_failed=("account_snapshot", "unknown_internal"),
+        candidate_count=-1,
+        entry_order_count=-1,
+    )
+
+    assert "계좌 스냅샷을 조회하지 못했습니다." in digest.body
+    assert digest.body.count("- 일부 상태 확인 불가") == 1
+    assert digest.body.count("- 데이터 수집 결과 없음") == 1
+    assert digest.body.count("- 종목 점수 계산 결과 없음") == 1
+    assert digest.body.count("- 거래 실행 기록 없음") == 1
+    assert digest.body.count("- 계좌 스냅샷 조회 실패") == 1
+    assert "unknown_internal" not in digest.body
+    assert "매수 주문        확인 불가" in digest.body
+
+
+def test_digest본문은_기술식별자_JSON_UTC시각을_노출하지않는다():
+    body = _readable_digest().body
+
+    assert "digest:mock:" not in body
+    assert "다이제스트 ID" not in body
+    assert '{"' not in body
+    assert "+00:00" not in body
+    assert "T08:" not in body
+
+
+def test_digest본문은_계좌부분실패에서_가용금액만_보존한다():
+    digest = _readable_digest(
+        account_total_eval=None,
+        account_failed=("total_eval",),
+    )
+
+    assert "주문 가능        9,979,053원" in digest.body
+    assert "보유주식 평가    확인 불가" in digest.body
+    assert "- 일부 계좌 정보 확인 불가" in digest.body
+    assert "total_eval" not in digest.body
+
+
+def test_digest본문은_catchup계좌를_현재스냅샷으로_명시한다():
+    digest = _readable_digest(account_trading_day=date(2026, 7, 29))
+
+    assert "현재 관리 포지션 0개" in digest.body
+    assert "현재 계좌 · 기준 7월 29일" in digest.body
+    assert "- 계좌 정보는 다이제스트 거래일 기준이 아님" in digest.body
+
+
+def test_digest본문은_계좌기준일누락을_경고한다():
+    digest = _readable_digest(account_trading_day=None)
+
+    assert "- 계좌 기준일 확인 불가" in digest.body
+
+
+def test_digest본문은_알수없는계좌출처를_fail_closed한다():
+    digest = _readable_digest(account_source="unknown")
+
+    assert "계좌 정보의 출처를 확인하지 못했습니다." in digest.body
+    assert "9,979,053원" not in digest.body
+    assert "- 일부 계좌 정보 확인 불가" in digest.body
+
+
+def test_digest본문은_알수없는계좌손익신뢰도를_fail_closed한다():
+    digest = _readable_digest(account_confidence="unknown")
+
+    account_section = digest.body.split("💰 계좌\n", 1)[1].split("\n\n", 1)[0]
+    assert "실현손익         확인 불가" in account_section
+    assert "- 일부 계좌 정보 확인 불가" in digest.body
+
+
+def test_digest본문은_failed_fields가없어도_누락계좌금액을_경고한다():
+    digest = _readable_digest(account_total_eval=None)
+
+    assert "보유주식 평가    확인 불가" in digest.body
+    assert "- 일부 계좌 정보 확인 불가" in digest.body
+
+
+def test_retained_v1은_새_digest본문과_동일한_presenter를_사용한다():
+    digest = _readable_digest()
+
+    assert render_retained_digest(deepcopy(digest.payload)) == digest.body
 
 
 def _retained_digest() -> Digest:

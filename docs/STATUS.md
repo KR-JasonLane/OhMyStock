@@ -4,12 +4,28 @@
 > 새 세션에서 재개할 때 이 문서를 가장 먼저 읽으세요. 매 작업 세션이 끝날 때마다
 > 이 문서를 갱신합니다(핸드오프 문서).
 
-- **최종 수정:** 2026-07-27
+- **최종 수정:** 2026-07-28
 - **프로젝트:** OhMyStock — 한국 주식 자동매매 시스템
 
 ---
 
 ## ▶ 여기서 재개 (다음 액션)
+
+**읽기 쉬운 Telegram 장 마감 다이제스트 구현 완료:** 승인 설계
+`docs/specs/2026-07-28-readable-telegram-digest-design.md`와 구현 계획
+`docs/plans/2026-07-28-readable-telegram-digest-plan.md`에 따라 구형 기술
+ID·UTC ISO 시각·raw JSON 본문을 한국어 핵심 요약 presenter로 교체했다.
+payload v1, idempotency, 16:10 생성·catch-up·sender retry와 기존 delivery
+part 재전송 계약은 유지했다. 주문가능금액·현재 관리 포지션 의미를 명확히
+하고, catch-up 계좌 기준일과 계좌 출처·누락 금액·손익 신뢰도를 fail-closed
+처리했다. 다이제스트 단위 테스트 35건, 관련 Telegram 회귀 141건, 전체
+비라이브 `1391 passed, 11 deselected`, compileall과 diff check가 통과했다.
+기존 Starlette warning 1건 외 새 경고는 없으며, 4인 독립 리뷰 패널은
+Critical/Important 없음으로 승인했다.
+
+**다음 체크포인트:** 사용자 커밋 승인 뒤 배포하고, 다음 정상 16:10 자동
+모의 다이제스트와 `/digest` 1회만 읽기 전용으로 수용한다. 기존 24시간
+보존분은 생성 당시 구형 원문일 수 있다.
 
 **아침 AI 분석 Telegram 요약 Task 6 완료:** Task 1~5 구현 커밋은 `c3c4c00`,
 `13e007b`, `9c7f66b`, `565025c`, `af52937`이다. 실제 SQLite·store·summary

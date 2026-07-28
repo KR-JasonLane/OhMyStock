@@ -8,7 +8,6 @@ snapshot은 공용 OperationsControl에서만 얻고, digest 우선순위는 새
 from __future__ import annotations
 
 import asyncio
-import json
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
@@ -21,6 +20,21 @@ from app.domain.notifications.ports import (AccountSnapshotDeferred,
 
 
 _DIGEST_ENVIRONMENTS = frozenset({"mock", "real"})
+_ENVIRONMENT_LABELS = {"mock": "모의투자", "real": "🚨 실전"}
+_REGIME_LABELS = {
+    "risk_on": "위험선호",
+    "neutral": "중립",
+    "risk_off": "위험회피",
+}
+_FAILED_FIELD_WARNINGS = {
+    "collection": "데이터 수집 결과 없음",
+    "scoring": "종목 점수 계산 결과 없음",
+    "analysis": "AI 분석 결과 없음",
+    "trade_runs": "거래 실행 기록 없음",
+    "account_snapshot": "계좌 스냅샷 조회 실패",
+}
+_ACCOUNT_SOURCES = frozenset({"broker+trade_store", "cached"})
+_PNL_CONFIDENCES = frozenset({"estimated", "exact"})
 
 class CalendarPort(Protocol):
     KST: Any
@@ -137,30 +151,7 @@ class Digest:
 
     @property
     def body(self) -> str:
-        account = self.account
-        if account.source == "unavailable":
-            account_line = "계좌 스냅샷: 조회 불가 (" + ", ".join(account.failed_fields) + ")"
-        else:
-            account_line = (
-                "계좌 스냅샷(" + _as_of(account.as_of) + "): 예수금 "
-                + _amount(account.available_deposit)
-                + ", 총평가 " + _amount(account.total_eval)
-                + ", 평가손익 " + _amount(account.total_profit)
-                + ", 실현손익 " + _amount(account.realized_pnl))
-            if account.failed_fields:
-                account_line += " (실패 필드: " + ", ".join(account.failed_fields) + ")"
-            if account.trading_day is not None and account.trading_day != self.trading_day:
-                account_line += " (현재 조회 기준일: " + account.trading_day.isoformat() + ")"
-        return "\n".join((
-            f"다이제스트 ID: {self.idempotency_key}",
-            f"장 마감 다이제스트 {self.trading_day.isoformat()}",
-            "파이프라인(" + _as_of(self.pipeline.as_of) + "): "
-            + _compact_json(self.pipeline.facts) + _failed(self.pipeline.failed_fields),
-            "거래(" + _as_of(self.trading.as_of) + "): "
-            + _compact_json(self.trading.facts) + _failed(self.trading.failed_fields),
-            account_line,
-            "19:00 수집: 예정",
-        ))
+        return _render_digest(self)
 
     @property
     def bodies(self) -> tuple[str, ...]:
@@ -283,13 +274,214 @@ def _unavailable_account() -> DigestAccount:
         as_of=None, trading_day=None)
 
 
-def _amount(value: int | None) -> str:
-    return "조회 불가" if value is None else f"{value:,}원"
+def _render_digest(digest: Digest) -> str:
+    sections = [
+        _render_digest_header(digest),
+        _render_pipeline(digest.pipeline),
+        _render_trading(digest.trading),
+        _render_account(digest),
+    ]
+    warnings = _digest_warnings(digest)
+    if warnings:
+        sections.append(
+            "⚠️ 확인 필요\n"
+            + "\n".join(f"- {warning}" for warning in warnings)
+        )
+    sections.append("🕖 다음 일정\n오늘 19:00 데이터 수집")
+    return "\n\n".join(sections)
 
 
-def _compact_json(value: Mapping[str, object]) -> str:
-    return json.dumps(dict(value), ensure_ascii=False, sort_keys=True,
-                      separators=(",", ":"))
+def _render_digest_header(digest: Digest) -> str:
+    return (
+        f"📋 장 마감 다이제스트 · "
+        f"{_ENVIRONMENT_LABELS[digest.run_environment]}\n"
+        f"{digest.trading_day.year}년 {digest.trading_day.month}월 "
+        f"{digest.trading_day.day}일"
+    )
+
+
+def _render_pipeline(section: DigestSection) -> str:
+    facts = section.facts
+    collection_reference = _short_date(facts.get("collection_reference_day"))
+    collection = (
+        f"완료 · 기준 {collection_reference}"
+        if facts.get("collection_status") == "done" and collection_reference
+        else "확인 불가"
+    )
+    candidate_count = _nonnegative_int(facts.get("candidate_count"))
+    scoring = (
+        f"완료 · {candidate_count:,}종목"
+        if facts.get("scoring_status") == "succeeded"
+        and candidate_count is not None
+        and _short_date(facts.get("scoring_reference_day"))
+        else "확인 불가"
+    )
+    regime = _REGIME_LABELS.get(facts.get("market_regime"))
+    analysis = (
+        f"완료 · {regime}"
+        if facts.get("analysis_status") == "succeeded"
+        and regime is not None
+        and _short_date(facts.get("analysis_score_reference_day"))
+        else "확인 불가"
+    )
+    pick_count = _nonnegative_int(facts.get("pick_count"))
+    picks = (
+        "없음" if pick_count == 0
+        else f"{pick_count:,}종목" if pick_count is not None
+        else "확인 불가"
+    )
+    return "\n".join((
+        "📊 오늘의 분석",
+        f"데이터 수집      {collection}",
+        f"종목 점수 계산   {scoring}",
+        f"AI 분석          {analysis}",
+        f"최종 진입 후보   {picks}",
+    ))
+
+
+def _render_trading(section: DigestSection) -> str:
+    facts = section.facts
+    return "\n".join((
+        "💼 자동매매",
+        "매수 주문        " + _count(facts.get("entry_order_count"), "건"),
+        "매도 주문        " + _count(facts.get("exit_order_count"), "건"),
+        "현재 관리 포지션 " + _count(facts.get("current_position_count"), "개"),
+        "실현손익         "
+        + _money(
+            facts.get("realized_pnl"),
+            confidence=facts.get("realized_pnl_confidence"),
+        ),
+    ))
+
+
+def _render_account(digest: Digest) -> str:
+    account = digest.account
+    if account.source == "unavailable":
+        return "💰 계좌\n계좌 스냅샷을 조회하지 못했습니다."
+    if account.source not in _ACCOUNT_SOURCES:
+        return "💰 계좌\n계좌 정보의 출처를 확인하지 못했습니다."
+    heading = "💰 계좌"
+    if account.trading_day != digest.trading_day and account.trading_day is not None:
+        heading += (
+            f"\n현재 계좌 · 기준 {account.trading_day.month}월 "
+            f"{account.trading_day.day}일"
+        )
+    return "\n".join((
+        heading,
+        "주문 가능        " + _money(account.available_deposit),
+        "보유주식 평가    " + _money(account.total_eval),
+        "평가손익         " + _money(account.total_profit),
+        "실현손익         "
+        + _money(
+            account.realized_pnl,
+            confidence=account.realized_pnl_confidence,
+        ),
+    ))
+
+
+def _digest_warnings(digest: Digest) -> tuple[str, ...]:
+    warnings: list[str] = []
+    unknown_section_field = False
+    for field in (*digest.pipeline.failed_fields, *digest.trading.failed_fields):
+        warning = _FAILED_FIELD_WARNINGS.get(field)
+        if warning is None:
+            unknown_section_field = True
+        else:
+            warnings.append(warning)
+    if unknown_section_field or _has_unknown_values(digest):
+        warnings.append("일부 상태 확인 불가")
+
+    unknown_account_field = False
+    for field in digest.account.failed_fields:
+        warning = _FAILED_FIELD_WARNINGS.get(field)
+        if warning is None:
+            unknown_account_field = True
+        else:
+            warnings.append(warning)
+    if unknown_account_field:
+        warnings.append("일부 계좌 정보 확인 불가")
+    warnings.extend(_account_warnings(digest))
+    return tuple(dict.fromkeys(warnings))
+
+
+def _account_warnings(digest: Digest) -> tuple[str, ...]:
+    account = digest.account
+    if account.source == "unavailable":
+        return ()
+    warnings: list[str] = []
+    if account.source not in _ACCOUNT_SOURCES:
+        warnings.append("일부 계좌 정보 확인 불가")
+        return tuple(warnings)
+    if any(
+        type(value) is not int
+        for value in (
+            account.available_deposit,
+            account.total_eval,
+            account.total_profit,
+            account.realized_pnl,
+        )
+    ) or account.realized_pnl_confidence not in _PNL_CONFIDENCES:
+        warnings.append("일부 계좌 정보 확인 불가")
+    if account.trading_day is None:
+        warnings.append("계좌 기준일 확인 불가")
+    elif account.trading_day != digest.trading_day:
+        warnings.append("계좌 정보는 다이제스트 거래일 기준이 아님")
+    return tuple(warnings)
+
+
+def _has_unknown_values(digest: Digest) -> bool:
+    pipeline = digest.pipeline.facts
+    trading = digest.trading.facts
+    pipeline_valid = (
+        pipeline.get("collection_status") == "done"
+        and _short_date(pipeline.get("collection_reference_day")) is not None
+        and pipeline.get("scoring_status") == "succeeded"
+        and _short_date(pipeline.get("scoring_reference_day")) is not None
+        and _nonnegative_int(pipeline.get("candidate_count")) is not None
+        and pipeline.get("analysis_status") == "succeeded"
+        and _short_date(pipeline.get("analysis_score_reference_day")) is not None
+        and pipeline.get("market_regime") in _REGIME_LABELS
+        and _nonnegative_int(pipeline.get("pick_count")) is not None
+    )
+    trading_valid = all(
+        _nonnegative_int(trading.get(field)) is not None
+        for field in (
+            "entry_order_count",
+            "exit_order_count",
+            "current_position_count",
+        )
+    )
+    pnl_valid = type(trading.get("realized_pnl")) is int
+    confidence_valid = trading.get("realized_pnl_confidence") in _PNL_CONFIDENCES
+    return not (pipeline_valid and trading_valid and pnl_valid and confidence_valid)
+
+
+def _short_date(value: object) -> str | None:
+    if type(value) is not str:
+        return None
+    try:
+        parsed = date.fromisoformat(value)
+    except ValueError:
+        return None
+    return f"{parsed.month}월 {parsed.day}일"
+
+
+def _nonnegative_int(value: object) -> int | None:
+    return value if type(value) is int and value >= 0 else None
+
+
+def _count(value: object, unit: str) -> str:
+    number = _nonnegative_int(value)
+    return f"{number:,}{unit}" if number is not None else "확인 불가"
+
+
+def _money(value: object, *, confidence: object = None) -> str:
+    if type(value) is not int:
+        return "확인 불가"
+    if confidence is not None and confidence not in _PNL_CONFIDENCES:
+        return "확인 불가"
+    suffix = " (추정)" if confidence == "estimated" else ""
+    return f"{value:,}원{suffix}"
 
 
 def _section_payload(section: DigestSection) -> dict[str, object]:
@@ -299,14 +491,6 @@ def _section_payload(section: DigestSection) -> dict[str, object]:
 
 def _iso(value: datetime | None) -> str | None:
     return value.isoformat() if value is not None else None
-
-
-def _as_of(value: datetime | None) -> str:
-    return _iso(value) or "조회 불가"
-
-
-def _failed(fields: tuple[str, ...]) -> str:
-    return " (누락 필드: " + ", ".join(fields) + ")" if fields else ""
 
 
 def render_retained_digest(payload: Mapping[str, object]) -> str:

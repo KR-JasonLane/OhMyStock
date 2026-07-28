@@ -128,14 +128,19 @@ class AnalysisReports:
 
 
 class DigestReports:
-    def __init__(self, payload=None):
+    def __init__(self, payload=None, delivery_bodies=None):
         self.payload = payload
+        self.delivery_bodies = delivery_bodies
         self.calls = 0
 
     def latest_digest(self):
         self.calls += 1
-        return ((self.payload, (render_retained_digest(self.payload),))
-                if self.payload is not None else None)
+        if self.payload is None:
+            return None
+        return (
+            self.payload,
+            self.delivery_bodies or (render_retained_digest(self.payload),),
+        )
 
 
 def _digest_payload():
@@ -428,6 +433,42 @@ async def test_digest는_보존payload만_렌더링하고_control을_호출하�
     assert result.response_text == render_retained_digest(_digest_payload())
     assert control.calls == []
     assert control.calls_by_kind == []
+    assert reports.calls == 1
+
+
+@pytest.mark.anyio
+async def test_digest명령은_기존_delivery_part를_새형식으로_재작성하지않는다(
+        tmp_path):
+    engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'digest-parts.db'}")
+    Base.metadata.create_all(engine)
+    inbox = TelegramInboxStore(engine, now=lambda: NOW)
+    commands = TelegramCommandStore(engine, now=lambda: NOW)
+    control = Control([], commands)
+    reports = DigestReports(
+        _digest_payload(),
+        delivery_bodies=("[digest-mock-2026-07-24] [1/1]\n구형 원문",),
+    )
+    worker = CommandProcessor(
+        inbox, commands, control, "worker", chat_hash=CHAT, now=lambda: NOW,
+        analysis_reports=AnalysisReports(), digest_reports=reports,
+    )
+    inbox.persist_batch_and_offset(
+        [{
+            "update_id": 38,
+            "operator_hash": OP,
+            "command": "digest",
+            "received_at": NOW,
+        }],
+        39,
+    )
+
+    result = await worker.process_next()
+
+    assert result is not None
+    assert result.response_parts == (
+        "[digest-mock-2026-07-24] [1/1]\n구형 원문",
+    )
+    assert control.calls == []
     assert reports.calls == 1
 
 
