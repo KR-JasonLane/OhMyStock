@@ -7,6 +7,7 @@ from sqlalchemy import create_engine
 from app.core.operations_control import AccountSnapshotDeferred
 from app.domain.notifications.digest import (Digest, DigestAccount, DigestBuilder,
                                              DigestPlanner, DigestSection,
+                                             DigestTradeNotice,
                                              render_retained_digest)
 from app.domain.errors import BrokerError
 from app.domain.notifications.models import NotificationPriority
@@ -187,6 +188,79 @@ def test_digest_section은_민감키와_과도한본문값을_거부한다():
         DigestSection({"collection_status": "x" * 97}, kst(2026, 7, 24, 16, 10))
 
 
+@pytest.mark.parametrize(
+    "notice",
+    [
+        DigestTradeNotice("liquidity", "003960", 252_557_535, 1_000_000_000),
+        DigestTradeNotice("analysis_wait"),
+        DigestTradeNotice("analysis_empty"),
+        DigestTradeNotice("gap_guard", "005930"),
+        DigestTradeNotice("already_held", "005930"),
+        DigestTradeNotice("reentry_cooldown", "005930"),
+        DigestTradeNotice("capacity", "005930"),
+        DigestTradeNotice("missing_context", "005930"),
+        DigestTradeNotice("missing_price", "005930"),
+        DigestTradeNotice("requote_fallback", "005930"),
+        DigestTradeNotice("quote_unstable", "005930"),
+        DigestTradeNotice("order_attention", "005930"),
+        DigestTradeNotice("unknown"),
+    ],
+)
+def test_digest_trade_notice는_허용된구조만_받는다(notice):
+    assert notice.code
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"code": "raw_internal_text"},
+        {"code": "liquidity", "symbol": "003960;secret"},
+        {
+            "code": "liquidity", "symbol": "003960", "observed_krw": -1,
+            "threshold_krw": 1_000_000_000,
+        },
+        {"code": "liquidity", "symbol": "003960", "observed_krw": 1},
+        {
+            "code": "liquidity", "symbol": "003960",
+            "observed_krw": 1_000_000_000_000_000,
+            "threshold_krw": 1_000_000_000,
+        },
+        {"code": "gap_guard", "observed_krw": 1},
+        {"code": []},
+        {"code": "gap_guard", "symbol": 5930},
+    ],
+)
+def test_digest_trade_notice는_손상되거나_불필요한값을_거부한다(kwargs):
+    with pytest.raises(ValueError):
+        DigestTradeNotice(**kwargs)
+
+
+def test_digest_trade_notice는_공용6자리_ascii영숫자_symbol계약을_따른다():
+    assert DigestTradeNotice("gap_guard", "abc123").symbol == "abc123"
+
+    for unsafe in ("5930", "1234567", "12345;secret"):
+        with pytest.raises(ValueError) as exc_info:
+            DigestTradeNotice("gap_guard", unsafe)
+        assert unsafe not in str(exc_info.value)
+
+
+def test_digest_section은_안전한거래경고의_상한과_전체개수를_강제한다():
+    notice = DigestTradeNotice("unknown")
+
+    with pytest.raises(ValueError):
+        DigestSection({}, None, notices=(notice,) * 6, notice_count=6)
+    with pytest.raises(ValueError):
+        DigestSection({}, None, notices=(notice,), notice_count=0)
+    with pytest.raises(ValueError):
+        DigestSection({}, None, notice_count=-1)
+    with pytest.raises(ValueError):
+        DigestSection({}, None, notices=(), notice_count=1)
+    with pytest.raises(ValueError):
+        DigestSection({}, None, notices=[notice], notice_count=1)
+    with pytest.raises(ValueError):
+        DigestSection({}, None, notices=("unknown",), notice_count=1)
+
+
 def test_digest본문은_각_read_model의_누락필드를_명시한다():
     digest = Digest(
         date(2026, 7, 24), "mock",
@@ -201,10 +275,15 @@ def test_digest본문은_각_read_model의_누락필드를_명시한다():
     assert "누락 필드:" not in digest.body
 
 
+_MISSING = object()
+
+
 def _readable_digest(
     *,
     run_environment="mock",
     market_regime="risk_off",
+    analysis_status="succeeded",
+    analysis_reference_expected=_MISSING,
     pick_count=0,
     candidate_count=2519,
     entry_order_count=0,
@@ -214,27 +293,32 @@ def _readable_digest(
     realized_pnl_confidence="estimated",
     pipeline_failed=(),
     trading_failed=(),
+    trading_notices=(),
+    trading_notice_count=0,
     account_source="cached",
     account_total_eval=0,
     account_failed=(),
     account_confidence="estimated",
     account_trading_day=date(2026, 7, 28),
 ):
+    pipeline_facts = {
+        "collection_status": "done",
+        "collection_reference_day": "2026-07-27",
+        "scoring_status": "succeeded",
+        "scoring_reference_day": "2026-07-27",
+        "candidate_count": candidate_count,
+        "analysis_status": analysis_status,
+        "analysis_score_reference_day": "2026-07-27",
+        "pick_count": pick_count,
+        "market_regime": market_regime,
+    }
+    if analysis_reference_expected is not _MISSING:
+        pipeline_facts["analysis_reference_expected"] = analysis_reference_expected
     return Digest(
         date(2026, 7, 28),
         run_environment,
         DigestSection(
-            {
-                "collection_status": "done",
-                "collection_reference_day": "2026-07-27",
-                "scoring_status": "succeeded",
-                "scoring_reference_day": "2026-07-27",
-                "candidate_count": candidate_count,
-                "analysis_status": "succeeded",
-                "analysis_score_reference_day": "2026-07-27",
-                "pick_count": pick_count,
-                "market_regime": market_regime,
-            },
+            pipeline_facts,
             kst(2026, 7, 28, 8, 28),
             pipeline_failed,
         ),
@@ -253,6 +337,8 @@ def _readable_digest(
             },
             kst(2026, 7, 28, 16, 10),
             trading_failed,
+            notices=trading_notices,
+            notice_count=trading_notice_count,
         ),
         DigestAccount(
             9_979_053 if account_source != "unavailable" else None,
@@ -412,6 +498,227 @@ def test_retained_v1은_새_digest본문과_동일한_presenter를_사용한다(
     digest = _readable_digest()
 
     assert render_retained_digest(deepcopy(digest.payload)) == digest.body
+
+
+def test_digest_payload은_구조화된거래경고만_보존한다():
+    digest = _readable_digest(
+        trading_notices=(
+            DigestTradeNotice(
+                "liquidity", "003960", 252_557_535, 1_000_000_000
+            ),
+        ),
+        trading_notice_count=1,
+    )
+
+    assert digest.payload["trading"]["notices"] == [{
+        "code": "liquidity",
+        "symbol": "003960",
+        "observed_krw": 252_557_535,
+        "threshold_krw": 1_000_000_000,
+    }]
+    assert digest.payload["trading"]["notice_count"] == 1
+    assert "entry dropped" not in str(digest.payload)
+
+
+def test_digest는_pipeline_section의_거래경고를_거부한다():
+    digest = _readable_digest()
+    pipeline = DigestSection(
+        digest.pipeline.facts,
+        digest.pipeline.as_of,
+        digest.pipeline.failed_fields,
+        notices=(DigestTradeNotice("unknown"),),
+        notice_count=1,
+    )
+
+    with pytest.raises(ValueError, match="pipeline"):
+        Digest(
+            digest.trading_day,
+            digest.run_environment,
+            pipeline,
+            digest.trading,
+            digest.account,
+        )
+
+
+def test_기존_v1_payload은_경고선택필드없이_계속표시된다():
+    payload = deepcopy(_retained_digest().payload)
+    payload["pipeline"].pop("notices", None)
+    payload["pipeline"].pop("notice_count", None)
+    payload["trading"].pop("notices", None)
+    payload["trading"].pop("notice_count", None)
+
+    assert render_retained_digest(payload)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda payload: payload["trading"].__setitem__("notices", [{
+            "code": "raw_internal_text", "symbol": None,
+            "observed_krw": None, "threshold_krw": None,
+        }]),
+        lambda payload: payload["trading"].__setitem__("notices", [{
+            "code": "gap_guard", "symbol": "005930;secret",
+            "observed_krw": None, "threshold_krw": None,
+        }]),
+        lambda payload: payload["trading"].__setitem__("notices", [{
+            "code": "liquidity", "symbol": "005930", "observed_krw": -1,
+            "threshold_krw": 1_000_000_000,
+        }]),
+        lambda payload: payload["trading"].__setitem__("notices", [{
+            "code": "liquidity", "symbol": "005930",
+            "observed_krw": 1_000_000_000_000_000,
+            "threshold_krw": 1_000_000_000,
+        }]),
+        lambda payload: payload["trading"].__setitem__("notices", [{
+            "code": "unknown", "symbol": None, "observed_krw": None,
+        }]),
+        lambda payload: payload["trading"].__setitem__("notices", [{
+            "code": "unknown", "symbol": None, "observed_krw": None,
+            "threshold_krw": None,
+        }] * 6),
+        lambda payload: payload["trading"].__setitem__("notice_count", 0),
+        lambda payload: payload["trading"].__setitem__("notices", []),
+        lambda payload: payload["trading"].pop("notices"),
+    ],
+)
+def test_retained_digest_payload은_손상된거래경고를_거부한다(mutate):
+    payload = deepcopy(_readable_digest(
+        trading_notices=(DigestTradeNotice("unknown"),),
+        trading_notice_count=1,
+    ).payload)
+    mutate(payload)
+
+    with pytest.raises(ValueError):
+        render_retained_digest(payload)
+
+
+def test_retained_digest_payload은_pipeline거래경고를_거부한다():
+    payload = deepcopy(_readable_digest().payload)
+    payload["pipeline"]["notices"] = [{
+        "code": "unknown",
+        "symbol": None,
+        "observed_krw": None,
+        "threshold_krw": None,
+    }]
+    payload["pipeline"]["notice_count"] = 1
+
+    with pytest.raises(ValueError, match="pipeline"):
+        render_retained_digest(payload)
+
+
+def test_digest본문은_거래경고를_최대5건_한국어로_표시한다():
+    digest = _readable_digest(
+        analysis_reference_expected=True,
+        trading_notices=(
+            DigestTradeNotice("analysis_wait"),
+            DigestTradeNotice(
+                "liquidity", "003960", 252_557_535, 1_000_000_000
+            ),
+            DigestTradeNotice("gap_guard", "005930"),
+            DigestTradeNotice("already_held", "000660"),
+            DigestTradeNotice("unknown"),
+        ),
+        trading_notice_count=7,
+    )
+
+    assert "⚠️ 오늘 발생한 거래 경고" in digest.body
+    assert "- AI 분석 지연 후 정상 복구" in digest.body
+    assert "- 003960 · 유동성 기준 미달 (2.53억 / 기준 10억)" in digest.body
+    assert "- 005930 · 가격 변동폭 기준 초과" in digest.body
+    assert "- 000660 · 이미 보유 중이라 진입하지 않음" in digest.body
+    assert "- 일부 거래 상태 확인 필요" in digest.body
+    assert "- 외 2건" in digest.body
+
+
+def test_digest본문은_분석지연이복구되지않으면_실패로_표시한다():
+    digest = _readable_digest(
+        analysis_status="failed",
+        trading_notices=(DigestTradeNotice("analysis_wait"),),
+        trading_notice_count=1,
+    )
+
+    assert "- AI 분석 결과를 제때 사용하지 못함" in digest.body
+
+
+def test_digest본문은_명시적기준일정합일때만_분석지연복구를_표시한다():
+    digest = _readable_digest(
+        analysis_reference_expected=True,
+        trading_notices=(DigestTradeNotice("analysis_wait"),),
+        trading_notice_count=1,
+    )
+
+    assert "- AI 분석 지연 후 정상 복구" in digest.body
+
+
+@pytest.mark.parametrize(
+    "analysis_reference_expected",
+    [_MISSING, False, None, 1, "true"],
+)
+def test_digest본문은_기준일정합이명시적true가아니면_분석지연미복구로_표시한다(
+        analysis_reference_expected):
+    digest = _readable_digest(
+        analysis_reference_expected=analysis_reference_expected,
+        trading_notices=(DigestTradeNotice("analysis_wait"),),
+        trading_notice_count=1,
+    )
+
+    assert "- AI 분석 결과를 제때 사용하지 못함" in digest.body
+    assert "- AI 분석 지연 후 정상 복구" not in digest.body
+
+
+def test_retained_digest_payload의_손상된기준일정합은_분석지연미복구로_표시한다():
+    payload = deepcopy(_readable_digest(
+        analysis_reference_expected=True,
+        trading_notices=(DigestTradeNotice("analysis_wait"),),
+        trading_notice_count=1,
+    ).payload)
+    payload["pipeline"]["facts"]["analysis_reference_expected"] = "true"
+
+    body = render_retained_digest(payload)
+
+    assert "- AI 분석 결과를 제때 사용하지 못함" in body
+    assert "- AI 분석 지연 후 정상 복구" not in body
+
+
+def test_digest본문은_허용목록과_renderer가_불일치하면_fail_loud한다():
+    notice = DigestTradeNotice("unknown")
+    object.__setattr__(notice, "code", "renderer_missing")
+    digest = _readable_digest(
+        trading_notices=(notice,),
+        trading_notice_count=1,
+    )
+
+    with pytest.raises(ValueError, match="renderer"):
+        _ = digest.body
+
+
+@pytest.mark.parametrize(
+    ("notice", "displayed"),
+    [
+        (DigestTradeNotice("analysis_empty"), "AI 최종 진입 후보 없음"),
+        (DigestTradeNotice("reentry_cooldown", "005930"), "005930 · 재진입 대기시간 적용"),
+        (DigestTradeNotice("capacity", "005930"), "005930 · 포지션 또는 자금 한도 적용"),
+        (DigestTradeNotice("missing_context", "005930"), "005930 · 진입 판단 자료 부족"),
+        (DigestTradeNotice("missing_price", "005930"), "005930 · 가격 정보 확인 불가"),
+        (DigestTradeNotice("requote_fallback", "005930"), "최신 시세 재조회 실패 · 기존 시세 사용"),
+        (DigestTradeNotice("quote_unstable", "005930"), "보유 포지션 시세 조회 불안정"),
+        (DigestTradeNotice("order_attention", "005930"), "주문 또는 체결 상태 확인 필요"),
+    ],
+)
+def test_digest본문은_경고코드별_승인된고정문구만_표시한다(notice, displayed):
+    digest = _readable_digest(
+        trading_notices=(notice,),
+        trading_notice_count=1,
+    )
+
+    assert f"- {displayed}" in digest.body
+    assert "005930 · 보유 포지션 시세 조회 불안정" not in digest.body
+    assert "005930 · 주문 또는 체결 상태 확인 필요" not in digest.body
+
+
+def test_digest본문은_거래경고가없으면_절을_숨긴다():
+    assert "오늘 발생한 거래 경고" not in _readable_digest().body
 
 
 def _retained_digest() -> Digest:

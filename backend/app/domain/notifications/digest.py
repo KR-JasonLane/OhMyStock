@@ -10,9 +10,11 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from decimal import Decimal, ROUND_HALF_UP
 from datetime import date, datetime, time, timedelta
 from typing import Any, Protocol
 
+from app.domain.broker import validate_symbol
 from app.domain.errors import BrokerError
 from app.domain.notifications.formatting import render_parts
 from app.domain.notifications.ports import (AccountSnapshotDeferred,
@@ -35,6 +37,20 @@ _FAILED_FIELD_WARNINGS = {
 }
 _ACCOUNT_SOURCES = frozenset({"broker+trade_store", "cached"})
 _PNL_CONFIDENCES = frozenset({"estimated", "exact"})
+_DIGEST_NOTICE_CODES = frozenset({
+    "analysis_wait", "analysis_empty", "liquidity", "gap_guard",
+    "already_held", "reentry_cooldown", "capacity", "missing_context",
+    "missing_price", "requote_fallback", "quote_unstable",
+    "order_attention", "unknown",
+})
+_SYMBOL_REQUIRED_NOTICE_CODES = frozenset({
+    "liquidity", "gap_guard", "already_held", "reentry_cooldown",
+    "missing_context", "missing_price", "requote_fallback",
+})
+_SYMBOL_OPTIONAL_NOTICE_CODES = frozenset({
+    "capacity", "quote_unstable", "order_attention",
+})
+_MAX_DIGEST_NOTICE_KRW = 999_999_999_999_999
 
 class CalendarPort(Protocol):
     KST: Any
@@ -50,9 +66,53 @@ class DigestAuditPort(Protocol):
 
 
 class DigestRunStorePort(Protocol):
-    def pipeline_summary(self, trading_day: date) -> "DigestSection": ...
+    def pipeline_summary(self, trading_day: date) -> "DigestSection":
+        """Task 2는 거래 캘린더로 analysis_reference_expected bool을 만든다."""
+        ...
 
     def trading_summary(self, trading_day: date) -> "DigestSection": ...
+
+
+@dataclass(frozen=True)
+class DigestTradeNotice:
+    """Telegram에 표시 가능한 정규화된 거래 경고다."""
+
+    code: str
+    symbol: str | None = None
+    observed_krw: int | None = None
+    threshold_krw: int | None = None
+
+    def __post_init__(self) -> None:
+        if type(self.code) is not str or self.code not in _DIGEST_NOTICE_CODES:
+            raise ValueError("unsupported digest trade notice code")
+        if self.code in _SYMBOL_REQUIRED_NOTICE_CODES:
+            if not _is_safe_digest_symbol(self.symbol):
+                raise ValueError("digest trade notice requires a safe symbol")
+        elif self.code in _SYMBOL_OPTIONAL_NOTICE_CODES:
+            if self.symbol is not None and not _is_safe_digest_symbol(self.symbol):
+                raise ValueError("digest trade notice symbol must be safe")
+        elif self.symbol is not None:
+            raise ValueError("digest trade notice does not accept a symbol")
+        amounts = (self.observed_krw, self.threshold_krw)
+        if self.code == "liquidity":
+            if any(
+                    type(value) is not int
+                    or value < 0
+                    or value > _MAX_DIGEST_NOTICE_KRW
+                    for value in amounts):
+                raise ValueError("liquidity notice amounts must be safe KRW values")
+        elif any(value is not None for value in amounts):
+            raise ValueError("digest trade notice amounts are only for liquidity")
+
+
+def _is_safe_digest_symbol(value: object) -> bool:
+    if type(value) is not str:
+        return False
+    try:
+        validate_symbol(value)
+    except ValueError:
+        return False
+    return True
 
 
 @dataclass(frozen=True)
@@ -62,6 +122,8 @@ class DigestSection:
     facts: Mapping[str, str | int | bool | None]
     as_of: datetime | None
     failed_fields: tuple[str, ...] = ()
+    notices: tuple[DigestTradeNotice, ...] = ()
+    notice_count: int = 0
 
     def __post_init__(self) -> None:
         if self.as_of is not None and (
@@ -83,6 +145,18 @@ class DigestSection:
             checked[key] = value
         object.__setattr__(self, "facts", checked)
         object.__setattr__(self, "failed_fields", tuple(self.failed_fields))
+        if type(self.notices) is not tuple:
+            raise ValueError("digest notices must be a tuple")
+        if len(self.notices) > 5:
+            raise ValueError("digest section has too many notices")
+        if not all(isinstance(notice, DigestTradeNotice) for notice in self.notices):
+            raise ValueError("digest notices must be DigestTradeNotice values")
+        if type(self.notice_count) is not int or self.notice_count < 0:
+            raise ValueError("digest notice_count must be a nonnegative int")
+        if (self.notice_count == 0) != (len(self.notices) == 0):
+            raise ValueError("digest notices and notice_count must be empty together")
+        if self.notice_count < len(self.notices):
+            raise ValueError("digest notice_count cannot be less than notices")
 
 
 @dataclass(frozen=True)
@@ -122,6 +196,8 @@ class Digest:
     def __post_init__(self) -> None:
         if self.run_environment not in _DIGEST_ENVIRONMENTS:
             raise ValueError("digest run_environment must be mock or real")
+        if self.pipeline.notices or self.pipeline.notice_count:
+            raise ValueError("digest pipeline section cannot contain trade notices")
 
     @property
     def idempotency_key(self) -> str:
@@ -279,8 +355,11 @@ def _render_digest(digest: Digest) -> str:
         _render_digest_header(digest),
         _render_pipeline(digest.pipeline),
         _render_trading(digest.trading),
-        _render_account(digest),
     ]
+    trade_notices = _render_trade_notices(digest)
+    if trade_notices:
+        sections.append(trade_notices)
+    sections.append(_render_account(digest))
     warnings = _digest_warnings(digest)
     if warnings:
         sections.append(
@@ -352,6 +431,67 @@ def _render_trading(section: DigestSection) -> str:
             confidence=facts.get("realized_pnl_confidence"),
         ),
     ))
+
+
+def _render_trade_notices(digest: Digest) -> str:
+    notices = digest.trading.notices
+    if not notices:
+        return ""
+    lines = [_render_trade_notice(notice, digest) for notice in notices]
+    extra_count = digest.trading.notice_count - len(notices)
+    if extra_count:
+        lines.append(f"외 {extra_count}건")
+    return "⚠️ 오늘 발생한 거래 경고\n" + "\n".join(
+        f"- {line}" for line in lines)
+
+
+def _render_trade_notice(notice: DigestTradeNotice, digest: Digest) -> str:
+    if notice.code == "analysis_wait":
+        recovered = (
+            digest.pipeline.facts.get("analysis_status") == "succeeded"
+            and _short_date(
+                digest.pipeline.facts.get("analysis_score_reference_day")) is not None
+            and digest.pipeline.facts.get("analysis_reference_expected") is True
+        )
+        return "AI 분석 지연 후 정상 복구" if recovered else "AI 분석 결과를 제때 사용하지 못함"
+    if notice.code == "analysis_empty":
+        return "AI 최종 진입 후보 없음"
+    if notice.code == "liquidity":
+        return (f"{notice.symbol} · 유동성 기준 미달 "
+                f"({_eok(notice.observed_krw)} / 기준 {_eok(notice.threshold_krw)})")
+    if notice.code == "gap_guard":
+        return f"{notice.symbol} · 가격 변동폭 기준 초과"
+    if notice.code == "already_held":
+        return f"{notice.symbol} · 이미 보유 중이라 진입하지 않음"
+    if notice.code == "reentry_cooldown":
+        return f"{notice.symbol} · 재진입 대기시간 적용"
+    if notice.code == "capacity":
+        return _optional_symbol_notice(notice, "포지션 또는 자금 한도 적용")
+    if notice.code == "missing_context":
+        return f"{notice.symbol} · 진입 판단 자료 부족"
+    if notice.code == "missing_price":
+        return f"{notice.symbol} · 가격 정보 확인 불가"
+    if notice.code == "requote_fallback":
+        return "최신 시세 재조회 실패 · 기존 시세 사용"
+    if notice.code == "quote_unstable":
+        return "보유 포지션 시세 조회 불안정"
+    if notice.code == "order_attention":
+        return "주문 또는 체결 상태 확인 필요"
+    if notice.code == "unknown":
+        return "일부 거래 상태 확인 필요"
+    raise ValueError("digest trade notice renderer is missing a supported code")
+
+
+def _optional_symbol_notice(notice: DigestTradeNotice, message: str) -> str:
+    return f"{notice.symbol} · {message}" if notice.symbol else message
+
+
+def _eok(value: int | None) -> str:
+    if type(value) is not int:
+        raise ValueError("liquidity notice amount must be int")
+    amount = (Decimal(value) / Decimal(100_000_000)).quantize(
+        Decimal("0.01"), rounding=ROUND_HALF_UP)
+    return f"{format(amount, 'f').rstrip('0').rstrip('.')}억"
 
 
 def _render_account(digest: Digest) -> str:
@@ -486,7 +626,17 @@ def _money(value: object, *, confidence: object = None) -> str:
 
 def _section_payload(section: DigestSection) -> dict[str, object]:
     return {"facts": dict(section.facts), "as_of": _iso(section.as_of),
-            "failed_fields": list(section.failed_fields)}
+            "failed_fields": list(section.failed_fields),
+            "notices": [
+                {
+                    "code": notice.code,
+                    "symbol": notice.symbol,
+                    "observed_krw": notice.observed_krw,
+                    "threshold_krw": notice.threshold_krw,
+                }
+                for notice in section.notices
+            ],
+            "notice_count": section.notice_count}
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -513,11 +663,41 @@ def render_retained_digest(payload: Mapping[str, object]) -> str:
 def _retained_section(payload: Mapping[str, object], name: str) -> DigestSection:
     section = _required_object(payload, name)
     facts = _required_object(section, "facts")
+    has_notices = "notices" in section
+    has_notice_count = "notice_count" in section
+    if has_notices != has_notice_count:
+        raise ValueError("retained digest notices fields must appear together")
+    if not has_notices:
+        notices: tuple[DigestTradeNotice, ...] = ()
+        notice_count = 0
+    else:
+        notices = _retained_notices(section)
+        notice_count = _required_value(section, "notice_count")
     return DigestSection(
         facts=dict(facts),
         as_of=_optional_datetime(section, "as_of"),
         failed_fields=_string_tuple(section, "failed_fields"),
+        notices=notices,
+        notice_count=notice_count,
     )
+
+
+def _retained_notices(section: Mapping[str, object]) -> tuple[DigestTradeNotice, ...]:
+    value = _required_value(section, "notices")
+    if not isinstance(value, list):
+        raise ValueError("retained digest notices must be a list")
+    required_keys = {"code", "symbol", "observed_krw", "threshold_krw"}
+    notices: list[DigestTradeNotice] = []
+    for item in value:
+        if not isinstance(item, Mapping) or set(item) != required_keys:
+            raise ValueError("retained digest notice must have the safe schema")
+        notices.append(DigestTradeNotice(
+            code=item["code"],
+            symbol=item["symbol"],
+            observed_krw=item["observed_krw"],
+            threshold_krw=item["threshold_krw"],
+        ))
+    return tuple(notices)
 
 
 def _retained_account(payload: Mapping[str, object]) -> DigestAccount:

@@ -147,9 +147,9 @@ def _digest_payload():
     return {
         "version": 1, "trading_day": "2026-07-24", "run_environment": "mock",
         "pipeline": {"facts": {"collection_status": "done"}, "as_of": None,
-                     "failed_fields": []},
+                     "failed_fields": [], "notices": [], "notice_count": 0},
         "trading": {"facts": {"order_count": 1}, "as_of": None,
-                    "failed_fields": []},
+                    "failed_fields": [], "notices": [], "notice_count": 0},
         "account": {
             "available_deposit": None, "total_eval": None, "total_profit": None,
             "realized_pnl": None, "realized_pnl_confidence": "unknown",
