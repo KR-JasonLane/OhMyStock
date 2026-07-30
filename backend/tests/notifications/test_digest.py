@@ -181,6 +181,69 @@ def test_run_read_model은_실제_run테이블을_허용목록_요약으로_변�
     assert trading.failed_fields == ("trade_runs",)
 
 
+def test_run_read_model은_같은거래일_환경경고만_순서대로정규화하고원문을노출하지않는다(
+        tmp_path):
+    """다른 환경·날짜 경고나 원문이 다이제스트에 섞이면 운영 판단과 비밀 경계가 깨진다."""
+    now = kst(2026, 7, 29, 16, 10)
+    trading_day = date(2026, 7, 29)
+    engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'trade-notices.db'}")
+    Base.metadata.create_all(engine)
+    secret = "unrecognized TOKEN_RAW_SECRET"
+    with __import__("sqlalchemy").orm.Session(engine) as session:
+        session.add_all((
+            TradeRunRow(
+                started_at=utc(kst(2026, 7, 29, 9)),
+                finished_at=utc(kst(2026, 7, 29, 9, 1)),
+                status="succeeded", config="{}", run_environment="mock",
+                stopped_by_kill_switch=False, kill_switch_mode=None,
+                warnings="no analysis result yet — will retry within entry window",
+                failure_reason=None),
+            TradeRunRow(
+                started_at=utc(kst(2026, 7, 29, 9, 2)),
+                finished_at=utc(kst(2026, 7, 29, 9, 3)),
+                status="succeeded", config="{}", run_environment="mock",
+                stopped_by_kill_switch=False, kill_switch_mode=None,
+                warnings=("003960: entry dropped — liquidity: avg value "
+                          "252,557,535 < 1,000,000,000\n" + secret),
+                failure_reason=None),
+            TradeRunRow(
+                started_at=utc(kst(2026, 7, 29, 9, 4)),
+                finished_at=utc(kst(2026, 7, 29, 9, 5)),
+                status="succeeded", config="{}", run_environment="real",
+                stopped_by_kill_switch=False, kill_switch_mode=None,
+                warnings="005930: entry dropped — already held (§6-3.3)",
+                failure_reason=None),
+            TradeRunRow(
+                started_at=utc(kst(2026, 7, 28, 9)),
+                finished_at=utc(kst(2026, 7, 28, 9, 1)),
+                status="succeeded", config="{}", run_environment="mock",
+                stopped_by_kill_switch=False, kill_switch_mode=None,
+                warnings="005930: entry dropped — already held (§6-3.3)",
+                failure_reason=None),
+        ))
+        session.commit()
+
+    trading = DigestRunStore(engine, "mock", now=lambda: now).trading_summary(
+        trading_day)
+    digest = Digest(
+        trading_day, "mock", DigestSection({}, now), trading,
+        DigestAccount(
+            available_deposit=None, total_eval=None, total_profit=None,
+            realized_pnl=None, realized_pnl_confidence="unknown",
+            source="unavailable", failed_fields=("account_snapshot",),
+            as_of=None, trading_day=None))
+
+    assert trading.notices == (
+        DigestTradeNotice("analysis_wait"),
+        DigestTradeNotice("liquidity", "003960", 252_557_535, 1_000_000_000),
+        DigestTradeNotice("unknown"),
+    )
+    assert trading.notice_count == 3
+    assert "005930" not in digest.body
+    assert secret not in digest.body
+    assert secret not in repr(digest.payload)
+
+
 def test_digest_section은_민감키와_과도한본문값을_거부한다():
     with pytest.raises(ValueError, match="sensitive"):
         DigestSection({"broker_token": "secret"}, kst(2026, 7, 24, 16, 10))

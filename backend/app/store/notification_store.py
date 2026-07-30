@@ -11,11 +11,13 @@ from sqlalchemy import Engine, and_, case, func, or_, select, update
 from sqlalchemy.orm import aliased
 from sqlalchemy.orm import sessionmaker
 
-from app.core.market_calendar import KST, is_trading_day
+from app.core.market_calendar import (KST, has_authoritative_holiday_coverage,
+                                      is_trading_day)
 from app.domain.notifications.analysis_summary import (AnalysisVerdictSummary,
                                                         MorningAnalysisSummary)
 from app.domain.notifications.models import NotificationPriority, OperationalEvent
 from app.domain.notifications.digest import DigestSection
+from app.store.digest_trade_notices import collect_trade_notices
 from app.store.kst_time import as_aware_utc, coarse_utc_bounds, within_kst_day
 from app.store.models import (AnalysisRunRow, AnalysisVerdictRow, CollectionRunRow,
                               InstrumentRow,
@@ -238,6 +240,7 @@ class DigestRunStore:
                     AnalysisVerdictRow.run_id == analysis.id,
                     AnalysisVerdictRow.picked.is_(True))) or 0
         reference_day = score.reference_date if score is not None else None
+        expected_reference_day = _previous_trading_day(trading_day)
         collection = (self._latest_started(CollectionRunRow, reference_day)
                       if reference_day is not None else None)
         facts = {
@@ -251,6 +254,10 @@ class DigestRunStore:
             "analysis_status": analysis.status if analysis else "unavailable",
             "analysis_score_reference_day": (reference_day.isoformat()
                                                if reference_day else None),
+            "analysis_reference_expected": (
+                reference_day is not None
+                and expected_reference_day is not None
+                and reference_day == expected_reference_day),
             "pick_count": pick_count if analysis else None,
             "market_regime": analysis.regime if analysis else None,
         }
@@ -263,6 +270,9 @@ class DigestRunStore:
     def trading_summary(self, trading_day: date) -> DigestSection:
         runs = self._started_on(TradeRunRow, trading_day,
                                 TradeRunRow.run_environment == self._run_environment)
+        runs.sort(key=lambda row: (row.started_at, row.id))
+        notices, notice_count = collect_trade_notices(
+            tuple(run.warnings for run in runs))
         run_ids = [row.id for row in runs]
         with self._sessions() as session:
             if run_ids:
@@ -310,11 +320,13 @@ class DigestRunStore:
             "scheduler_gave_up_count": gave_up_count,
             "scheduler_dead_count": scheduler_dead_count,
             "dead_letter_count": dead_letter_count,
-        }, self._now(), ("trade_runs",) if not runs else ())
+        }, self._now(), ("trade_runs",) if not runs else (),
+           notices=notices, notice_count=notice_count)
 
     def _latest_started(self, model, trading_day: date, *, session=None):
         rows = self._started_on(model, trading_day, session=session)
-        return max(rows, key=lambda row: row.started_at, default=None)
+        return max(
+            rows, key=lambda row: (row.started_at, row.id), default=None)
 
     def _started_on(self, model, trading_day: date, *conditions, session=None):
         lo, hi = coarse_utc_bounds(trading_day)
@@ -327,6 +339,24 @@ class DigestRunStore:
         finally:
             if own_session:
                 session.close()
+
+
+def _previous_trading_day(trading_day: date) -> date | None:
+    """한국 거래일 캘린더로 strictly-before 기준일을 구한다.
+
+    캘린더가 비정상적으로 긴 휴장을 반환하면 분석 지연 복구 표시는 거짓으로
+    fail-closed 한다.
+    """
+    if not has_authoritative_holiday_coverage(trading_day.year):
+        return None
+    candidate = trading_day - timedelta(days=1)
+    for _ in range(31):
+        if not has_authoritative_holiday_coverage(candidate.year):
+            return None
+        if is_trading_day(candidate):
+            return candidate
+        candidate -= timedelta(days=1)
+    return None
 
 
 class NotificationStore:

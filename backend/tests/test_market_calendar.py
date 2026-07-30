@@ -1,6 +1,7 @@
 from datetime import date, datetime
 
 from app.core.market_calendar import (KST, held_business_days, is_market_hours,
+                                      has_authoritative_holiday_coverage,
                                       is_trading_day, previous_weekday,
                                       scoring_reference_date)
 
@@ -90,6 +91,11 @@ def test_is_trading_day_테이블_없는_연도는_평일_근사():
     # 2099는 테이블에 없음 → 평일이면 거래일로 폴백
     assert is_trading_day(date(2099, 1, 5)) is True   # 평일(월)
     assert is_trading_day(date(2099, 1, 3)) is False  # 토요일
+
+
+def test_휴장일_권위범위는_지원연도만_공개한다():
+    assert has_authoritative_holiday_coverage(2026) is True
+    assert has_authoritative_holiday_coverage(2099) is False
 
 
 def test_is_trading_day_테이블_없는_연도는_경고_로그(caplog):

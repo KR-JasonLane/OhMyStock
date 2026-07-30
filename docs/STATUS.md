@@ -4,12 +4,38 @@
 > 새 세션에서 재개할 때 이 문서를 가장 먼저 읽으세요. 매 작업 세션이 끝날 때마다
 > 이 문서를 갱신합니다(핸드오프 문서).
 
-- **최종 수정:** 2026-07-28
+- **최종 수정:** 2026-07-29
 - **프로젝트:** OhMyStock — 한국 주식 자동매매 시스템
 
 ---
 
 ## ▶ 여기서 재개 (다음 액션)
+
+**읽기 쉬운 Telegram 다이제스트 거래 경고 Task 2 완료:** `trade_runs.warnings`
+원문을 외부로 전달하지 않는 store 정규화 allowlist와 다이제스트 read model을
+구현했다. 같은 거래일·실행환경의 경고만 시작 시각·ID 순서로 읽어 중복 제거한
+최대 5개 안전 notice와 전체 고유 개수를 만들며, 알 수 없는 경고는 원문 없이
+한 건의 generic notice로만 표시한다. pipeline의
+`analysis_reference_expected`는 한국 거래 캘린더의 직전 거래일과
+`analysis_score_reference_day`의 정확 일치일 때만 참이며, 누락·불일치·캘린더
+손상은 거짓으로 fail-closed 한다. SQLite 합성 E2E는 다른 환경·다른 날짜 격리와
+payload·본문의 원문 비노출을 확인했다. 관련 회귀 `219 passed`, 전체 비라이브
+`1469 passed, 11 deselected`(기존 Starlette warning 1건), compileall을
+확인했다. 실제 Telegram·키움 API·주문·분석 재실행·운영 DB는 호출하지 않았다.
+패널 Fix round 1에서는 unknown이 늦게 발생해도 5개 표시 안에 반드시 남도록
+하고, 실제 거래 producer 경고 매핑·정규식 fullmatch·collector 입력 상한·
+코드 단위 중복 제거를 보강했다. 휴장일 표 미등록 연도는 분석 기준일 일치를
+거짓으로 처리하고 최신 analysis 동률은 `(started_at, id)`로 결정한다. 수정 뒤
+Task 2 관련 회귀는 `248 passed`, 캘린더 포함 회귀는 `274 passed`다.
+Fix round 2에서는 확정 거래정지를 `quote_unstable`로 축소하지 않고 unknown으로
+격리하고, 추가 order producer를 allowlist에 연결했다. quote/order 표시는 code
+한 건으로 합치되 종목별 DTO 사건은 `notice_count`에 각각 남긴다. strict
+캘린더는 거래일 자체와 이전 후보 양쪽 연도 coverage를 요구한다. 수정 뒤
+Task 2 관련 회귀는 `255 passed`, 캘린더 포함 회귀는 `281 passed`다.
+
+**다음 체크포인트:** 사용자 승인과 전체 구현 리뷰 뒤 다음 정상 16:10 모의
+다이제스트 및 `/digest`를 각각 한 번씩 읽기 전용으로 수용한다. 경고를 만들기
+위해 분석·주문·제어 명령을 수동 실행하지 않는다.
 
 **읽기 쉬운 Telegram 장 마감 다이제스트 구현 완료:** 승인 설계
 `docs/specs/2026-07-28-readable-telegram-digest-design.md`와 구현 계획

@@ -58,6 +58,11 @@ def _holidays_for(year: int) -> frozenset[date] | None:
     return _KRX_HOLIDAYS.get(year)
 
 
+def has_authoritative_holiday_coverage(year: int) -> bool:
+    """정적 KRX 휴장일 표가 등록된 연도인지 읽기 전용으로 공개한다."""
+    return type(year) is int and year in _KRX_HOLIDAYS
+
+
 def is_trading_day(d: date) -> bool:
     """거래일 여부 = 평일 and 공휴일 아님. 테이블에 없는 연도는 평일만 판정(폴백)
     하되 연도별 1회 경고 로그를 남긴다(갱신 누락 감지 — 실주문 안전장치)."""

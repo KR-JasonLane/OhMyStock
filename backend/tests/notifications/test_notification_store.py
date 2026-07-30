@@ -1,6 +1,8 @@
 import json
 from datetime import date, datetime, timedelta, timezone
 
+import app.store.notification_store as notification_store_module
+import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
 
@@ -10,7 +12,7 @@ from app.store.models import (AnalysisRunRow, AnalysisVerdictRow, Base,
                               InstrumentRow, NotificationDeliveryRow,
                               NotificationOutboxRow, ScoreRunRow)
 from app.store.notification_store import (AnalysisSummaryRunStore, DigestReportStore,
-                                          NotificationStore)
+                                          DigestRunStore, NotificationStore)
 
 
 KST = __import__("zoneinfo").ZoneInfo("Asia/Seoul")
@@ -226,6 +228,101 @@ def test_latest_analysis는_run_id가아닌_가장늦은_완료시각을_읽는�
 
     assert summary is not None
     assert summary.run_id == 7
+
+
+def test_pipeline은_한국거래캘린더_직전거래일과_정확히일치할때만_분석기준일을_참으로표시한다(
+        tmp_path):
+    """휴장일을 단순 전날로 계산하면 분석 지연 복구를 잘못 표시한다."""
+    now = kst(2026, 7, 29, 16, 10)
+    engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'digest-reference.db'}")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        score_id = _add_score(session, date(2026, 7, 28))
+        _add_analysis(session, 71, score_id, started_at=kst(2026, 7, 29, 8, 20))
+        session.commit()
+
+    summary = DigestRunStore(engine, "mock", now=lambda: now).pipeline_summary(
+        date(2026, 7, 29))
+
+    assert summary.facts["analysis_score_reference_day"] == "2026-07-28"
+    assert summary.facts["analysis_reference_expected"] is True
+
+
+def test_pipeline은_분석기준일이직전거래일과다르거나손상되면거짓으로표시한다(tmp_path):
+    """기준일 누락이나 불일치를 복구로 처리하면 fail-closed 계약이 깨진다."""
+    now = kst(2026, 7, 29, 16, 10)
+    engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'digest-stale-reference.db'}")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        stale_score_id = _add_score(session, date(2026, 7, 27))
+        _add_analysis(
+            session, 72, stale_score_id, started_at=kst(2026, 7, 29, 8, 20))
+        session.commit()
+
+    summary = DigestRunStore(engine, "mock", now=lambda: now).pipeline_summary(
+        date(2026, 7, 29))
+
+    assert summary.facts["analysis_reference_expected"] is False
+
+
+def test_pipeline은_거래캘린더가직전거래일을판정하지못하면_분석기준일을거짓으로표시한다(
+        tmp_path, monkeypatch):
+    """캘린더 손상에서 None == None을 정상 기준일로 처리하면 fail-closed가 깨진다."""
+    monkeypatch.setattr(notification_store_module, "is_trading_day", lambda day: False)
+    now = kst(2026, 7, 29, 16, 10)
+    engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'digest-calendar-failure.db'}")
+    Base.metadata.create_all(engine)
+
+    summary = DigestRunStore(engine, "mock", now=lambda: now).pipeline_summary(
+        date(2026, 7, 29))
+
+    assert summary.facts["analysis_reference_expected"] is False
+
+
+def test_pipeline은_휴장일표가미등록된연도면_평일기준일도거짓으로표시한다(tmp_path):
+    now = kst(2099, 1, 5, 16, 10)
+    engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'unknown-calendar-year.db'}")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        score_id = _add_score(session, date(2099, 1, 2))
+        _add_analysis(session, 73, score_id, started_at=kst(2099, 1, 5, 8, 20))
+        session.commit()
+
+    summary = DigestRunStore(engine, "mock", now=lambda: now).pipeline_summary(
+        date(2099, 1, 5))
+
+    assert summary.facts["analysis_score_reference_day"] == "2099-01-02"
+    assert summary.facts["analysis_reference_expected"] is False
+
+
+def test_pipeline은_같은시각analysis중_id가큰run을최신으로선택한다(tmp_path):
+    now = kst(2026, 7, 29, 16, 10)
+    engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'analysis-tie-break.db'}")
+    Base.metadata.create_all(engine)
+    started_at = kst(2026, 7, 29, 8, 20)
+    with Session(engine) as session:
+        expected_score_id = _add_score(session, date(2026, 7, 28))
+        stale_score_id = _add_score(session, date(2026, 7, 27))
+        _add_analysis(session, 74, expected_score_id, started_at=started_at)
+        _add_analysis(session, 75, stale_score_id, started_at=started_at)
+        session.commit()
+
+    summary = DigestRunStore(engine, "mock", now=lambda: now).pipeline_summary(
+        date(2026, 7, 29))
+
+    assert summary.facts["analysis_score_reference_day"] == "2026-07-27"
+    assert summary.facts["analysis_reference_expected"] is False
+
+
+@pytest.mark.parametrize(
+    "trading_day",
+    [
+        date(2026, 1, 1),  # 지원 연도에서 미지원 2025 후보로 넘어가는 경계
+        date(2027, 1, 1),  # 미지원 연도에서 지원 2026 후보를 보게 되는 경계
+    ],
+)
+def test_strict직전거래일은_연도경계한쪽이라도coverage가없으면_none이다(trading_day):
+    assert notification_store_module._previous_trading_day(trading_day) is None
 
 
 def test_latest_retained_digest는_env와_TTL과본문을_지키고_읽기만한다(tmp_path):
